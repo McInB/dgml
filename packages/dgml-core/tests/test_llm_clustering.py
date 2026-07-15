@@ -169,7 +169,9 @@ def test_fresh_partition_into_new_clusters(workspace: Workspace) -> None:
     kwargs = completion.call_args.kwargs
     assert kwargs["model"] == DEFAULT_TEST_MODEL
     assert kwargs["tool_choice"] == "required"
-    assert kwargs["temperature"] == 0.0  # greedy decoding for reproducible partitions
+    # Gemini 3+ drops temperature: the param is deprecated and `temperature < 1.0`
+    # degrades the model, so the provider default (1.0) is used instead.
+    assert "temperature" not in kwargs
     assert [t["function"]["name"] for t in kwargs["tools"]] == ["group_documents"]
 
 

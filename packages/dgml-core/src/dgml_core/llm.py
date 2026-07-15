@@ -92,6 +92,17 @@ def is_anthropic_model(model: str) -> bool:
     return any(re.search(p, m) for p in ANTHROPIC_MODEL_PATTERNS)
 
 
+def is_gemini3_or_newer(model: str) -> bool:
+    """True for Gemini 3+ models (``gemini-3*``, including future 3.x).
+
+    Gemini 3+ deprecates the ``temperature``/``top_p``/``top_k`` sampling
+    params (LiteLLM logs a ``DeprecationWarning`` for any such value) and
+    degrades on ``temperature < 1.0`` (infinite loops, weaker reasoning).
+    Mirrors litellm's own ``VertexGeminiConfig._is_gemini_3_or_newer``.
+    """
+    return "gemini-3" in model.lower()
+
+
 def supports_native_pdf(model: str) -> bool:
     """Heuristic for which models accept base64 PDF documents through LiteLLM.
 
@@ -136,7 +147,9 @@ class LLMConfig:
     # ``None`` means "don't send temperature" so the provider's own default
     # applies. Schema generation deliberately relies on that — see the note
     # in :mod:`dgml.grounded` about wanting some creativity in field-name
-    # choice. Callers that want deterministic decoding pass ``0.0``.
+    # choice. Callers that want deterministic decoding pass ``0.0``. Note
+    # that Anthropic- and Gemini-3+-routed models drop temperature regardless
+    # of what a caller sets (see :func:`_build_completion_kwargs`).
     temperature: float | None = None
     max_tokens: int | None = 16000
     max_completion_tokens: int | None = None
@@ -373,7 +386,9 @@ def _build_completion_kwargs(
     forces tool use``. All other providers and non-forced choices keep
     ``reasoning_effort`` if the config set one. ``temperature`` is never
     sent to Anthropic-routed models — newer Claude models reject it as
-    deprecated, and older ones only accept 1 with thinking enabled.
+    deprecated, and older ones only accept 1 with thinking enabled — nor
+    to Gemini 3+ models, which deprecate it (LiteLLM logs a warning) and
+    degrade on ``temperature < 1.0``.
     """
     kwargs: dict[str, Any] = {
         "model": config.model,
@@ -382,8 +397,15 @@ def _build_completion_kwargs(
     # Anthropic: never send temperature. Newer Claude models reject it
     # outright ("`temperature` is deprecated for this model") and older ones
     # reject anything but 1 when thinking is enabled — together the provider
-    # default is the only always-safe value.
-    if config.temperature is not None and not is_anthropic_model(config.model):
+    # default is the only always-safe value. Gemini 3+: also never send it —
+    # the param is deprecated (LiteLLM logs a warning for any value) and
+    # `temperature < 1.0` degrades the model; the provider default (1.0) is
+    # what Google recommends.
+    if (
+        config.temperature is not None
+        and not is_anthropic_model(config.model)
+        and not is_gemini3_or_newer(config.model)
+    ):
         kwargs["temperature"] = config.temperature
     if config.max_tokens is not None:
         kwargs["max_tokens"] = config.max_tokens

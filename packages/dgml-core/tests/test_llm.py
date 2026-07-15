@@ -36,6 +36,32 @@ def test_litellm_debug_banner_suppressed() -> None:
     assert litellm.suppress_debug_info is True
 
 
+def test_is_gemini3_or_newer() -> None:
+    """Only ``gemini-3*`` models are flagged; 2.5 and non-Gemini are not."""
+    assert llm.is_gemini3_or_newer("gemini/gemini-3.1-flash-lite") is True
+    assert llm.is_gemini3_or_newer("gemini-3-pro-preview") is True
+    assert llm.is_gemini3_or_newer("gemini/gemini-2.5-pro") is False
+    assert llm.is_gemini3_or_newer("anthropic/claude-haiku-4-5") is False
+
+
+def test_build_completion_kwargs_drops_temperature_for_gemini3() -> None:
+    """Gemini 3+ never receives temperature (deprecated + degrades at <1.0)."""
+    kwargs = llm._build_completion_kwargs(
+        llm.LLMConfig(model="gemini/gemini-3.1-flash-lite", temperature=0.0),
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert "temperature" not in kwargs
+
+
+def test_build_completion_kwargs_keeps_temperature_for_gemini25() -> None:
+    """Regression guard: only Gemini 3+ is affected; 2.5 still gets temperature."""
+    kwargs = llm._build_completion_kwargs(
+        llm.LLMConfig(model="gemini/gemini-2.5-pro", temperature=0.0),
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert kwargs["temperature"] == 0.0
+
+
 def test_completion_with_retry_keeps_stdout_clean(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
