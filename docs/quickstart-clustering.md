@@ -129,6 +129,10 @@ otherwise). That's the `--mode auto` default; force either side with
 `--mode fresh` / `--mode incremental` (see
 [`docs/incremental-clustering.md`](incremental-clustering.md)).
 
+Not sure which regime fits your case — or need the closed-set (S4/S5)
+scenarios where every document is forced into a known category? See
+[Choosing a clustering scenario](choosing-a-clustering-scenario.md).
+
 ```bash
 dgml cluster
 ```
