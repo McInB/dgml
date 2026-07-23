@@ -28,6 +28,8 @@ import pytest
 from dgml.cli import main
 from dgml_core.storage import Workspace
 
+from .conftest import write_config
+
 
 def _ws_args(ws: Path) -> list[str]:
     return ["--workspace", str(ws)]
@@ -69,7 +71,7 @@ def test_file_add_ocr_mode_with_invalid_config_errors(
     ws = tmp_path / "ws"
     Workspace(root=ws).init()
     # Azure provider with no endpoint → OcrConfigInvalid at load time.
-    (ws / "config.json").write_text(json.dumps({"ocr": {"provider": "azure"}}), encoding="utf-8")
+    write_config(Workspace(root=ws), {"ocr": {"provider": "azure"}})
     capsys.readouterr()
 
     rc = main(_ws_args(ws) + ["file", "add", str(text_pdf), "--text-mode", "ocr"])
@@ -90,7 +92,7 @@ def test_file_add_hybrid_mode_with_invalid_config_errors(
     created."""
     ws = tmp_path / "ws"
     Workspace(root=ws).init()
-    (ws / "config.json").write_text(json.dumps({"ocr": {"provider": "azure"}}), encoding="utf-8")
+    write_config(Workspace(root=ws), {"ocr": {"provider": "azure"}})
     capsys.readouterr()
 
     rc = main(_ws_args(ws) + ["file", "add", str(text_pdf), "--text-mode", "hybrid"])

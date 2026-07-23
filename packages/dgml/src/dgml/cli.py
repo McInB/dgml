@@ -37,7 +37,17 @@ from dgml_core.docsets import DocSetStore
 from dgml_core.errors import DgmlError, WorkspaceNotInitialized, short_error_message
 from dgml_core.files import AddFileResult, ConflictPolicy, FileStore
 from dgml_core.models import DocSet
-from dgml_core.storage import Workspace, read_json
+from dgml_core.storage import (
+    PROVIDER_ALIASES,
+    PROVIDER_MODELS,
+    Workspace,
+    canonical_provider,
+    detect_provider,
+    detected_api_keys,
+    read_json,
+    user_config_path,
+    write_user_config,
+)
 from dgml_core.text_extraction import TextMode
 
 if TYPE_CHECKING:
@@ -205,16 +215,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "init",
         parents=[common],
         help=(
-            "Create the shared local_config.json (config only; run once). Edit it, "
-            "then `dgml workspace create`."
+            "Write the user-level config (~/.config/dgml/config.toml) with a [models] "
+            "block (config only; run once per machine). Then `dgml workspace create`."
+        ),
+    )
+    init_p.add_argument(
+        "--provider",
+        choices=sorted(set(PROVIDER_MODELS) | set(PROVIDER_ALIASES)),
+        default=None,
+        help=(
+            "Force a provider's default [models] block. Omit to auto-detect from the "
+            "API-key env vars that are set (ANTHROPIC_API_KEY, GEMINI_API_KEY, "
+            "OPENAI_API_KEY, AZURE_OPENAI_API_KEY)."
         ),
     )
     init_p.add_argument(
         "--refresh",
         action="store_true",
         help=(
-            "Overwrite local_config.json from the bundled default template (pull the "
-            "latest baseline / new knobs). Back up local_config.json first if needed."
+            "Overwrite an existing config.toml (backing it up to config.toml.bak first). "
+            "Without --refresh, init never clobbers an existing file."
         ),
     )
 
@@ -225,8 +245,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "create",
         parents=[common],
         help=(
-            "Create a workspace (docsets/ + files/) and seed its config.json from the "
-            "shared local_config.json (auto-created if `dgml init` was not run first)."
+            "Create a workspace (docsets/ + files/ + workspace.json). If the user-level "
+            "~/.config/dgml/config.toml is absent it is auto-generated (as `dgml init`)."
         ),
     )
     ws_create.add_argument(
@@ -257,15 +277,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "Defaults to the workspace directory name."
         ),
     )
-    ws_create.add_argument(
-        "--force",
-        action="store_true",
-        help=(
-            "Overwrite an existing config.json with the current local_config.json "
-            "(re-sync edited shared config into this workspace)."
-        ),
-    )
-
     sub.add_parser("status", parents=[common], help="Show workspace summary.")
 
     chk = sub.add_parser(
@@ -296,7 +307,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Clustering configuration for this run. Either a bundled preset "
         "name (small | light | medium | heavy) or a path to a standalone config "
-        "JSON (same shape as the 'clustering' section of <workspace>/config.json "
+        "JSON (same shape as the 'clustering' section of <workspace>/config.toml "
         "— e.g. encoder_text, encoder_image, fusion, scenario). Replaces the "
         "workspace config's clustering section for this run. Defaults to the "
         "workspace config, or the bundled light preset when none is set.",
@@ -435,7 +446,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "How to extract text. 'digital' uses pdfminer.six on the PDF "
             "(default). 'ocr' uses the cloud provider configured in "
-            "<workspace>/config.json (requires `pip install dgml[aws]` or "
+            "<workspace>/config.toml (requires `pip install dgml[aws]` or "
             "`pip install dgml[azure]`). 'hybrid' runs digital and OCR and "
             "merges them by grouping overlapping words into regions: "
             "digital wins when the two sides agree on content, OCR wins "
@@ -452,7 +463,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "After adding, use the configured vision LLM to assign the file "
             "to a DocSet — assigning to an existing DocSet if one fits, "
             "otherwise creating a new one. Requires a 'classification' section "
-            "in <workspace>/config.json; a missing or invalid config is a hard "
+            "in <workspace>/config.toml; a missing or invalid config is a hard "
             "error (exit 1). Failures of the classification call itself (LLM "
             "error, auth) are reported in the 'classification' field of the "
             "response payload without aborting the file add."
@@ -952,7 +963,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         ws = Workspace.resolve(args.workspace)
-        # `init` manages only the peer local_config.json; `workspace create`
+        # `init` manages only the user-level config; `workspace create`
         # is what actually builds the workspace — so both run before the
         # workspace exists.
         if args.command not in ("init", "workspace") and not ws.is_initialized():
@@ -975,87 +986,168 @@ def main(argv: list[str] | None = None) -> int:
         return _emit_error("INTERNAL_ERROR", short_error_message(exc), fmt)
 
 
+# Tier → the tasks it drives. Shown as inline comments in `dgml init`'s stderr
+# report ONLY — never written into the generated config.toml, since the mapping
+# may change without a config rewrite.
+_TIER_CAPABILITIES = {
+    "light": "classification, style",
+    "standard": "transcription, text extraction",
+    "advanced": "labeling, value extraction",
+    "expert": "schema generation",
+}
+
+# Provider → the API-key env var(s) it needs at runtime (for the advisory shown
+# when a provider is forced with --provider).
+_PROVIDER_KEYS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "openai": "OPENAI_API_KEY (or AZURE_OPENAI_API_KEY)",
+    "mixed": "ANTHROPIC_API_KEY and GEMINI_API_KEY",
+}
+
+
+def _init_models_report(provider: str) -> str:
+    """The ``[models]`` block for *provider* with tier→capability comments —
+    for the stderr advisory only (never written into the file)."""
+    tiers = PROVIDER_MODELS[provider]
+    width = max(len(t) for t in _TIER_CAPABILITIES)
+    lines = ["  [models]"]
+    for tier in ("light", "standard", "advanced", "expert"):
+        lines.append(f'  {tier.ljust(width)} = "{tiers[tier]}"    # {_TIER_CAPABILITIES[tier]}')
+    return "\n".join(lines)
+
+
 def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
-    """Manage the shared peer ``local_config.json`` (config only).
+    """Write the user-level ``~/.config/dgml/config.toml`` with a ``[models]``
+    block (config only; does not create a workspace).
 
-    Does not create ``docsets/``, ``files/``, or any workspace ``config.json``
-    — that is ``dgml workspace create``. Resolves the workspace only to locate
-    the peer file at ``<workspace-parent>/local_config.json``.
+    The provider comes from ``--provider`` or, absent that, auto-detection from
+    the API-key env vars that are set. Overwrites an existing file only with
+    ``--refresh`` (backing it up to ``config.toml.bak``); otherwise a present
+    file is left untouched.
     """
-    path = ws.local_config_path
+    environ = dict(os.environ)
+    detected = detected_api_keys(environ)
+    provider = args.provider if args.provider is not None else detect_provider(environ)
+    canonical = canonical_provider(provider) if provider is not None else None
+    path = user_config_path()
 
-    if args.refresh:
-        backup = ws.refresh_local_config()
-        sys.stderr.write(f"[dgml init] refreshed {path} from the bundled default template.\n")
-        if backup is not None:
-            sys.stderr.write(f"[dgml init] previous config backed up to {backup}.\n")
-        _emit(
-            {"local_config_path": str(path), "local_config_created": False, "refreshed": True},
-            fmt,
+    written, backup = write_user_config(provider, overwrite=args.refresh)
+
+    payload: dict[str, Any] = {
+        "config_path": str(path),
+        "config_created": written,
+        "provider": canonical,
+        "detected_keys": detected,
+        "refreshed": bool(args.refresh and written),
+    }
+
+    if not written:
+        payload["next_action"] = (
+            f"{path} already exists — pass 'dgml init --refresh' to overwrite it "
+            "(backs up to config.toml.bak), or edit it directly"
         )
+        sys.stderr.write(
+            f"[dgml init] {path} already exists; not overwritten. Pass --refresh to regenerate.\n"
+        )
+        _emit(payload, fmt)
         return 0
 
-    created = ws.ensure_local_config()
-    payload: dict[str, Any] = {
-        "local_config_path": str(path),
-        "local_config_created": created,
-        "refreshed": False,
-    }
-    if created:
-        payload["next_action"] = f"edit {path} then run dgml workspace create"
+    if backup is not None:
+        sys.stderr.write(f"[dgml init] previous config backed up to {backup}.\n")
+
+    if canonical is None:
+        checked = ", ".join(
+            ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY")
+        )
+        payload["next_action"] = (
+            "set an API key, then rerun: dgml init --provider <anthropic|google|openai|mixed>"
+        )
         sys.stderr.write(
-            f"[dgml init] created {path}. Review/edit the models and OCR endpoint, "
-            "then run `dgml workspace create`.\n"
+            f"[dgml init] no API keys detected (checked {checked}).\n"
+            f"[dgml init] wrote {path} with a commented-out [models] placeholder.\n"
+        )
+        _emit(payload, fmt)
+        return 0
+
+    payload["next_action"] = "dgml workspace create --organization <org>"
+    if args.provider is not None:
+        sys.stderr.write(
+            f"[dgml init] wrote {path} (provider: {canonical}).\n"
+            f"{_init_models_report(canonical)}\n"
+            f"[dgml init] make sure {_PROVIDER_KEYS[canonical]} is set before running "
+            "dgml commands.\n"
+        )
+    else:
+        keys_line = "  ".join(f"[x] {k}" for k in detected) if detected else "(none)"
+        sys.stderr.write(
+            f"[dgml init] detected API keys: {keys_line}\n"
+            f"[dgml init] wrote {path} (provider: {canonical}).\n"
+            f"{_init_models_report(canonical)}\n"
+            "[dgml init] override any task with its own field (e.g. [generation] "
+            'label_model = "..."); switch providers with '
+            "dgml init --provider <anthropic|google|openai|mixed>.\n"
         )
     _emit(payload, fmt)
     return 0
 
 
 def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
-    """Create a workspace from the shared ``local_config.json``."""
+    """Create a workspace (``docsets/``, ``files/``, ``workspace.json``).
+
+    Config is user-level now, not per-workspace: this command does not copy or
+    create a ``<workspace>/config.toml``. As a one-step convenience for a
+    first-time user, if the user-level ``~/.config/dgml/config.toml`` is absent
+    it is generated here (auto-detecting the provider), exactly as ``dgml init``
+    would — so ``workspace create`` still works without a separate ``init``.
+    """
     sub = args.workspace_command
     if sub == "create":
         # A positional path overrides the globally-resolved root, so
         # `dgml workspace create ./ws …` reads without doubling --workspace.
         if args.path is not None:
             ws = Workspace.resolve(args.path)
-        # `create` does not require a prior `init`: seed the shared
-        # local_config.json from the bundled template if it is absent, so a
-        # first-time user can create a workspace in one step.
-        local_config_created = ws.ensure_local_config()
-        existed = ws.config_path.exists()
-        written = ws.write_config_from_local(overwrite=args.force)
+
+        upath = user_config_path()
+        config_created = False
+        provider: str | None = None
+        if not upath.exists():
+            provider = detect_provider(dict(os.environ))
+            config_created, _ = write_user_config(provider, overwrite=False)
+
         ws.init()
         name = args.name or ws.root.name
         ws.write_meta(name=name, organization=args.organization)
-        if existed and written:
-            sys.stderr.write(
-                f"[dgml workspace create] overwrote {ws.config_path} from {ws.local_config_path}.\n"
-            )
+
         payload: dict[str, Any] = {
             "workspace": str(ws.root),
             "name": name,
             "organization": args.organization,
             "initialized": True,
-            "config_path": str(ws.config_path),
-            "config_written": written,
-            "local_config_path": str(ws.local_config_path),
-            "local_config_created": local_config_created,
+            "config_path": str(upath),
+            "config_created": config_created,
         }
-        if local_config_created:
-            # We just seeded local_config.json (and copied it to config.json)
-            # from the template's placeholder models/OCR. Tell the caller how to
-            # make it real.
-            payload["next_action"] = (
-                f"edit {ws.config_path} to set the models and OCR endpoint "
-                f"(or edit the shared {ws.local_config_path} and re-run "
-                "'dgml workspace create --force' to re-sync it)"
-            )
-            sys.stderr.write(
-                f"[dgml workspace create] seeded {ws.local_config_path} from the bundled "
-                f"template and copied it to {ws.config_path}. Edit the models and OCR "
-                "endpoint before running LLM-backed commands.\n"
-            )
+        if config_created:
+            if provider is None:
+                payload["next_action"] = (
+                    f"no API key detected — set one and run 'dgml init --provider "
+                    f"<anthropic|google|openai|mixed>' to fill in {upath}"
+                )
+                sys.stderr.write(
+                    f"[dgml workspace create] wrote {upath} with a commented-out [models] "
+                    "placeholder (no API key detected). Set a key and run 'dgml init "
+                    "--provider ...' before running LLM-backed commands.\n"
+                )
+            else:
+                payload["next_action"] = (
+                    f"review the [models] block in {upath}; ensure the provider's API key "
+                    "env var is set, then add files and run docset generate/ground"
+                )
+                sys.stderr.write(
+                    f"[dgml workspace create] wrote user config {upath} "
+                    f"(auto-detected provider: {canonical_provider(provider)}). Review its "
+                    "[models] block before running LLM-backed commands.\n"
+                )
         _emit(payload, fmt)
         return 0
 
@@ -1931,6 +2023,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         convert_batch,
         load_generation_config,
         resolve_generation_api_key,
+        resolve_generation_label_api_key,
         validate_generation_models,
     )
     from dgml_core.generation import coverage as cov_mod
@@ -1975,15 +2068,17 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     except DgmlError as exc:
         return _emit_error(exc.code, str(exc), fmt)
 
-    # Resolve the LLM models from the workspace 'generation' config — there are
-    # no --model flags. load_generation_config raises GENERATION_CONFIG_MISSING
-    # when the section is absent; both 'model' and 'label_model'
-    # are required, so every model is a deliberate, visible choice.
+    # Resolve the LLM models from the merged 'generation' config — there are no
+    # --model flags. Each model (transcription, labeling) resolves from its
+    # per-task field or its [models] tier, with its own credentials (the two may
+    # name different providers), so every model is a deliberate, visible choice.
     gen_cfg = load_generation_config(ws)
     gen_model = gen_cfg.model
     label_model = gen_cfg.label_model
     gen_api_key = resolve_generation_api_key(gen_cfg)
     gen_api_base = gen_cfg.api_base
+    label_api_key = resolve_generation_label_api_key(gen_cfg)
+    label_api_base = gen_cfg.label_api_base
 
     # Pre-flight — fail fast BEFORE any transcription spend on the two model
     # misconfigurations detectable offline: a malformed model string, or a
@@ -1992,15 +2087,15 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     # per file as label_error (see _on_label_error below). Mirrors the style-
     # config pre-flight above.
     try:
-        validate_generation_models(gen_cfg, gen_api_key)
+        validate_generation_models(gen_cfg, gen_api_key, label_api_key)
     except DgmlError as exc:
         return _emit_error(exc.code, str(exc), fmt)
 
-    # The semantic-link pass runs on the labeling model.
+    # The semantic-link pass runs on the labeling model (and its credentials).
     link_config = llm.LLMConfig(
         model=label_model,
-        api_key=gen_api_key,
-        api_base=gen_api_base,
+        api_key=label_api_key,
+        api_base=label_api_base,
         workspace=ws,
         debug=args.debug,
         operation=OPERATION_LINKS,
@@ -2281,6 +2376,8 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             label_model=label_model,
             api_key=gen_api_key,
             api_base=gen_api_base,
+            label_api_key=label_api_key,
+            label_api_base=label_api_base,
             window_size=args.window_size,
             temperature=args.temperature,
             max_tokens=args.max_tokens,

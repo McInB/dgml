@@ -274,10 +274,7 @@ def test_clustering_internal_forwards_workspace_overrides(workspace: Workspace) 
     ``encoder_text.extra`` so corpus-fitted text encoders can fit."""
     _seed_file(workspace, "f1")
     _seed_page_image(workspace, "f1")
-    workspace.config_path.write_text(
-        json.dumps({"clustering": {"training": {"epochs": 7}}}),
-        encoding="utf-8",
-    )
+    _write_config(workspace, {"clustering": {"training": {"epochs": 7}}})
 
     with patch(
         "dgml_core.clustering.run_clustering_detailed",
@@ -387,10 +384,7 @@ def test_clustering_internal_incremental_respects_user_gate(workspace: Workspace
     DocSetStore(workspace).create(name="Contracts")
     _seed_file(workspace, "u1")
     _seed_page_image(workspace, "u1")
-    workspace.config_path.write_text(
-        json.dumps({"clustering": {"scenario": {"threshold_confidence": 0.5}}}),
-        encoding="utf-8",
-    )
+    _write_config(workspace, {"clustering": {"scenario": {"threshold_confidence": 0.5}}})
 
     with patch(
         "dgml_core.clustering.run_clustering_detailed",
@@ -409,7 +403,9 @@ def test_clustering_internal_incremental_respects_user_gate(workspace: Workspace
 
 
 def _write_config(workspace: Workspace, payload: dict[str, Any]) -> None:
-    workspace.config_path.write_text(json.dumps(payload), encoding="utf-8")
+    from .conftest import write_config
+
+    write_config(workspace, payload)
 
 
 def test_load_clustering_overrides_returns_empty_when_no_config(workspace: Workspace) -> None:
@@ -436,20 +432,18 @@ def test_load_clustering_overrides_reads_section(workspace: Workspace) -> None:
 
 
 def test_load_clustering_overrides_section_not_object_raises(workspace: Workspace) -> None:
-    _write_config(workspace, {"clustering": "oops"})
-    with pytest.raises(ClusteringConfigInvalid, match="must be a JSON object"):
+    from dgml_core.errors import CorruptMetadata
+
+    workspace.config_path.write_text('clustering = "oops"\n', encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_clustering_overrides(workspace)
 
 
-def test_load_clustering_overrides_corrupt_json_raises(workspace: Workspace) -> None:
-    workspace.config_path.write_text("{this is not valid json", encoding="utf-8")
-    with pytest.raises(ClusteringConfigInvalid, match="is not valid JSON"):
-        load_clustering_overrides(workspace)
+def test_load_clustering_overrides_corrupt_toml_raises(workspace: Workspace) -> None:
+    from dgml_core.errors import CorruptMetadata
 
-
-def test_load_clustering_overrides_top_level_not_object_raises(workspace: Workspace) -> None:
-    workspace.config_path.write_text("[]", encoding="utf-8")
-    with pytest.raises(ClusteringConfigInvalid, match="must contain a JSON object"):
+    workspace.config_path.write_text("{this is not valid toml", encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_clustering_overrides(workspace)
 
 

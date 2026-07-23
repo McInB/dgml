@@ -30,7 +30,7 @@ from dgml_core.errors import (
     UnsupportedFileType,
 )
 from dgml_core.files import ConflictPolicy, FileStore
-from dgml_core.storage import Workspace, write_json_atomic
+from dgml_core.storage import Workspace
 
 from .conftest import needs_gs
 
@@ -71,7 +71,9 @@ def test_convertible_source_persists_converted_pdf(
 ) -> None:
     """A convertible source is stored as-is and its converted PDF is persisted
     alongside it at ``<stem>.pdf`` (the artifact generation later reuses)."""
-    write_json_atomic(store.ws.config_path, {"conversion": {"docx": {"provider": _STUB_DOCX}}})
+    from .conftest import write_config
+
+    write_config(store.ws, {"conversion": {"docx": {"provider": _STUB_DOCX}}})
     # The PDF-only post-steps need ghostscript / pdfminer; stub them out so the
     # test isolates the conversion-persistence behavior.
     monkeypatch.setattr(FileStore, "_safe_page_count", lambda self, *a, **k: (None, None))

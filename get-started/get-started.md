@@ -98,13 +98,12 @@ uv run dgml workspace create --organization "Acme" --name "Getting Started"
 ```
 *Note: `workspace create` is idempotent and safe to re-run. It creates the
 workspace (`docsets/` + `files/`), records its identity in `workspace.json`,
-and seeds the shared `local_config.json` (a peer of the workspace) from the
-bundled template if it doesn't exist yet, copying it in as `config.json` — so
-no separate `dgml init` is needed. The response's `next_action` tells you where
-to edit the models / OCR endpoint. Run `dgml init` first only if you'd rather
-review and edit that shared config before any workspace is created; re-run
-`dgml workspace create --force` to re-sync an edited config into an existing
-workspace.*
+and — if the user-level `~/.config/dgml/config.toml` doesn't exist yet —
+generates it, auto-detecting the LLM provider from the API-key env vars that are
+set (writing a `[models]` block) — so no separate `dgml init` is needed. Run
+`dgml init` first (optionally with `--provider`) only if you'd rather choose the
+config before any workspace is created. To override models for one workspace,
+drop a `<workspace>/config.toml`; it deep-merges over the user config.*
 
 ### 1.4 Configure Models and API Keys
 Ingesting files needs no configuration, but every LLM-backed command you will
@@ -239,7 +238,16 @@ uv sync --extra clustering
 
 *(Once DGML is published to PyPI, this will become `pip install "dgml[clustering]"`.)*
 
-Additionally, auto-naming the resulting clusters requires a vision-capable LLM in the `classification` section of your `<workspace>/config.json` — you set this up in §1.4. Make sure the matching API key (e.g. `GEMINI_API_KEY`) is exported in your terminal environment.
+Additionally, auto-naming the resulting clusters uses a vision LLM — the `light`
+tier from your `[models]` block (`dgml init` set this up). To override it for
+clustering specifically, add a `[classification]` section to your config:
+
+```toml
+[classification]
+model = "gemini/gemini-2.5-flash"
+api_key_env = "GEMINI_API_KEY"
+```
+*Make sure your `GEMINI_API_KEY` (or chosen provider key) is exported in your terminal environment.*
 
 ### 2.2 Ingest the Infrastructure Funds
 First, let's ingest the large batch of Infrastructure Fund PDFs into our workspace:

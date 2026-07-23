@@ -38,16 +38,18 @@ own — they drive an external tool (see each converter below).
 
 ## Configuring a converter
 
-Converters are selected in the `conversion` section of your workspace's
-`config.json` (`<workspace>/config.json`), keyed by format family. Each
-family names a `provider` — a dotted path `"module.path:ClassName"` — plus
-any options that provider accepts.
+Converters are selected in the `[conversion]` section of your config
+(the user-level `~/.config/dgml/config.toml` or a per-workspace
+`<workspace>/config.toml`), keyed by format family. Each family names a
+`provider` — a dotted path `"module.path:ClassName"` — plus any options that
+provider accepts.
 
-```jsonc
-{ "conversion": {
-    "docx": { "provider": "translators_pdf.libreoffice:LibreOfficeConverter" },
-    "xlsx": { "provider": "translators_pdf.xlsx:XlsxIslandsConverter", "row_gap": 4 }
-}}
+```toml
+[conversion.docx]
+provider = "translators_pdf.libreoffice:LibreOfficeConverter"
+[conversion.xlsx]
+provider = "translators_pdf.xlsx:XlsxIslandsConverter"
+row_gap = 4
 ```
 
 Only families you configure are supported. A family you omit stays
@@ -66,11 +68,11 @@ must be installed and `soffice` must be on your `PATH` (or at a standard
 install location). It resolves `soffice` cross-platform and uses a
 per-process lock directory so concurrent conversions are safe.
 
-```jsonc
-{ "conversion": {
-    "docx": { "provider": "translators_pdf.libreoffice:LibreOfficeConverter" },
-    "xlsx": { "provider": "translators_pdf.libreoffice:LibreOfficeConverter" }
-} }
+```toml
+[conversion.docx]
+provider = "translators_pdf.libreoffice:LibreOfficeConverter"
+[conversion.xlsx]
+provider = "translators_pdf.libreoffice:LibreOfficeConverter"
 ```
 
 ### Aspose — `AsposeWordsConverter` / `AsposeCellsConverter`
@@ -92,17 +94,13 @@ optional `license` field at an Aspose license file to remove the watermark
 missing, the converter raises an actionable error telling you what to
 install.
 
-```jsonc
-{ "conversion": {
-    "docx": {
-      "provider": "translators_pdf.aspose:AsposeWordsConverter",
-      "license": "/path/to/Aspose.Total.lic"   // optional
-    },
-    "xlsx": {
-      "provider": "translators_pdf.aspose:AsposeCellsConverter",
-      "license": "/path/to/Aspose.Total.lic"   // optional
-    }
-} }
+```toml
+[conversion.docx]
+provider = "translators_pdf.aspose:AsposeWordsConverter"
+license = "/path/to/Aspose.Total.lic"   # optional
+[conversion.xlsx]
+provider = "translators_pdf.aspose:AsposeCellsConverter"
+license = "/path/to/Aspose.Total.lic"   # optional
 ```
 
 ### Xlsx island renderer — `translators_pdf.xlsx:XlsxIslandsConverter`
@@ -123,15 +121,12 @@ Tall islands split across pages. It is tuned for tidy tables: a very wide or
 dense sheet can produce an island too large to fit a page, which fails with a
 clear error rather than a bad PDF.
 
-```jsonc
-{ "conversion": {
-    "xlsx": {
-      "provider": "translators_pdf.xlsx:XlsxIslandsConverter",
-      "row_gap": 4,
-      "col_gap": 2,
-      "orientation": "portrait"
-    }
-} }
+```toml
+[conversion.xlsx]
+provider = "translators_pdf.xlsx:XlsxIslandsConverter"
+row_gap = 4
+col_gap = 2
+orientation = "portrait"
 ```
 
 ### Command — `translators_pdf.command:CommandConverter`
@@ -153,18 +148,14 @@ Two substitution tokens control where the output lands:
 It verifies the output PDF exists and is non-empty rather than trusting exit
 codes (LibreOffice, for one, exits 0 even on failure).
 
-```jsonc
-{ "conversion": {
-    "xlsx": {
-      "provider": "translators_pdf.command:CommandConverter",
-      "command": ["ssconvert", "{input}", "{output}"]
-    },
-    "docx": {
-      "provider": "translators_pdf.command:CommandConverter",
-      "command": ["soffice","--headless","--convert-to","pdf","--outdir","{output_dir}","{input}"],
-      "timeout": 300
-    }
-} }
+```toml
+[conversion.xlsx]
+provider = "translators_pdf.command:CommandConverter"
+command = ["ssconvert", "{input}", "{output}"]
+[conversion.docx]
+provider = "translators_pdf.command:CommandConverter"
+command = ["soffice", "--headless", "--convert-to", "pdf", "--outdir", "{output_dir}", "{input}"]
+timeout = 300
 ```
 
 ## Using your own converter
@@ -213,13 +204,15 @@ resolves your class at runtime from its dotted path.
    `"provider": "my_converters:MyConverter"`.
 4. Point the format family's `provider` at the dotted path:
 
-   ```jsonc
-   { "conversion": { "xlsx": { "provider": "my_pkg.converters:MyConverter", "some_option": 4 } } }
+   ```toml
+   [conversion.xlsx]
+   provider = "my_pkg.converters:MyConverter"
+   some_option = 4
    ```
 
 **Note on trust:** a dotted `provider` path (and a `command` argv) runs
 arbitrary code from your config, as you. This is the same trust model as a
-user-installed LibreOffice or Aspose — keep your `config.json` under your own
+user-installed LibreOffice or Aspose — keep your `config.toml` under your own
 control.
 
 ## How conversion fits the workflow
@@ -242,7 +235,7 @@ file attestation key off the stored original document, not the converted PDF.
 ## Troubleshooting
 
 - **"no converter configured for .xlsx …"** — add a `conversion.xlsx`
-  (or `.docx`) entry to `config.json` pointing at a converter. This appears
+  (or `.docx`) entry to `config.toml` pointing at a converter. This appears
   both when adding a file and when generating.
 - **"pip install translators-pdf[xlsx]"** — the island renderer's
   dependencies are missing; install the extra.

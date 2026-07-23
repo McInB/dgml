@@ -29,6 +29,8 @@ from dgml_core.style import (
 )
 from dgml_core.text_extraction import extract_text_digital
 
+from .conftest import dump_toml
+
 # ---- Pure helpers ----------------------------------------------------------
 
 
@@ -306,7 +308,7 @@ def _ws_with_config(tmp_path: Path, config: dict | None):  # type: ignore[type-a
     ws = Workspace(root=tmp_path / "ws")
     ws.init()
     if config is not None:
-        ws.config_path.write_text(json.dumps(config), encoding="utf-8")
+        ws.config_path.write_text(dump_toml(config), encoding="utf-8")
     return ws
 
 
@@ -395,7 +397,7 @@ def test_ground_honors_style_config_for_ocr(tmp_path: Path, monkeypatch) -> None
     pages_dir.mkdir(parents=True, exist_ok=True)
     (pages_dir / "page_1.png").write_bytes(b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
-        json.dumps({"style": {"model": "anthropic/claude-haiku-4-5"}}),
+        dump_toml({"style": {"model": "anthropic/claude-haiku-4-5"}}),
         encoding="utf-8",
     )
     monkeypatch.setattr(style_llm, "_request_styles", lambda c, i, s: {0: "font-weight: bold"})
@@ -463,7 +465,7 @@ def _seed_ocr_style_workspace(tmp_path: Path):  # type: ignore[no-untyped-def]
     pages_dir.mkdir(parents=True, exist_ok=True)
     (pages_dir / "page_1.png").write_bytes(b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
-        json.dumps({"style": {"model": "anthropic/claude-haiku-4-5"}}),
+        dump_toml({"style": {"model": "anthropic/claude-haiku-4-5"}}),
         encoding="utf-8",
     )
     src = tmp_path / "doc.dgml.xml"
@@ -614,7 +616,7 @@ def test_style_credential_failure_preserves_grounding(tmp_path: Path, monkeypatc
     # raises AuthError inside the style pass at grounding time.
     monkeypatch.delenv("DGML_STYLE_KEY_MISSING", raising=False)
     ws.config_path.write_text(
-        json.dumps(
+        dump_toml(
             {
                 "style": {
                     "model": "anthropic/claude-haiku-4-5",

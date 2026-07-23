@@ -42,7 +42,7 @@ Static defaults (encoder, fusion, manifold, training, …) live in
 ``clustering_config.json`` shipped alongside this module. Callers can
 override any subset of them via the ``overrides=`` parameter on
 :func:`run_clustering` (typically read from the ``clustering`` section of
-a workspace ``config.json``; see
+a workspace ``config.toml``; see
 :func:`dgml.clustering.load_clustering_overrides`). The scenario *regime*
 (``name`` / ``known_categories`` / ``n_shots``) depends on the arguments
 above and is fixed at call time, but the scenario's clustering-algorithm
@@ -177,7 +177,7 @@ def run_clustering_detailed(
 
     ``overrides`` is a partial config dict deep-merged on top of the
     bundled :data:`_CONFIG_RESOURCE` defaults — typically the
-    ``clustering`` section of a workspace ``config.json`` (loaded by
+    ``clustering`` section of a workspace ``config.toml`` (loaded by
     :func:`dgml.clustering.load_clustering_overrides`). Per-key overlay:
     a partial ``{"encoder_text": {"name": "e5"}}`` leaves every other
     section (fusion, manifold, training, …) at its bundled default.
@@ -295,7 +295,7 @@ def _build_config(
     # callers can't pin the wrong scenario for their inputs. The clustering-
     # algorithm knobs (``cluster_algorithm``, ``leiden_*``, ``reduce_*``, …)
     # come from the merged bundled-default + overrides scenario so operators can
-    # tune them via config.json / --config. Layer the dynamic regime on top so
+    # tune them via config.toml / --config. Layer the dynamic regime on top so
     # it overrides only the keys it owns and leaves the algorithm knobs intact.
     base_scenario = fields.get("scenario")
     if not isinstance(base_scenario, dict):

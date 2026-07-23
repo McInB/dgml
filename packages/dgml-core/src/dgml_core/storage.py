@@ -10,22 +10,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Workspace path resolution and atomic JSON I/O."""
+"""Workspace path resolution, config generation, and atomic file I/O."""
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
 ENV_VAR = "DGML_HOME"
 DEFAULT_DIR_NAME = "dgml-workspace"
-LOCAL_CONFIG_NAME = "local_config.json"
+CONFIG_NAME = "config.toml"
+USER_CONFIG_DIR = "dgml"
 WORKSPACE_META_NAME = "workspace.json"
-_DEFAULT_CONFIG_RESOURCE = "resources/default_config.json"
 
 
 @dataclass(frozen=True)
@@ -139,18 +139,10 @@ class Workspace:
 
     @property
     def config_path(self) -> Path:
-        return self.root / "config.json"
-
-    @property
-    def local_config_path(self) -> Path:
-        """The shared ``local_config.json`` that seeds every sibling workspace.
-
-        It lives as a **peer of the workspace root** (in the directory that
-        contains ``dgml-workspace``), so all workspaces created in the same
-        directory reuse one config. With the default ``./dgml-workspace`` this
-        is ``./local_config.json`` in the working directory.
-        """
-        return self.root.parent / LOCAL_CONFIG_NAME
+        """Optional per-workspace ``config.toml`` (resolution layer 3). Overrides
+        keys from the user-level ``~/.config/dgml/config.toml``; absent in the
+        common case where the user config suffices."""
+        return self.root / CONFIG_NAME
 
     @property
     def usage_log_path(self) -> Path:
@@ -203,48 +195,10 @@ class Workspace:
         self.docsets_dir.mkdir(parents=True, exist_ok=True)
         self.files_dir.mkdir(parents=True, exist_ok=True)
 
-    def ensure_local_config(self) -> bool:
-        """Create the peer ``local_config.json`` from the bundled default if it
-        is absent. Returns whether a file was created (``False`` = already
-        present, left untouched). Backs ``dgml init``."""
-        path = self.local_config_path
-        if path.exists():
-            return False
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(bundled_default_config_text(), encoding="utf-8")
-        return True
-
-    def refresh_local_config(self, *, backup: bool = True) -> Path | None:
-        """Overwrite the peer ``local_config.json`` from the bundled default
-        (pull the latest baseline / new knobs). When ``backup`` and a file
-        already exists, copy it to ``local_config.json.bak`` first and return
-        that path; otherwise return ``None``. Backs ``dgml init --refresh``."""
-        path = self.local_config_path
-        backup_path: Path | None = None
-        if backup and path.exists():
-            backup_path = path.with_suffix(path.suffix + ".bak")
-            backup_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(bundled_default_config_text(), encoding="utf-8")
-        return backup_path
-
-    def write_config_from_local(self, *, overwrite: bool) -> bool:
-        """Copy the peer ``local_config.json`` verbatim to this workspace's
-        ``config.json`` (comments intact). Skips (returns ``False``) when
-        ``config.json`` already exists unless ``overwrite``. Raises
-        :class:`~.errors.LocalConfigMissing` when the peer file is absent.
-        Backs ``dgml workspace create``."""
-        from .errors import LocalConfigMissing
-
-        src = self.local_config_path
-        if not src.exists():
-            raise LocalConfigMissing(f"no {LOCAL_CONFIG_NAME} at {src}; run 'dgml init' first")
-        dest = self.config_path
-        if dest.exists() and not overwrite:
-            return False
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-        return True
+    def has_legacy_json_config(self) -> bool:
+        """True when a pre-migration ``config.json`` is present but the new
+        ``config.toml`` is not — used to surface a clear upgrade error."""
+        return (self.root / "config.json").exists() and not self.config_path.exists()
 
 
 def write_json_atomic(path: Path, data: Any) -> None:
@@ -294,39 +248,174 @@ def read_json(path: Path) -> Any:
         raise CorruptMetadata(f"{path} is not valid JSON: {exc}") from exc
 
 
-def strip_jsonc_line_comments(text: str) -> str:
-    """Blank out full-line ``//`` comments so a JSONC config parses as JSON.
+def user_config_path() -> Path:
+    """The user-level config (resolution layer 2). Written by ``dgml init``.
 
-    A line is treated as a comment only when its first non-whitespace
-    characters are ``//``; it is replaced with an empty line so line numbers
-    (and thus any parse-error position) are preserved. ``//`` appearing inside
-    a value — e.g. an ``https://`` endpoint — is never touched.
-    """
-    return "\n".join("" if line.lstrip().startswith("//") else line for line in text.split("\n"))
+    Base directory, in order of precedence:
+    1. ``$XDG_CONFIG_HOME`` when explicitly set (honored on every platform);
+    2. on Windows, ``%APPDATA%`` (falling back to ``~/AppData/Roaming``);
+    3. otherwise ``~/.config`` (the XDG convention on Linux/macOS).
 
-
-def read_config(path: Path) -> Any:
-    """Read a hand-editable JSONC workspace ``config.json``: strip full-line
-    ``//`` comments, then parse with the same duplicate-key rejection as
-    :func:`read_json`.
-
-    Kept separate from :func:`read_json` (which reads machine-written manifests
-    that never carry comments) so comment tolerance is scoped to config only.
-    """
-    from .errors import CorruptMetadata
-
-    text = strip_jsonc_line_comments(path.read_text(encoding="utf-8"))
-    try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-    except ValueError as exc:  # json.JSONDecodeError is a ValueError subclass
-        raise CorruptMetadata(f"{path} is not valid JSON: {exc}") from exc
+    The config then lives at ``<base>/dgml/config.toml``."""
+    base = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    if base:
+        root = Path(base).expanduser()
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "").strip()
+        root = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    else:
+        root = Path.home() / ".config"
+    return root / USER_CONFIG_DIR / CONFIG_NAME
 
 
-def bundled_default_config_text() -> str:
-    """The packaged ``default_config.json`` template as text (comments intact).
+# ---------------------------------------------------------------------------
+# `dgml init` config generation
+# ---------------------------------------------------------------------------
 
-    The baseline that ``dgml init`` seeds ``local_config.json`` from. Read via
-    ``importlib.resources`` so it resolves whether running from source or an
-    installed wheel.
-    """
-    return (resources.files("dgml_core") / _DEFAULT_CONFIG_RESOURCE).read_text(encoding="utf-8")
+# The four tiers, cheapest → strongest, per provider. `dgml init --provider`
+# writes one of these into the `[models]` block; the tier→task mapping and
+# per-task overrides are documented in the CLI reference, not baked into the
+# file (the mapping may change without a config rewrite).
+PROVIDER_MODELS: dict[str, dict[str, str]] = {
+    "mixed": {
+        # Gemini Flash-Lite for the cheap high-volume vision work
+        # (classification/style); Anthropic for the document-reasoning pipeline
+        # (transcription → labeling/value-extraction → schema generation).
+        "light": "gemini/gemini-2.0-flash-lite",
+        "standard": "anthropic/claude-haiku-4-5",
+        "advanced": "anthropic/claude-sonnet-4-6",
+        "expert": "anthropic/claude-opus-4-8",
+    },
+    "anthropic": {
+        "light": "anthropic/claude-haiku-4-5",
+        "standard": "anthropic/claude-haiku-4-5",
+        "advanced": "anthropic/claude-sonnet-4-6",
+        "expert": "anthropic/claude-opus-4-8",
+    },
+    "google": {
+        "light": "gemini/gemini-2.0-flash-lite",
+        "standard": "gemini/gemini-2.0-flash",
+        "advanced": "gemini/gemini-2.5-pro",
+        "expert": "gemini/gemini-2.5-ultra",
+    },
+    "openai": {
+        "light": "openai/gpt-5-nano",
+        "standard": "openai/gpt-5-mini",
+        "advanced": "openai/gpt-5",
+        "expert": "openai/gpt-5-pro",
+    },
+}
+
+# `--provider` values accepted on the CLI, mapped to a `PROVIDER_MODELS` key.
+PROVIDER_ALIASES: dict[str, str] = {"gemini": "google"}
+
+# Env vars checked by auto-detect (the standard names litellm reads). Order is
+# the reporting order for `detected_api_keys`.
+API_KEY_ENV_VARS: tuple[str, ...] = (
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+)
+
+_OCR_GUIDANCE = """\
+# OCR is required only for scanned or image-based PDFs. On macOS, leave this
+# section commented out to use the on-device Apple Vision engine. For cloud OCR,
+# uncomment one provider:
+#   Azure: set endpoint, plus api_key or api_key_env (a literal key or the name
+#          of an env var holding it); with neither, Entra ID (DefaultAzureCredential)
+#          is used.
+#   AWS:   set region (and optionally profile); credentials come from the standard
+#          AWS credential chain (profile, env vars, or IAM role).
+# [ocr]
+# provider = "azure"
+# endpoint = "https://<your-di-resource>.cognitiveservices.azure.com/"
+# api_key_env = "AZURE_DOCINTEL_KEY"
+"""
+
+
+def canonical_provider(provider: str) -> str:
+    """Resolve a ``--provider`` value (incl. aliases like ``gemini``) to a
+    :data:`PROVIDER_MODELS` key. Raises ``KeyError`` for an unknown provider."""
+    key = PROVIDER_ALIASES.get(provider, provider)
+    if key not in PROVIDER_MODELS:
+        raise KeyError(provider)
+    return key
+
+
+def detect_provider(environ: dict[str, str]) -> str | None:
+    """Auto-detect a provider from non-empty API-key env vars (no live check).
+
+    Both Anthropic + Gemini → ``mixed``; Anthropic only → ``anthropic``; Gemini
+    only → ``google``; neither but an OpenAI/Azure key → ``openai``; none →
+    ``None``."""
+
+    def has(name: str) -> bool:
+        return bool(environ.get(name, "").strip())
+
+    anthropic, gemini = has("ANTHROPIC_API_KEY"), has("GEMINI_API_KEY")
+    if anthropic and gemini:
+        return "mixed"
+    if anthropic:
+        return "anthropic"
+    if gemini:
+        return "google"
+    if has("OPENAI_API_KEY") or has("AZURE_OPENAI_API_KEY"):
+        return "openai"
+    return None
+
+
+def detected_api_keys(environ: dict[str, str]) -> list[str]:
+    """The known API-key env vars set to a non-empty value, in report order."""
+    return [name for name in API_KEY_ENV_VARS if environ.get(name, "").strip()]
+
+
+def render_config_toml(provider: str | None) -> str:
+    """Render the ``config.toml`` text ``dgml init`` writes.
+
+    ``provider`` names a :data:`PROVIDER_MODELS` key (aliases already resolved),
+    or ``None`` to emit a commented-out ``[models]`` placeholder (no keys
+    detected). The ``[models]`` block carries no tier→capability comments — that
+    mapping is documented in the CLI reference and may change without rewriting
+    a user's file."""
+    if provider is None:
+        checked = ", ".join(API_KEY_ENV_VARS)
+        return (
+            f"# No API key detected (checked {checked}).\n"
+            "# Set at least one key, then rerun:\n"
+            "#   dgml init --provider <anthropic|google|openai|mixed>\n"
+            "#\n"
+            "# [models]\n"
+            '# light    = "..."\n'
+            '# standard = "..."\n'
+            '# advanced = "..."\n'
+            '# expert   = "..."\n'
+            "\n" + _OCR_GUIDANCE
+        )
+    tiers = PROVIDER_MODELS[provider]
+    width = max(len(t) for t in tiers)
+    lines = ["[models]"]
+    for tier in ("light", "standard", "advanced", "expert"):
+        lines.append(f'{tier.ljust(width)} = "{tiers[tier]}"')
+    return "\n".join(lines) + "\n\n" + _OCR_GUIDANCE
+
+
+def write_user_config(provider: str | None, *, overwrite: bool) -> tuple[bool, Path | None]:
+    """Write the generated user config to :func:`user_config_path`.
+
+    Returns ``(written, backup_path)``. When the file exists and ``overwrite``
+    is false, does nothing and returns ``(False, None)`` — bare ``dgml init``
+    never clobbers. When ``overwrite`` and the file exists, backs it up to
+    ``config.toml.bak`` first. ``provider`` is a raw ``--provider`` value or
+    detected key (aliases resolved here) or ``None`` for the placeholder."""
+    path = user_config_path()
+    if path.exists() and not overwrite:
+        return (False, None)
+    backup: Path | None = None
+    if path.exists():
+        backup = path.with_suffix(path.suffix + ".bak")
+        backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    resolved = canonical_provider(provider) if provider is not None else None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(path, render_config_toml(resolved))
+    return (True, backup)

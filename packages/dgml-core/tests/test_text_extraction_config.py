@@ -14,8 +14,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 from dgml_core.errors import AuthError, TextExtractionConfigInvalid
 from dgml_core.storage import Workspace
@@ -26,9 +24,11 @@ from dgml_core.text_extraction_config import (
     resolve_api_key,
 )
 
+from .conftest import dump_toml
+
 
 def _write_config(workspace: Workspace, body: dict[str, object]) -> None:
-    workspace.config_path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    workspace.config_path.write_text(dump_toml(body) + "\n", encoding="utf-8")
 
 
 def test_returns_none_when_no_config_file(workspace: Workspace) -> None:
@@ -77,8 +77,10 @@ def test_missing_model_is_invalid(workspace: Workspace) -> None:
 
 
 def test_section_not_object_is_invalid(workspace: Workspace) -> None:
+    from dgml_core.errors import CorruptMetadata
+
     _write_config(workspace, {"text_extraction": "ollama_chat/gemma4:latest"})
-    with pytest.raises(TextExtractionConfigInvalid, match="must be a JSON object"):
+    with pytest.raises(CorruptMetadata):
         load_text_extraction_config(workspace)
 
 

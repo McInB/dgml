@@ -90,10 +90,17 @@ class CorruptMetadata(DgmlError):
     code = "CORRUPT_METADATA"
 
 
-class LocalConfigMissing(DgmlError):
-    """No peer ``local_config.json`` when ``dgml workspace create`` needs one."""
+class ModelsConfigInvalid(DgmlError):
+    """The ``[models]`` tier block is malformed (non-string / empty tier)."""
 
-    code = "LOCAL_CONFIG_MISSING"
+    code = "MODELS_CONFIG_INVALID"
+
+
+class LegacyConfigPresent(DgmlError):
+    """A pre-migration ``config.json`` is the only config present; the format is
+    now TOML. Surfaced so the user runs ``dgml init`` to migrate."""
+
+    code = "LEGACY_CONFIG_PRESENT"
 
 
 class OcrConfigInvalid(DgmlError):

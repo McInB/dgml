@@ -250,7 +250,7 @@ class FileStore:
         if family not in load_conversion_config(self.ws):
             raise UnsupportedFileType(
                 f"no converter configured for '{suffix}'; set conversion.{family}.provider "
-                "in config.json (see the translators-pdf package for ready-made converters)"
+                "in config.toml (see the translators-pdf package for ready-made converters)"
             )
 
     def _create_record(

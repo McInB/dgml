@@ -14,7 +14,7 @@
 
 OCR providers return no font facts, so the deterministic ``dg:style`` path
 (pdfminer → ``page_text`` → grounding) produces nothing for ``--text-mode ocr``
-files. When a workspace opts in via the ``style`` section of ``config.json``
+files. When a workspace opts in via the ``style`` section of ``config.toml``
 (see :mod:`dgml.style_config`), this module fills that gap with a vision model:
 each page image is shown to the model alongside the grounded text snippets that
 landed on it, and the model returns observed CSS per snippet. Every returned

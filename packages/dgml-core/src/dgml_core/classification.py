@@ -14,7 +14,7 @@
 
 When ``dgml file add --auto-classify`` is used, this module:
 
-1. Loads the ``classification`` section of ``<workspace>/config.json``.
+1. Loads the ``classification`` section of ``<workspace>/config.toml``.
 2. Gathers a small number of rendered page images from the new file plus
    the id/name/description of each existing DocSet.
 3. Calls the configured vision LLM via :mod:`litellm`, forcing a choice
@@ -34,17 +34,18 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from .config import load_merged_config
 from .docsets import DocSetStore
 from .errors import (
     AuthError,
     ClassificationConfigInvalid,
     ClassificationConfigMissing,
     ClassificationFailed,
-    CorruptMetadata,
 )
 from .llm import LLMConfig, call_with_tools
 from .models import DocSet
-from .storage import Workspace, read_config
+from .models_config import resolve_tiered_model
+from .storage import Workspace
 from .usage import OPERATION_CLASSIFY
 from .utils import gather_file_pages, image_to_data_url
 
@@ -84,6 +85,7 @@ class ClassificationConfig:
     max_pages: int = DEFAULT_MAX_PAGES
     api_key: str | None = None
     api_key_env: str | None = None
+    api_base: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,71 +105,36 @@ class ClassificationDecision:
 
 
 def load_classification_config(workspace: Workspace) -> ClassificationConfig:
-    """Read and validate the ``classification`` section of ``<workspace>/config.json``.
+    """Resolve the classification model (``classification.model`` override →
+    ``[models].light`` tier) and its credentials from the merged config.
 
-    Raises :class:`ClassificationConfigMissing` when no config file or no
-    ``classification`` section is present; :class:`ClassificationConfigInvalid`
-    when the section exists but is malformed.
+    Raises :class:`ClassificationConfigMissing` when neither the override nor a
+    tier names a model; :class:`ClassificationConfigInvalid` when the section is
+    malformed.
     """
-    if not workspace.config_path.exists():
-        raise ClassificationConfigMissing(
-            f"no config.json at {workspace.config_path}; "
-            "auto-classification requires a workspace config with a 'classification' section"
-        )
+    merged = load_merged_config(workspace)
+    rm = resolve_tiered_model(
+        merged,
+        section_name="classification",
+        tier="light",
+        invalid=ClassificationConfigInvalid,
+        missing=ClassificationConfigMissing,
+    )
 
-    try:
-        data = read_config(workspace.config_path)
-    except CorruptMetadata as exc:
-        raise ClassificationConfigInvalid(
-            f"{workspace.config_path} is not valid JSON: {exc}"
-        ) from exc
-
-    if not isinstance(data, dict):
-        raise ClassificationConfigInvalid(f"{workspace.config_path} must contain a JSON object")
-
-    section = data.get("classification")
-    if section is None:
-        raise ClassificationConfigMissing(
-            f"{workspace.config_path} has no 'classification' section"
-        )
-    if not isinstance(section, dict):
-        raise ClassificationConfigInvalid("'classification' must be a JSON object")
-
-    model = section.get("model")
-    if not isinstance(model, str) or not model.strip():
-        raise ClassificationConfigInvalid(
-            "'classification.model' must be a non-empty string "
-            "(e.g. 'gemini/gemini-3.1-flash-lite')"
-        )
-
-    max_pages_raw = section.get("max_pages", DEFAULT_MAX_PAGES)
+    section = merged.get("classification")
+    sec: dict[str, Any] = section if isinstance(section, dict) else {}
+    max_pages_raw = sec.get("max_pages", DEFAULT_MAX_PAGES)
     if not isinstance(max_pages_raw, int) or isinstance(max_pages_raw, bool) or max_pages_raw < 1:
         raise ClassificationConfigInvalid(
             "'classification.max_pages' must be a positive integer if set"
         )
 
-    api_key = section.get("api_key")
-    if api_key is not None and (not isinstance(api_key, str) or not api_key):
-        raise ClassificationConfigInvalid(
-            "'classification.api_key' must be a non-empty string if set"
-        )
-
-    api_key_env = section.get("api_key_env")
-    if api_key_env is not None and (not isinstance(api_key_env, str) or not api_key_env):
-        raise ClassificationConfigInvalid(
-            "'classification.api_key_env' must be a non-empty env var name if set"
-        )
-
-    if api_key is not None and api_key_env is not None:
-        raise ClassificationConfigInvalid(
-            "set at most one of 'classification.api_key' / 'classification.api_key_env', not both"
-        )
-
     return ClassificationConfig(
-        model=model,
+        model=rm.model,
         max_pages=max_pages_raw,
-        api_key=api_key,
-        api_key_env=api_key_env,
+        api_key=rm.api_key,
+        api_key_env=rm.api_key_env,
+        api_base=rm.api_base,
     )
 
 
@@ -282,6 +249,7 @@ def _vision_tool_call(
     llm_config = LLMConfig(
         model=config.model,
         api_key=api_key,
+        api_base=config.api_base,
         max_tokens=None,
         workspace=workspace,
         debug=debug,
@@ -319,7 +287,7 @@ def _resolve_api_key(config: ClassificationConfig) -> str | None:
     if not key:
         raise AuthError(
             f"environment variable ${config.api_key_env} is not set "
-            "(referenced by classification.api_key_env in config.json)"
+            "(referenced by classification.api_key_env in the config)"
         )
     return key
 
