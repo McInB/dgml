@@ -267,7 +267,7 @@ def test_clustering_internal_all_unusable_skips_clusterer(workspace: Workspace) 
 
 
 def test_clustering_internal_forwards_workspace_overrides(workspace: Workspace) -> None:
-    """The ``clustering`` section of ``<workspace>/config.json`` is loaded
+    """The ``clustering`` section of ``<workspace>/config.toml`` is loaded
     and forwarded to ``run_clustering`` as ``overrides=`` so users can
     override individual settings (encoder, training, …) without copying
     the whole bundled default. ``corpus_dir`` is additionally injected into
@@ -288,7 +288,7 @@ def test_clustering_internal_forwards_workspace_overrides(workspace: Workspace) 
 
 
 def test_clustering_internal_passes_empty_overrides_when_no_config(workspace: Workspace) -> None:
-    """No config.json ⇒ only the injected ``corpus_dir`` is forwarded
+    """No config.toml ⇒ only the injected ``corpus_dir`` is forwarded
     (bundled defaults otherwise stand), not a different keyword shape that
     would skip the path."""
     _seed_file(workspace, "f1")
@@ -380,7 +380,7 @@ def test_clustering_internal_fresh_does_not_inject_novelty_default(workspace: Wo
 
 
 def test_clustering_internal_incremental_respects_user_gate(workspace: Workspace) -> None:
-    """A user-set gate in config.json wins over the injected default."""
+    """A user-set gate in config.toml wins over the injected default."""
     DocSetStore(workspace).create(name="Contracts")
     _seed_file(workspace, "u1")
     _seed_page_image(workspace, "u1")
@@ -398,7 +398,7 @@ def test_clustering_internal_incremental_respects_user_gate(workspace: Workspace
 
 
 # ---------------------------------------------------------------------------
-# load_clustering_overrides — reading the workspace config.json
+# load_clustering_overrides — reading the workspace config.toml
 # ---------------------------------------------------------------------------
 
 
@@ -409,12 +409,12 @@ def _write_config(workspace: Workspace, payload: dict[str, Any]) -> None:
 
 
 def test_load_clustering_overrides_returns_empty_when_no_config(workspace: Workspace) -> None:
-    """No config.json at all ⇒ the bundled defaults stand."""
+    """No config.toml at all ⇒ the bundled defaults stand."""
     assert load_clustering_overrides(workspace) == {}
 
 
 def test_load_clustering_overrides_returns_empty_when_no_section(workspace: Workspace) -> None:
-    """A config.json without a ``clustering`` section is treated the same
+    """A config.toml without a ``clustering`` section is treated the same
     as a missing file — bundled defaults stand."""
     _write_config(workspace, {"classification": {"model": "gemini/gemini-3.1-flash-lite"}})
     assert load_clustering_overrides(workspace) == {}

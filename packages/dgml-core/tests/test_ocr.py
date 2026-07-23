@@ -120,7 +120,7 @@ def test_load_ocr_config_azure_no_key_env(workspace: Workspace) -> None:
 
 def test_load_ocr_config_azure_literal_api_key(workspace: Workspace) -> None:
     """A literal api_key in config is accepted (developers may put keys
-    directly in workspace config.json — it isn't checked in)."""
+    directly in workspace config.toml — it isn't checked in)."""
     write_ocr_config(
         workspace,
         {

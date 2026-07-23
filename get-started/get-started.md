@@ -109,26 +109,25 @@ drop a `<workspace>/config.toml`; it deep-merges over the user config.*
 Ingesting files needs no configuration, but every LLM-backed command you will
 run later in this guide — `dgml docset generate` (Phase 1), the cluster
 auto-naming (Phase 2), and value extraction — reads its model and credentials
-from `<workspace>/config.json`. There are **no in-code model defaults**: an
+from your config. There are **no in-code model defaults**: an
 unconfigured section fails the command with an error like
 `GENERATION_CONFIG_MISSING` rather than silently making a paid LLM call you
 didn't set up. Configure it now so the later phases run through cleanly.
 
-Open `<workspace>/config.json` (seeded by `workspace create` in the previous
-step) and review these sections:
+Open the user-level `~/.config/dgml/config.toml` that `workspace create`
+generated in the previous step (or drop a `<workspace>/config.toml` to scope
+these settings to this workspace only — it deep-merges over the user config)
+and review these sections:
 
-```json
-{
-  "generation": {
-    "model": "anthropic/claude-haiku-4-5",
-    "label_model": "anthropic/claude-sonnet-4-6",
-    "api_key_env": "ANTHROPIC_API_KEY"
-  },
-  "classification": {
-    "model": "gemini/gemini-2.5-flash",
-    "api_key_env": "GEMINI_API_KEY"
-  }
-}
+```toml
+[generation]
+model = "anthropic/claude-haiku-4-5"
+label_model = "anthropic/claude-sonnet-4-6"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[classification]
+model = "gemini/gemini-2.5-flash"
+api_key_env = "GEMINI_API_KEY"
 ```
 
 - **`generation`** — required by `dgml docset generate`. `model` runs the
@@ -149,11 +148,11 @@ export ANTHROPIC_API_KEY="sk-ant-…"
 export GEMINI_API_KEY="…"
 ```
 
-*Tip: edits to `<workspace>/config.json` apply to this workspace only. To make
-your configuration the default for future workspaces, edit the shared
-`local_config.json` (a peer of the workspace directory) and re-run
-`dgml workspace create --force` to re-sync it. The full schema of every config
-section is in [docs/storage-layout.md](../docs/storage-layout.md).*
+*Tip: settings in `<workspace>/config.toml` apply to this workspace only. To make
+your configuration the default for every workspace, edit the user-level
+`~/.config/dgml/config.toml` instead — each workspace's config deep-merges over
+it. The full schema of every config section is in
+[docs/storage-layout.md](../docs/storage-layout.md).*
 
 ### 1.5 Ingest Sample Documents
 Let's add the non-traded REIT PDF documents from `dgml-spec/samples/1-NonTraded-NAV-REITs/files`. We use `--recursive` to walk folders and `--on-conflict skip` to ensure our run is idempotent (safely resuming if interrupted):

@@ -245,7 +245,7 @@ def _resolve_ocr_config(workspace_arg: Path | str | None) -> OcrConfig:
     """Resolve an OcrConfig from either an explicit workspace or env vars.
 
     Resolution order:
-    1. ``workspace_arg`` → ``<workspace>/config.json``'s ``ocr`` section
+    1. ``workspace_arg`` → ``<workspace>/config.toml``'s ``ocr`` section
        (handles all auth modes including token-based ``DefaultAzureCredential``)
     2. Auto-resolved workspace (``$DGML_HOME`` or ``./dgml-workspace``) if
        its config has an ``ocr`` section
@@ -256,7 +256,7 @@ def _resolve_ocr_config(workspace_arg: Path | str | None) -> OcrConfig:
         ws = Workspace.resolve(workspace_arg)
         return load_ocr_config(ws)
 
-    # Auto-resolved workspace: only use it if its config.json actually has
+    # Auto-resolved workspace: only use it if its config.toml actually has
     # an `ocr` section — otherwise fall through to env vars.
     auto_ws = Workspace.resolve()
     if auto_ws.config_path.exists():
@@ -731,7 +731,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help=(
-            "Workspace whose config.json holds the OCR section. Defaults "
+            "Workspace whose config.toml holds the OCR section. Defaults "
             "to the same resolution the dgml CLI uses ($DGML_HOME, then "
             "./dgml-workspace). Env vars are used only as a last resort."
         ),

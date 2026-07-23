@@ -1141,7 +1141,7 @@ def _init_with_docset(ws: Path, capsys: pytest.CaptureFixture[str], name: str = 
 
     Also writes a ``generation`` config section — ``docset generate`` has no
     code default and no model flags, so it reads both ``model``
-    and ``label_model`` (both required) from config.json.
+    and ``label_model`` (both required) from config.toml.
     """
     _init_ws(ws)
     capsys.readouterr()
@@ -1395,7 +1395,7 @@ def test_docset_generate_cache_dir_and_debug_threading(
 
 def test_docset_generate_has_no_model_flags() -> None:
     """The model is config-only — there are no --model / --label-model flags, so
-    which model runs is a single per-workspace choice (config.json), matching
+    which model runs is a single per-workspace choice (config.toml), matching
     every other model-consuming command. Passing the removed flags is rejected."""
     from dgml.cli import _build_parser
 
@@ -1412,7 +1412,7 @@ def test_docset_generate_has_no_model_flags() -> None:
 def test_docset_generate_missing_config_errors(
     tmp_path: Path, text_pdf: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """No 'generation' section in config.json → the run fails fast with
+    """No 'generation' section in config.toml → the run fails fast with
     GENERATION_CONFIG_MISSING. There is no code default and no flag override, so
     which model runs is never silent."""
     ws = tmp_path / "ws"
@@ -2219,7 +2219,7 @@ def _generate_with_xml(
         on_output("contract.pdf", xml)
         return {}
 
-    # generate reads the models from config.json's 'generation' section (no flags).
+    # generate reads the models from config.toml's 'generation' section (no flags).
     # Real-provider model strings so the pre-flight check (get_llm_provider)
     # accepts them; convert_batch is mocked, so no call is ever made. The dummy
     # ANTHROPIC_API_KEY from conftest satisfies the pre-flight key check.

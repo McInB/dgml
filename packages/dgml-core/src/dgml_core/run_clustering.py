@@ -288,7 +288,7 @@ def _build_config(
     if cache_dir is not None:
         # Infrastructure, not a user knob: wire the workspace embedding cache so
         # re-embedding unchanged files across runs is cheap. Set after the merge
-        # so a workspace config.json can't accidentally clobber it.
+        # so a workspace config.toml can't accidentally clobber it.
         fields["cache_dir"] = str(cache_dir)
     # The scenario *regime* — ``name`` plus ``known_categories`` / ``n_shots``
     # — is dynamic per call (driven by the arguments above) and always wins, so
