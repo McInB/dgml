@@ -67,7 +67,7 @@ def _read_stderr(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
 def test_init_writes_user_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """`dgml init` is config-only: it writes the user-level config.toml (with a
     [models] block) and does NOT create the workspace dirs. A second init
-    without --refresh is a no-op."""
+    without --force is a no-op."""
     from dgml_core.storage import user_config_path
 
     ws = tmp_path / "ws"
@@ -75,7 +75,7 @@ def test_init_writes_user_config(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert rc == 0
     payload = _read_stdout(capsys)
     assert payload["config_created"] is True
-    assert payload["refreshed"] is False
+    assert payload["forced"] is False
     # Both dummy provider keys are set by the autouse fixture → auto-detect mixed.
     assert payload["provider"] == "mixed"
     assert set(payload["detected_keys"]) == {"ANTHROPIC_API_KEY", "GEMINI_API_KEY"}
@@ -87,7 +87,7 @@ def test_init_writes_user_config(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert not (ws / "docsets").exists()
     assert not (ws / "config.toml").exists()
 
-    # Second init without --refresh is a no-op.
+    # Second init without --force is a no-op.
     rc = main(_ws_args(ws) + ["init"])
     assert rc == 0
     assert _read_stdout(capsys)["config_created"] is False
@@ -104,7 +104,7 @@ def test_init_provider_flag_forces_table(
     assert "gemini/" in user_config_path().read_text(encoding="utf-8")
 
 
-def test_init_provider_without_refresh_does_not_clobber(
+def test_init_provider_without_force_does_not_clobber(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from dgml_core.storage import user_config_path
@@ -112,16 +112,16 @@ def test_init_provider_without_refresh_does_not_clobber(
     ws = tmp_path / "ws"
     main(_ws_args(ws) + ["init", "--provider", "anthropic"])
     capsys.readouterr()
-    # Rerun with a different provider but no --refresh → no-op + a warning.
+    # Rerun with a different provider but no --force → no-op + a warning.
     rc = main(_ws_args(ws) + ["init", "--provider", "google"])
     assert rc == 0
     payload = _read_stdout(capsys)
     assert payload["config_created"] is False
-    assert "refresh" in payload["next_action"]
+    assert "--force" in payload["next_action"]
     assert "anthropic/" in user_config_path().read_text(encoding="utf-8")  # unchanged
 
 
-def test_init_refresh_overwrites_with_backup(
+def test_init_force_overwrites_with_backup(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from dgml_core.storage import user_config_path
@@ -129,10 +129,10 @@ def test_init_refresh_overwrites_with_backup(
     ws = tmp_path / "ws"
     main(_ws_args(ws) + ["init", "--provider", "anthropic"])
     capsys.readouterr()
-    rc = main(_ws_args(ws) + ["init", "--provider", "google", "--refresh"])
+    rc = main(_ws_args(ws) + ["init", "--provider", "google", "--force"])
     assert rc == 0
     payload = _read_stdout(capsys)
-    assert payload["refreshed"] is True
+    assert payload["forced"] is True
     cfg = user_config_path()
     assert "gemini/" in cfg.read_text(encoding="utf-8")
     assert cfg.with_suffix(".toml.bak").exists()
@@ -151,7 +151,7 @@ def test_workspace_create(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert payload["initialized"] is True
     assert payload["organization"] == "Acme"
     assert payload["name"] == "ws"  # defaults to the workspace directory name
-    assert payload["config_created"] is False  # user config already existed
+    assert payload["config_present"] is True  # user config existed (init ran)
     assert (ws / "docsets").is_dir()
     assert (ws / "files").is_dir()
     assert not (ws / "config.toml").exists()  # create writes no per-workspace config
@@ -205,25 +205,29 @@ def test_workspace_create_requires_organization(
     assert exc.value.code != 0
 
 
-def test_workspace_create_without_prior_init_generates_user_config(
+def test_workspace_create_without_prior_init_warns_but_succeeds(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`workspace create` with no prior `dgml init` generates the user-level
-    config (auto-detecting the provider) as a one-step convenience, and creates
-    the dirs."""
+    """`workspace create` with no prior `dgml init` still creates the workspace
+    (never blocks) and does NOT create the user-level config — it warns on
+    stderr that credentials must be configured."""
     from dgml_core.storage import user_config_path
 
     ws = tmp_path / "ws"
     rc = main(_ws_args(ws) + ["workspace", "create", "--organization", "Acme"])
     assert rc == 0
-    payload = _read_stdout(capsys)
-    assert payload["config_created"] is True
-    assert payload["organization"] == "Acme"
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["config_present"] is False
     assert "next_action" in payload
+    # Workspace was created regardless.
     assert (ws / "docsets").is_dir()
-    cfg = user_config_path()
-    assert cfg.exists()
-    assert "[models]" in cfg.read_text(encoding="utf-8")
+    assert (ws / "files").is_dir()
+    # The user config was NOT created by workspace create.
+    assert not user_config_path().exists()
+    # Warning always on stderr (no --verbose needed).
+    assert "no user-level config found" in captured.err
+    assert "dgml init" in captured.err
 
 
 def test_status_after_workspace_create(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

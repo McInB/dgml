@@ -23,8 +23,8 @@ The two models can name different providers (e.g. the default ``mixed`` config
 uses Anthropic for transcription and Gemini for labeling), so each carries its
 own credentials: ``api_key`` / ``api_key_env`` / ``api_base`` for transcription
 and ``label_api_key`` / ``label_api_key_env`` / ``label_api_base`` for labeling.
-When a model comes from a tier and its section credentials are unset, the tier's
-``<tier>_api_key_env`` / ``<tier>_api_base`` apply.
+These apply whether the models are set here or come from their tiers; the tiers
+themselves carry no credentials.
 """
 
 from __future__ import annotations
@@ -55,10 +55,9 @@ class GenerationConfig:
 
     Each model has independent credentials so the two may name different
     providers. For either, API-key resolution precedence is: literal
-    ``*_api_key`` > ``*_api_key_env`` var lookup > tier ``<tier>_api_key_env``
-    (when the model came from a tier) > ``None`` (litellm's per-provider env-var
-    conventions). Setting both the literal and the env-name for one model is a
-    config error.
+    ``*_api_key`` > ``*_api_key_env`` var lookup > ``None`` (litellm's
+    per-provider env-var conventions). Setting both the literal and the env-name
+    for one model is a config error.
     """
 
     model: str
@@ -192,5 +191,5 @@ def validate_generation_models(
             raise AuthError(
                 f"no API key for model '{model}': {missing} not set. Set it in the "
                 "environment, or configure the matching 'generation.*api_key' / "
-                "'generation.*api_key_env' (or a '[models].<tier>_api_key_env') in the config."
+                "'generation.*api_key_env' in the config."
             )

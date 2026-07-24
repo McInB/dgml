@@ -25,10 +25,10 @@ The root is determined in this order:
 
 `dgml workspace create --organization <org>` (or `Workspace.init()` in code)
 creates the directory layout for a fresh workspace and records its identity in
-`workspace.json`. It generates the user-level `~/.config/dgml/config.toml` when
-absent (auto-detecting the provider), so `dgml init` first is **optional** — run
-`init` separately only to review/choose the config before creating any workspace
-(the "configure once per machine" flow). The CLI refuses to operate on an
+`workspace.json`. Config is owned by `dgml init` (the "configure once per
+machine" flow) — `workspace create` does not create or touch it. If the
+user-level config is absent, the workspace is still created and a warning is
+printed telling you to run `dgml init`. The CLI refuses to operate on an
 uninitialized workspace except for `init` and `workspace create`. See
 [the resolution order](#where-config-comes-from--the-resolution-order) for how
 config merges across layers.
@@ -171,16 +171,11 @@ falls back to the nearest set tier (nearest lower first, then higher) with a
 warning — so a minimal config that sets only, say, `standard` still resolves
 every task.
 
-Each tier also accepts an optional `<tier>_api_key_env` and `<tier>_api_base`,
-used by a tier-sourced model when the task section sets no key/base of its own:
-
-```toml
-[models]
-light    = "anthropic/claude-haiku-4-5"
-light_api_key_env = "MY_ANTHROPIC_API_KEY"
-advanced = "gemini/gemini-2.5-pro"
-advanced_api_base = "https://my-proxy.example.com"
-```
+Tiers name only models — they carry no credentials. Credentials are configured
+per task on the task's own section (e.g. `generation.api_key_env`,
+`grounded.schema_api_key`); a model sourced from a tier uses its task section's
+credentials, or falls back to litellm's per-provider env var when the section
+sets none.
 
 `dgml init --provider {anthropic,google,openai,mixed}` writes a ready-made
 `[models]` table; omit `--provider` to auto-detect from the API-key env vars
@@ -216,8 +211,8 @@ Field rules:
 - `max_pages` — optional positive int, default `3`. First-N pages shown to the
   classifier.
 - `api_key` / `api_key_env` / `api_base` — optional; mutually-exclusive key /
-  env-var name, plus an optional endpoint. When the model comes from a tier,
-  the tier's `light_api_key_env` / `light_api_base` apply if these are unset.
+  env-var name, plus an optional endpoint. Apply whether the model is set here or
+  comes from the `light` tier; when unset, litellm uses its per-provider env var.
 
 ### `ocr` (optional, required for `--text-mode ocr`)
 
@@ -277,8 +272,8 @@ Field rules:
   mutually exclusive with the matching `*_env` field.
 - `schema_api_key_env` / `values_api_key_env` — optional env var names per side.
 - `schema_api_base` / `values_api_base` — optional endpoint per side.
-  When a model comes from a tier and its section credentials are unset, the
-  tier's `<tier>_api_key_env` / `<tier>_api_base` apply.
+  These per-side credentials apply whether the model is set here or comes from
+  its tier; when unset, litellm uses its per-provider env var.
 - `max_tool_iters` — optional positive int, default 20. Cap on
   `get_page_words` tool calls per extraction.
 
@@ -306,9 +301,8 @@ Field rules:
 - Labeling credentials: `label_api_key` / `label_api_key_env` /
   `label_api_base`. The two models carry **independent** credentials because
   they may name different providers (e.g. the default `mixed` config transcribes
-  on Anthropic and labels on Gemini). When a model comes from a tier and its
-  section credentials are unset, the tier's `<tier>_api_key_env` /
-  `<tier>_api_base` apply.
+  on Anthropic and labels on Gemini). These apply whether the models are set here
+  or come from their tiers; when unset, litellm uses its per-provider env var.
 
 A malformed section fails the next `docset generate` with
 `GENERATION_CONFIG_INVALID`.

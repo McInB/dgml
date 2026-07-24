@@ -230,11 +230,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     init_p.add_argument(
-        "--refresh",
+        "--force",
         action="store_true",
         help=(
             "Overwrite an existing config.toml (backing it up to config.toml.bak first). "
-            "Without --refresh, init never clobbers an existing file."
+            "Without --force, init never clobbers an existing file."
         ),
     )
 
@@ -1023,38 +1023,44 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
 
     The provider comes from ``--provider`` or, absent that, auto-detection from
     the API-key env vars that are set. Overwrites an existing file only with
-    ``--refresh`` (backing it up to ``config.toml.bak``); otherwise a present
+    ``--force`` (backing it up to ``config.toml.bak``); otherwise a present
     file is left untouched.
+
+    The stdout JSON payload is the contract; the human-readable report
+    (detected keys, the [models] block, next steps) goes to stderr only under
+    ``--verbose``.
     """
+
+    def _diag(msg: str) -> None:
+        if getattr(args, "verbose", False):
+            sys.stderr.write(msg)
+
     environ = dict(os.environ)
     detected = detected_api_keys(environ)
     provider = args.provider if args.provider is not None else detect_provider(environ)
     canonical = canonical_provider(provider) if provider is not None else None
     path = user_config_path()
 
-    written, backup = write_user_config(provider, overwrite=args.refresh)
+    written, backup = write_user_config(provider, overwrite=args.force)
 
     payload: dict[str, Any] = {
         "config_path": str(path),
         "config_created": written,
         "provider": canonical,
         "detected_keys": detected,
-        "refreshed": bool(args.refresh and written),
+        "forced": bool(args.force and written),
     }
 
     if not written:
         payload["next_action"] = (
-            f"{path} already exists — pass 'dgml init --refresh' to overwrite it "
+            f"{path} already exists — pass 'dgml init --force' to overwrite it "
             "(backs up to config.toml.bak), or edit it directly"
-        )
-        sys.stderr.write(
-            f"[dgml init] {path} already exists; not overwritten. Pass --refresh to regenerate.\n"
         )
         _emit(payload, fmt)
         return 0
 
     if backup is not None:
-        sys.stderr.write(f"[dgml init] previous config backed up to {backup}.\n")
+        _diag(f"[dgml init] previous config backed up to {backup}.\n")
 
     if canonical is None:
         checked = ", ".join(
@@ -1063,7 +1069,7 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         payload["next_action"] = (
             "set an API key, then rerun: dgml init --provider <anthropic|google|openai|mixed>"
         )
-        sys.stderr.write(
+        _diag(
             f"[dgml init] no API keys detected (checked {checked}).\n"
             f"[dgml init] wrote {path} with a commented-out [models] placeholder.\n"
         )
@@ -1072,7 +1078,7 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
 
     payload["next_action"] = "dgml workspace create --organization <org>"
     if args.provider is not None:
-        sys.stderr.write(
+        _diag(
             f"[dgml init] wrote {path} (provider: {canonical}).\n"
             f"{_init_models_report(canonical)}\n"
             f"[dgml init] make sure {_PROVIDER_KEYS[canonical]} is set before running "
@@ -1080,7 +1086,7 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         )
     else:
         keys_line = "  ".join(f"[x] {k}" for k in detected) if detected else "(none)"
-        sys.stderr.write(
+        _diag(
             f"[dgml init] detected API keys: {keys_line}\n"
             f"[dgml init] wrote {path} (provider: {canonical}).\n"
             f"{_init_models_report(canonical)}\n"
@@ -1095,11 +1101,10 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
 def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     """Create a workspace (``docsets/``, ``files/``, ``workspace.json``).
 
-    Config is user-level now, not per-workspace: this command does not copy or
-    create a ``<workspace>/config.toml``. As a one-step convenience for a
-    first-time user, if the user-level ``~/.config/dgml/config.toml`` is absent
-    it is generated here (auto-detecting the provider), exactly as ``dgml init``
-    would — so ``workspace create`` still works without a separate ``init``.
+    Config is owned by ``dgml init`` and lives at the user level: this command
+    does **not** create or touch it. When the user-level config is absent, the
+    workspace is still created (never blocked) — a warning is printed to stderr
+    telling the user to run ``dgml init`` and set their API key.
     """
     sub = args.workspace_command
     if sub == "create":
@@ -1108,46 +1113,31 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         if args.path is not None:
             ws = Workspace.resolve(args.path)
 
-        upath = user_config_path()
-        config_created = False
-        provider: str | None = None
-        if not upath.exists():
-            provider = detect_provider(dict(os.environ))
-            config_created, _ = write_user_config(provider, overwrite=False)
-
         ws.init()
         name = args.name or ws.root.name
         ws.write_meta(name=name, organization=args.organization)
 
+        upath = user_config_path()
+        config_present = upath.exists()
         payload: dict[str, Any] = {
             "workspace": str(ws.root),
             "name": name,
             "organization": args.organization,
             "initialized": True,
             "config_path": str(upath),
-            "config_created": config_created,
+            "config_present": config_present,
         }
-        if config_created:
-            if provider is None:
-                payload["next_action"] = (
-                    f"no API key detected — set one and run 'dgml init --provider "
-                    f"<anthropic|google|openai|mixed>' to fill in {upath}"
-                )
-                sys.stderr.write(
-                    f"[dgml workspace create] wrote {upath} with a commented-out [models] "
-                    "placeholder (no API key detected). Set a key and run 'dgml init "
-                    "--provider ...' before running LLM-backed commands.\n"
-                )
-            else:
-                payload["next_action"] = (
-                    f"review the [models] block in {upath}; ensure the provider's API key "
-                    "env var is set, then add files and run docset generate/ground"
-                )
-                sys.stderr.write(
-                    f"[dgml workspace create] wrote user config {upath} "
-                    f"(auto-detected provider: {canonical_provider(provider)}). Review its "
-                    "[models] block before running LLM-backed commands.\n"
-                )
+        if not config_present:
+            # Succeed but warn — LLM-backed commands will fail until the user
+            # configures credentials. Always on stderr (no --verbose needed).
+            payload["next_action"] = (
+                "run `dgml init` and set ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY"
+            )
+            sys.stderr.write(
+                "Warning: no user-level config found.\n\n"
+                "Some commands will fail until credentials are configured.\n\n"
+                "Run `dgml init` and set ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY.\n"
+            )
         _emit(payload, fmt)
         return 0
 

@@ -44,7 +44,7 @@ or after a command group (`dgml docset --format text list`).
 
 ## Workspace commands
 
-### `dgml init [--provider PROVIDER] [--refresh]`
+### `dgml init [--provider PROVIDER] [--force]`
 Establish the **user-level config** — nothing else. `init` writes
 `~/.config/dgml/config.toml` (on Windows, `%APPDATA%\dgml\config.toml`;
 `$XDG_CONFIG_HOME` wins when set) with a `[models]`
@@ -63,10 +63,10 @@ text-extraction, labeling/value-extraction, schema-generation respectively).
   them → that provider; otherwise `OPENAI_API_KEY`/`AZURE_OPENAI_API_KEY` →
   `openai`). Only presence is checked, not validity. With no keys, a
   commented-out `[models]` placeholder is written.
-- **`--refresh`:** overwrite an existing `config.toml` (backing it up to
-  `config.toml.bak` first). Without `--refresh`, a present file is **never**
-  clobbered — a re-run with `--provider` but no `--refresh` is a no-op whose
-  `next_action` tells you to pass `--refresh`.
+- **`--force`:** overwrite an existing `config.toml` (backing it up to
+  `config.toml.bak` first). Without `--force`, a present file is **never**
+  clobbered — a re-run with `--provider` but no `--force` is a no-op whose
+  `next_action` tells you to pass `--force`.
 
 Output (JSON):
 
@@ -76,7 +76,7 @@ Output (JSON):
   "config_created": true,
   "provider": "mixed",
   "detected_keys": ["ANTHROPIC_API_KEY", "GEMINI_API_KEY"],
-  "refreshed": false,
+  "forced": false,
   "next_action": "dgml workspace create --organization <org>"
 }
 ```
@@ -95,13 +95,14 @@ Steps:
 1. Creates `docsets/` and `files/`.
 2. Writes the workspace identity (`name` + `organization`) to
    `<workspace>/workspace.json`.
-3. As a one-step convenience, if the user-level `~/.config/dgml/config.toml` is
-   **absent**, generates it (auto-detecting the provider) exactly as `dgml init`
-   would — so `create` works without a separate `init`.
 
-It does **not** write a per-workspace `config.toml`; that file is optional and
-created by hand only when you need workspace-specific overrides (see
-[storage-layout.md](storage-layout.md)).
+Config is owned by `dgml init` and lives at the user level — `workspace create`
+does **not** create or touch it (nor does it write a per-workspace
+`config.toml`; that file is optional and hand-authored only for
+workspace-specific overrides — see [storage-layout.md](storage-layout.md)). If
+the user-level config is **absent**, the workspace is still created (the command
+never blocks) and a warning is printed to **stderr** telling you to run
+`dgml init` and set your API key.
 
 `--organization` is **required**. It is embedded in this workspace's docset
 namespace URIs (`http://dgml.io/<organization>/<DocSetSlug>`) — pick a stable
@@ -118,14 +119,13 @@ Output (JSON):
   "organization": "Acme",
   "initialized": true,
   "config_path": "~/.config/dgml/config.toml",
-  "config_created": false
+  "config_present": true
 }
 ```
 
-`config_created` is `true` only when this call generated the user-level config
-(no prior `dgml init`); in that case an extra `next_action` field is present
-telling you to review the `[models]` block and ensure the provider's API key
-env var is set.
+`config_present` reports whether the user-level config exists. When it is
+`false`, an extra `next_action` field is present and the stderr warning above is
+emitted — but the workspace is created regardless (exit `0`).
 
 ### `dgml status`
 Summary: workspace path, count of docsets, count of files.
@@ -1605,7 +1605,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 |---|---|---|
 | `WORKSPACE_NOT_INITIALIZED` | hard | A command that needs a workspace ran against a directory with no workspace layout (run `dgml workspace create`). |
 | `LEGACY_CONFIG_PRESENT` | hard | A pre-migration `<workspace>/config.toml` is the only config present; the format is now TOML. Run `dgml init` to write `~/.config/dgml/config.toml`, then migrate any settings. |
-| `MODELS_CONFIG_INVALID` | hard | The `[models]` tier block is malformed (a tier or `<tier>_api_key_env`/`<tier>_api_base` is set to a non-string / empty value). |
+| `MODELS_CONFIG_INVALID` | hard | The `[models]` tier block is malformed (a tier is set to a non-string / empty value). |
 | `MISSING_EXTRA` | hard | A command needs an optional extra that isn't installed (e.g. `dgml[clustering]`). |
 | `INVALID_ARGUMENT` | hard | An argument is malformed or empty (e.g. blank `file_id`, unreadable `--proof`). |
 | `INTERNAL_ERROR` | hard | Unexpected exception; the message is a short, single-line `<ExcType>: <msg>` (capped, whitespace collapsed). Pass `--verbose` (or set `DGML_DEBUG=1`) for the full stderr traceback. |

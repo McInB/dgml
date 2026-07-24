@@ -28,21 +28,14 @@ def _clear_fallback_dedup() -> None:
 
 def test_resolve_exact_tier_no_warning(capsys: pytest.CaptureFixture[str]) -> None:
     m = ModelsConfig(light="a", standard="b", advanced="c", expert="d")
-    assert m.resolve("advanced") == ("c", None, None)
-    assert capsys.readouterr().err == ""
-
-
-def test_resolve_carries_tier_credentials(capsys: pytest.CaptureFixture[str]) -> None:
-    m = ModelsConfig(advanced="c", advanced_api_key_env="MY_KEY", advanced_api_base="http://x")
-    assert m.resolve("advanced") == ("c", "MY_KEY", "http://x")
+    assert m.resolve("advanced") == "c"
     assert capsys.readouterr().err == ""
 
 
 def test_resolve_prefers_nearest_lower_tier(capsys: pytest.CaptureFixture[str]) -> None:
     # expert unset; both standard and light set → nearest lower is standard.
     m = ModelsConfig(light="l", standard="s")
-    model, _, _ = m.resolve("expert")
-    assert model == "s"
+    assert m.resolve("expert") == "s"
     assert "falling back to 'standard'" in capsys.readouterr().err
 
 
@@ -51,8 +44,7 @@ def test_resolve_falls_back_upward_when_nothing_below(
 ) -> None:
     # Only standard set; light has no lower neighbour → nearest higher is standard.
     m = ModelsConfig(standard="only-standard")
-    model, _, _ = m.resolve("light")
-    assert model == "only-standard"
+    assert m.resolve("light") == "only-standard"
     err = capsys.readouterr().err
     assert "tier 'light' is not set" in err
     assert "falling back to 'standard'" in err
@@ -69,5 +61,5 @@ def test_fallback_warning_is_deduped(capsys: pytest.CaptureFixture[str]) -> None
 
 
 def test_resolve_none_when_no_tier_set(capsys: pytest.CaptureFixture[str]) -> None:
-    assert ModelsConfig().resolve("standard") == (None, None, None)
+    assert ModelsConfig().resolve("standard") is None
     assert capsys.readouterr().err == ""  # nothing to fall back to → no warning

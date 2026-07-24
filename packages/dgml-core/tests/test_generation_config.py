@@ -125,22 +125,32 @@ def test_section_model_overrides_tier(workspace: Workspace) -> None:
     assert cfg.label_model == "openai/gpt-5"  # override wins
 
 
-def test_per_tier_api_key_env_applied_per_model(workspace: Workspace) -> None:
-    # The mixed-provider shape: transcription and labeling name different keys.
+def test_tier_models_carry_no_credentials(workspace: Workspace) -> None:
+    # [models] tiers name only models — no credentials — so a tier-sourced model
+    # has no api_key/api_key_env/api_base (litellm uses its per-provider env var).
+    write_config(workspace, {"models": {"standard": MODEL, "advanced": "gemini/gemini-2.5-pro"}})
+    cfg = load_generation_config(workspace)
+    assert (cfg.model, cfg.label_model) == (MODEL, "gemini/gemini-2.5-pro")
+    assert (cfg.api_key, cfg.api_key_env, cfg.api_base) == (None, None, None)
+    assert (cfg.label_api_key, cfg.label_api_key_env, cfg.label_api_base) == (None, None, None)
+
+
+def test_per_task_credentials_apply_to_tier_models(workspace: Workspace) -> None:
+    # Credentials live on the task section, independent per model, and apply even
+    # when the models themselves come from the tiers.
     write_config(
         workspace,
         {
-            "models": {
-                "standard": MODEL,
-                "standard_api_key_env": "MY_ANTH",
-                "advanced": "gemini/gemini-2.5-pro",
-                "advanced_api_key_env": "MY_GEM",
-            }
+            "models": {"standard": MODEL, "advanced": "gemini/gemini-2.5-pro"},
+            "generation": {
+                "api_key_env": "MY_ANTH",
+                "label_api_key_env": "MY_GEM",
+            },
         },
     )
     cfg = load_generation_config(workspace)
-    assert cfg.api_key_env == "MY_ANTH"  # transcription (standard)
-    assert cfg.label_api_key_env == "MY_GEM"  # labeling (advanced)
+    assert cfg.api_key_env == "MY_ANTH"  # transcription
+    assert cfg.label_api_key_env == "MY_GEM"  # labeling
 
 
 def test_env_var_overrides_config(workspace: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
