@@ -78,7 +78,7 @@ from .matching import (
     run_phase2_matching,
     walk_computed_leaves,
 )
-from .models_config import resolve_tiered_model
+from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .prompts import get as prompt
 from .storage import Workspace, read_json, write_json_atomic, write_text_atomic
 from .usage import (
@@ -187,8 +187,8 @@ def load_grounded_config(workspace: Workspace) -> GroundedConfig:
     merged = load_merged_config(workspace)
     schema = resolve_tiered_model(
         merged,
-        section_name="grounded",
-        tier="expert",
+        section_name=ConfigSection.GROUNDED,
+        tier=Tier.EXPERT,
         invalid=GroundedConfigInvalid,
         missing=GroundedConfigMissing,
         model_field="schema_model",
@@ -198,8 +198,8 @@ def load_grounded_config(workspace: Workspace) -> GroundedConfig:
     )
     values = resolve_tiered_model(
         merged,
-        section_name="grounded",
-        tier="advanced",
+        section_name=ConfigSection.GROUNDED,
+        tier=Tier.ADVANCED,
         invalid=GroundedConfigInvalid,
         missing=GroundedConfigMissing,
         model_field="values_model",
@@ -208,7 +208,7 @@ def load_grounded_config(workspace: Workspace) -> GroundedConfig:
         base_field="values_api_base",
     )
 
-    section = merged.get("grounded")
+    section = merged.get(ConfigSection.GROUNDED)
     sec: dict[str, Any] = section if isinstance(section, dict) else {}
     max_tool_iters_raw = sec.get("max_tool_iters", DEFAULT_MAX_TOOL_ITERS)
     if (

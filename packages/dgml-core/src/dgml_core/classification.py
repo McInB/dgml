@@ -44,7 +44,7 @@ from .errors import (
 )
 from .llm import LLMConfig, call_with_tools
 from .models import DocSet
-from .models_config import resolve_tiered_model
+from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .storage import Workspace
 from .usage import OPERATION_CLASSIFY
 from .utils import gather_file_pages, image_to_data_url
@@ -115,13 +115,13 @@ def load_classification_config(workspace: Workspace) -> ClassificationConfig:
     merged = load_merged_config(workspace)
     rm = resolve_tiered_model(
         merged,
-        section_name="classification",
-        tier="light",
+        section_name=ConfigSection.CLASSIFICATION,
+        tier=Tier.LIGHT,
         invalid=ClassificationConfigInvalid,
         missing=ClassificationConfigMissing,
     )
 
-    section = merged.get("classification")
+    section = merged.get(ConfigSection.CLASSIFICATION)
     sec: dict[str, Any] = section if isinstance(section, dict) else {}
     max_pages_raw = sec.get("max_pages", DEFAULT_MAX_PAGES)
     if not isinstance(max_pages_raw, int) or isinstance(max_pages_raw, bool) or max_pages_raw < 1:

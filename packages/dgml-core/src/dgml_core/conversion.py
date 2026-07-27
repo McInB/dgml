@@ -57,6 +57,7 @@ from typing import Any, ClassVar
 
 from .config import load_merged_config
 from .errors import ConversionConfigInvalid, UnsupportedFileType
+from .models_config import ConfigSection
 from .storage import Workspace
 
 # Format families and the source suffixes that belong to each. ``.pdf`` is
@@ -279,7 +280,7 @@ def load_conversion_config(workspace: Workspace) -> dict[str, ConverterConfig]:
     Raises :class:`ConversionConfigInvalid` only for a malformed *shape* (the
     section or a family isn't an object, or ``provider`` is missing/blank).
     """
-    section = load_merged_config(workspace).get("conversion")
+    section = load_merged_config(workspace).get(ConfigSection.CONVERSION)
     if section is None:
         return {}
     if not isinstance(section, dict):

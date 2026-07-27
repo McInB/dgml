@@ -16,8 +16,8 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from dgml_core.default_config import PROVIDER_MODELS
 from dgml_core.storage import (
-    PROVIDER_MODELS,
     Workspace,
     canonical_provider,
     detect_provider,

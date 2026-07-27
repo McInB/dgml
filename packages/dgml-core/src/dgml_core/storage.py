@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .default_config import PROVIDER_MODELS
+
 ENV_VAR = "DGML_HOME"
 DEFAULT_DIR_NAME = "dgml-workspace"
 CONFIG_NAME = "config.toml"
@@ -271,40 +273,6 @@ def user_config_path() -> Path:
 # ---------------------------------------------------------------------------
 # `dgml init` config generation
 # ---------------------------------------------------------------------------
-
-# The four tiers, cheapest → strongest, per provider. `dgml init --provider`
-# writes one of these into the `[models]` block; the tier→task mapping and
-# per-task overrides are documented in the CLI reference, not baked into the
-# file (the mapping may change without a config rewrite).
-PROVIDER_MODELS: dict[str, dict[str, str]] = {
-    "mixed": {
-        # Gemini Flash-Lite for the cheap high-volume vision work
-        # (classification/style); Anthropic for the document-reasoning pipeline
-        # (transcription → labeling/value-extraction → schema generation).
-        "light": "gemini/gemini-2.5-flash-lite",
-        "standard": "anthropic/claude-haiku-4-5",
-        "advanced": "anthropic/claude-sonnet-4-6",
-        "expert": "anthropic/claude-opus-4-8",
-    },
-    "anthropic": {
-        "light": "anthropic/claude-haiku-4-5",
-        "standard": "anthropic/claude-haiku-4-5",
-        "advanced": "anthropic/claude-sonnet-4-6",
-        "expert": "anthropic/claude-opus-4-8",
-    },
-    "google": {
-        "light": "gemini/gemini-2.5-flash-lite",
-        "standard": "gemini/gemini-2.5-flash",
-        "advanced": "gemini/gemini-2.5-pro",
-        "expert": "gemini/gemini-2.5-pro",
-    },
-    "openai": {
-        "light": "openai/gpt-5-nano",
-        "standard": "openai/gpt-5-mini",
-        "advanced": "openai/gpt-5",
-        "expert": "openai/gpt-5-pro",
-    },
-}
 
 # Env vars checked by auto-detect (the standard names litellm reads). Order is
 # the reporting order for `detected_api_keys`.

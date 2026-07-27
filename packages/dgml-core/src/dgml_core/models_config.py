@@ -33,16 +33,52 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from .errors import DgmlError, ModelsConfigInvalid
 
+
+class Tier(StrEnum):
+    """A ``[models]`` capability tier. Definition order is cheapest → strongest,
+    which :meth:`ModelsConfig._nearest_set` relies on for fallback ordering.
+
+    A ``StrEnum``, so a member is usable directly as a config key, in f-strings,
+    and anywhere a plain tier string was expected."""
+
+    LIGHT = "light"
+    STANDARD = "standard"
+    ADVANCED = "advanced"
+    EXPERT = "expert"
+
+
+class ConfigSection(StrEnum):
+    """A top-level config section (a ``[section]`` table in ``config.toml``).
+
+    A ``StrEnum`` whose value is the literal TOML section name, so it doubles as
+    the lookup key into the merged config mapping and formats to the bare name in
+    error messages. The tier-backed sections (``classification``, ``style``,
+    ``text_extraction``, ``generation``, ``grounded``) are the ones passed to
+    :func:`resolve_tiered_model`; the rest (``models``, ``ocr``, ``conversion``,
+    ``clustering``) configure non-LLM or tier-source settings."""
+
+    MODELS = "models"
+    GENERATION = "generation"
+    GROUNDED = "grounded"
+    CLASSIFICATION = "classification"
+    OCR = "ocr"
+    STYLE = "style"
+    TEXT_EXTRACTION = "text_extraction"
+    CONVERSION = "conversion"
+    CLUSTERING = "clustering"
+
+
 # Cheapest → strongest. Fallback searches lower (cheaper) neighbours first.
-TIERS: tuple[str, ...] = ("light", "standard", "advanced", "expert")
+TIERS: tuple[Tier, ...] = tuple(Tier)
 
 # Tier fallbacks already reported this process, so a per-file loop (e.g. bulk
 # extract) doesn't flood stderr with the same line. Keyed by (requested, used).
-_WARNED_TIER_FALLBACKS: set[tuple[str, str]] = set()
+_WARNED_TIER_FALLBACKS: set[tuple[Tier, Tier]] = set()
 
 
 @dataclass(frozen=True)
@@ -54,7 +90,7 @@ class ModelsConfig:
     advanced: str | None = None
     expert: str | None = None
 
-    def resolve(self, tier: str) -> str | None:
+    def resolve(self, tier: Tier) -> str | None:
         """Resolve ``tier`` to its model string.
 
         If ``tier`` has no model, fall back to the nearest set tier — lower
@@ -75,7 +111,7 @@ class ModelsConfig:
         model: str | None = getattr(self, actual)
         return model
 
-    def _nearest_set(self, tier: str) -> str | None:
+    def _nearest_set(self, tier: Tier) -> Tier | None:
         idx = TIERS.index(tier)
         # Lower (cheaper) neighbours nearest-first, then higher neighbours.
         order = list(range(idx - 1, -1, -1)) + list(range(idx + 1, len(TIERS)))
@@ -95,15 +131,17 @@ def _validate_optional_str(value: Any, field: str) -> str | None:
     return value
 
 
-def load_models_config(merged: dict[str, Any]) -> ModelsConfig:
+def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
     """Build a :class:`ModelsConfig` from the merged config mapping's
     ``[models]`` section (an empty section yields an all-``None`` config)."""
-    section = merged.get("models")
+    section = merged.get(ConfigSection.MODELS)
     if section is None:
         return ModelsConfig()
     if not isinstance(section, dict):
         raise ModelsConfigInvalid("'models' must be a table")
-    return ModelsConfig(**{tier: _validate_optional_str(section.get(tier), tier) for tier in TIERS})
+    return ModelsConfig(
+        **{t.value: _validate_optional_str(section.get(t.value), t.value) for t in TIERS}
+    )
 
 
 @dataclass(frozen=True)
@@ -117,10 +155,10 @@ class ResolvedModel:
 
 
 def resolve_tiered_model(
-    merged: dict[str, Any],
+    merged: dict[ConfigSection, Any],
     *,
-    section_name: str,
-    tier: str,
+    section_name: ConfigSection,
+    tier: Tier,
     invalid: type[DgmlError],
     missing: type[DgmlError],
     model_field: str = "model",

@@ -51,7 +51,7 @@ from typing import Any
 
 from .config import load_merged_config
 from .errors import AuthError, TextExtractionConfigInvalid
-from .models_config import resolve_tiered_model
+from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .storage import Workspace
 
 DEFAULT_TEMPERATURE = 0.0
@@ -86,7 +86,7 @@ def load_text_extraction_config(workspace: Workspace) -> TextExtractionConfig | 
     :class:`TextExtractionConfigInvalid` when malformed.
     """
     merged = load_merged_config(workspace)
-    section = merged.get("text_extraction")
+    section = merged.get(ConfigSection.TEXT_EXTRACTION)
     if section is None:
         return None  # the section's presence is the on switch
     if not isinstance(section, dict):
@@ -97,8 +97,8 @@ def load_text_extraction_config(workspace: Workspace) -> TextExtractionConfig | 
     # the feature is on; it does not turn the feature on).
     rm = resolve_tiered_model(
         merged,
-        section_name="text_extraction",
-        tier="standard",
+        section_name=ConfigSection.TEXT_EXTRACTION,
+        tier=Tier.STANDARD,
         invalid=TextExtractionConfigInvalid,
         missing=TextExtractionConfigInvalid,
     )

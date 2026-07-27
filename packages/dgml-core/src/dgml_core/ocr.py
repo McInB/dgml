@@ -57,6 +57,7 @@ from typing import Any, ClassVar
 
 from .config import load_merged_config
 from .errors import OcrConfigInvalid, OcrConfigMissing, OcrFailed
+from .models_config import ConfigSection
 from .pages import PAGE_GLOB
 from .storage import Workspace
 from .text_extraction import (
@@ -112,7 +113,7 @@ def load_ocr_config(workspace: Workspace) -> OcrConfig:
     :class:`OcrConfigMissing`. Raises :class:`OcrConfigInvalid` when a
     config exists but is malformed.
     """
-    ocr = load_merged_config(workspace).get("ocr")
+    ocr = load_merged_config(workspace).get(ConfigSection.OCR)
     if ocr is None:
         return _default_ocr_config()
     if not isinstance(ocr, dict):

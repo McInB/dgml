@@ -53,6 +53,7 @@ from pydantic_settings import (
 )
 
 from .errors import CorruptMetadata, LegacyConfigPresent
+from .models_config import ConfigSection
 from .storage import user_config_path
 
 if TYPE_CHECKING:
@@ -112,13 +113,15 @@ def _build_settings_class(user_path: Path, ws_path: Path) -> type[BaseSettings]:
 
 def load_merged_config(
     workspace: Workspace, *, cli_overrides: dict[str, Any] | None = None
-) -> dict[str, Any]:
+) -> dict[ConfigSection, Any]:
     """Return the fully merged config mapping every section loader consumes.
 
     Merges, in increasing precedence: built-in defaults → user
     ``~/.config/dgml/config.toml`` → workspace ``<workspace>/config.toml`` →
     ``DGML_`` env vars → ``cli_overrides`` (highest). Sections left unset are
-    omitted from the result.
+    omitted from the result. Keys are :class:`~dgml_core.models_config.ConfigSection`
+    members (every declared field name is a section), so loaders index the result
+    with the enum rather than a bare string.
     """
     user_path = user_config_path()
     if not user_path.exists() and workspace.has_legacy_json_config():
@@ -137,4 +140,6 @@ def load_merged_config(
         # A section set to a non-table (e.g. `generation = "haiku"`) — a
         # malformed config, surfaced uniformly like a TOML parse error.
         raise CorruptMetadata(f"malformed config: {exc}") from exc
-    return settings.model_dump(exclude_defaults=True)
+    dump: dict[str, Any] = settings.model_dump(exclude_defaults=True)
+    # Field names are exactly the section names, so every key is a ConfigSection.
+    return {ConfigSection(section): value for section, value in dump.items()}

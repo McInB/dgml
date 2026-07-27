@@ -33,12 +33,12 @@ from dgml_core.classification import (
 )
 from dgml_core.consistency import check_workspace
 from dgml_core.conversion import FAMILY_BY_SUFFIX, load_conversion_config
+from dgml_core.default_config import PROVIDER_MODELS
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import DgmlError, WorkspaceNotInitialized, short_error_message
 from dgml_core.files import AddFileResult, ConflictPolicy, FileStore
 from dgml_core.models import DocSet
 from dgml_core.storage import (
-    PROVIDER_MODELS,
     Workspace,
     canonical_provider,
     detect_provider,

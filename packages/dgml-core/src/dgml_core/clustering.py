@@ -63,6 +63,7 @@ from .errors import (
     IncrementalWithoutClusters,
 )
 from .llm_clustering import llm_cluster_files
+from .models_config import ConfigSection
 from .pages import PAGE_GLOB
 from .run_clustering import resolve_text_settings, run_clustering_detailed
 from .storage import Workspace, read_json
@@ -238,7 +239,7 @@ def load_clustering_overrides(workspace: Workspace) -> dict[str, Any]:
     isn't a table. Field-level validation happens later in
     :func:`dgml.run_clustering._build_config` after the merge.
     """
-    section = load_merged_config(workspace).get("clustering")
+    section = load_merged_config(workspace).get(ConfigSection.CLUSTERING)
     if section is None:
         return {}
     if not isinstance(section, dict):

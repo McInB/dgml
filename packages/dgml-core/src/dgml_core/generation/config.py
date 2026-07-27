@@ -39,7 +39,7 @@ from dgml_core.errors import (
     GenerationConfigMissing,
     short_error_message,
 )
-from dgml_core.models_config import resolve_tiered_model
+from dgml_core.models_config import ConfigSection, Tier, resolve_tiered_model
 from dgml_core.storage import Workspace
 
 
@@ -79,8 +79,8 @@ def load_generation_config(workspace: Workspace) -> GenerationConfig:
     merged = load_merged_config(workspace)
     transcribe = resolve_tiered_model(
         merged,
-        section_name="generation",
-        tier="standard",
+        section_name=ConfigSection.GENERATION,
+        tier=Tier.STANDARD,
         invalid=GenerationConfigInvalid,
         missing=GenerationConfigMissing,
         model_field="model",
@@ -90,8 +90,8 @@ def load_generation_config(workspace: Workspace) -> GenerationConfig:
     )
     label = resolve_tiered_model(
         merged,
-        section_name="generation",
-        tier="advanced",
+        section_name=ConfigSection.GENERATION,
+        tier=Tier.ADVANCED,
         invalid=GenerationConfigInvalid,
         missing=GenerationConfigMissing,
         model_field="label_model",

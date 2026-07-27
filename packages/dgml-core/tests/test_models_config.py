@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 from dgml_core import models_config
-from dgml_core.models_config import ModelsConfig
+from dgml_core.models_config import ModelsConfig, Tier
 
 
 @pytest.fixture(autouse=True)
@@ -28,14 +28,14 @@ def _clear_fallback_dedup() -> None:
 
 def test_resolve_exact_tier_no_warning(capsys: pytest.CaptureFixture[str]) -> None:
     m = ModelsConfig(light="a", standard="b", advanced="c", expert="d")
-    assert m.resolve("advanced") == "c"
+    assert m.resolve(Tier.ADVANCED) == "c"
     assert capsys.readouterr().err == ""
 
 
 def test_resolve_prefers_nearest_lower_tier(capsys: pytest.CaptureFixture[str]) -> None:
     # expert unset; both standard and light set → nearest lower is standard.
     m = ModelsConfig(light="l", standard="s")
-    assert m.resolve("expert") == "s"
+    assert m.resolve(Tier.EXPERT) == "s"
     assert "falling back to 'standard'" in capsys.readouterr().err
 
 
@@ -44,7 +44,7 @@ def test_resolve_falls_back_upward_when_nothing_below(
 ) -> None:
     # Only standard set; light has no lower neighbour → nearest higher is standard.
     m = ModelsConfig(standard="only-standard")
-    assert m.resolve("light") == "only-standard"
+    assert m.resolve(Tier.LIGHT) == "only-standard"
     err = capsys.readouterr().err
     assert "tier 'light' is not set" in err
     assert "falling back to 'standard'" in err
@@ -52,14 +52,14 @@ def test_resolve_falls_back_upward_when_nothing_below(
 
 def test_fallback_warning_is_deduped(capsys: pytest.CaptureFixture[str]) -> None:
     m = ModelsConfig(standard="only-standard")
-    m.resolve("light")
+    m.resolve(Tier.LIGHT)
     first = capsys.readouterr().err
-    m.resolve("light")
+    m.resolve(Tier.LIGHT)
     second = capsys.readouterr().err
     assert first.count("falling back") == 1
     assert second == ""  # same (tier, used) pair — not repeated
 
 
 def test_resolve_none_when_no_tier_set(capsys: pytest.CaptureFixture[str]) -> None:
-    assert ModelsConfig().resolve("standard") is None
+    assert ModelsConfig().resolve(Tier.STANDARD) is None
     assert capsys.readouterr().err == ""  # nothing to fall back to → no warning

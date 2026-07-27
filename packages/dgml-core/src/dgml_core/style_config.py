@@ -49,7 +49,7 @@ from typing import Any
 
 from .config import load_merged_config
 from .errors import AuthError, StyleConfigInvalid
-from .models_config import resolve_tiered_model
+from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .storage import Workspace
 
 DEFAULT_MAX_TOKENS = 4000
@@ -80,7 +80,7 @@ def load_style_config(workspace: Workspace) -> StyleConfig | None:
     ``[models].light`` tier. Raises :class:`StyleConfigInvalid` when malformed.
     """
     merged = load_merged_config(workspace)
-    section = merged.get("style")
+    section = merged.get(ConfigSection.STYLE)
     if section is None:
         return None  # the section's presence is the on switch
     if not isinstance(section, dict):
@@ -91,8 +91,8 @@ def load_style_config(workspace: Workspace) -> StyleConfig | None:
     # model when the feature is on; it does not turn the feature on).
     rm = resolve_tiered_model(
         merged,
-        section_name="style",
-        tier="light",
+        section_name=ConfigSection.STYLE,
+        tier=Tier.LIGHT,
         invalid=StyleConfigInvalid,
         missing=StyleConfigInvalid,
     )
