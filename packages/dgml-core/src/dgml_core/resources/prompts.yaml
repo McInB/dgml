@@ -21,61 +21,68 @@ merge_system_prompt: |
   Output: each final token must set `ref` to an input token id (it inherits that token's position on the page). Set `t` only when the correct text differs from that referenced token's own text (e.g. de-ligaturing, or recombining split pieces); omit `t` to use the referenced token's text unchanged. Emit tokens in natural reading order. Return only a JSON object mapping each region id to its list of output tokens, e.g. {"r0": [{"ref": "d0", "t": "file"}], "r1": [{"ref": "o3"}, {"ref": "o4"}]}.
 
 # ── Grounded extraction: schema generation ────────────────────────────────────
-# System + user prompts for proposing a grounded_field JSON Schema from sample
-# PDFs (dgml_core.grounded.generate_schema). `extraction_schema_user_intro_multi`
-# is .format()'d with {n_files}; the *_body and *_system are used verbatim (they
+# System + user prompts for proposing a typed field tree from sample PDFs
+# (dgml_core.grounded.generate_schema). The tree is rendered straight to the
+# at-rest RELAX NG Compact schema. `extraction_schema_user_intro_multi` is
+# .format()'d with {n_files}; the *_body and *_system are used verbatim (they
 # contain literal braces, so must NOT be passed through str.format).
 extraction_schema_system: |-
-  You design JSON Schema documents that drive grounded extraction from
-  PDFs. Your output describes what to pull out of a document of this kind
-  so that every extracted value can be traced back to one or more regions
-  of the source page (the "grounded_field" convention).
+  You design extraction schemas for business documents. Your output is a
+  typed field tree that describes what to pull out of a document of this
+  kind, with the right data type on every value, so that each extracted
+  value can be traced back to one or more regions of the source page.
 
 extraction_schema_user_intro_single: |-
-  Given the attached PDF, propose a JSON Schema (draft-07) that captures the structured information someone would want to extract from this document and from others of the same kind.
+  Given the attached PDF, propose an extraction schema that captures the structured information someone would want to extract from this document and from others of the same kind.
 
 extraction_schema_user_intro_multi: |-
-  Given the {n_files} attached PDFs (all of the same kind), propose a JSON Schema (draft-07) that captures the structured information someone would want to extract from documents of this kind. The schema you return must fit ALL of the attached files — favor what generalizes across instances over fields that only appear in one.
+  Given the {n_files} attached PDFs (all of the same kind), propose an extraction schema that captures the structured information someone would want to extract from documents of this kind. The schema you return must fit ALL of the attached files — favor what generalizes across instances over fields that only appear in one.
 
 extraction_schema_user_body: |-
-  Schema rules — non-negotiable:
+  Return the schema by calling ``submit_schema`` with ``fields`` — the list
+  of top-level field nodes. Each node is an object:
 
-  1. The top level is a JSON object (a JSON Schema document).
-  2. Define a reusable ``grounded_field`` in ``definitions``:
-     {
-       "type": "object",
-       "properties": {
-         "text": {"type": "string"},
-         "locations": {
-           "type": "array",
-           "minItems": 1,
-           "items": {
-             "type": "object",
-             "properties": {
-               "page_number": {"type": "integer", "minimum": 1},
-               "bounding_box": {
-                 "type": "array",
-                 "items": {"type": "integer", "minimum": 0},
-                 "minItems": 4,
-                 "maxItems": 4,
-                 "description": "[left, top, right, bottom] in image pixels, top-left origin."
-               }
-             },
-             "required": ["page_number", "bounding_box"]
-           }
-         }
-       },
-       "required": ["text", "locations"]
-     }
-  3. EVERY leaf value in the schema MUST be ``{"$ref": "#/definitions/grounded_field"}``.
-     Do not introduce raw ``string`` / ``number`` leaves. Use the ref so
-     every extracted value carries grounding.
-  4. Repeated entities (line items, list bullets, courses, etc.) become arrays of objects.
-  5. Keep the schema focused on what someone would actually extract. Skip
+    {
+      "name": "DueDate",          // required; becomes the tag name
+      "kind": "field",            // "field" | "container" | "collection"
+      "datatype": "date",         // fields only (see the datatype list)
+      "description": "...",        // optional, short
+      "example": "...",            // optional, a real value seen in a document
+      "prompt": "...",             // optional: where to find / how to derive it
+      "fields": [ ... ],           // container: its child nodes
+      "item": { ... }              // collection: the repeated item node
+    }
+
+  kind:
+  - "field"      — a single grounded value (a leaf). Give it a ``datatype``.
+  - "container"  — groups related child fields; put them in ``fields``.
+  - "collection" — a repeated entity (line items, meter reads, bullets).
+                   Describe ONE occurrence via ``item`` (usually a container),
+                   or list the item's fields directly in ``fields``.
+
+  datatype — pick the most specific one that fits the value:
+  - "text"     — names, addresses, ids, phone numbers, free text, and
+                 anything numeric-looking you must NOT normalize (account
+                 numbers, meter serials, and ranges like a billing period).
+  - "date"     — a calendar date (a due date, a reading date).
+  - "dateTime" — a date with a time of day.
+  - "decimal"  — money and measured quantities ($1,234.50, 812.6 kWh).
+  - "integer"  — whole counts.
+  - "boolean"  — yes/no, true/false.
+  - "gYear"    — a bare year.
+  - "time"     — a clock time on its own.
+  - "anyURI"   — a URL or email.
+  Omitting ``datatype`` (or "text") means an untyped text value.
+
+  Rules:
+  1. Choose a real datatype wherever the value is a date, amount, count, or
+     other typed quantity — do not fall back to "text" for those.
+  2. Repeated entities become a "collection", never a numbered set of
+     near-duplicate fields.
+  3. Keep the schema focused on what someone would actually extract. Skip
      chrome (page numbers, headers/footers) unless it carries meaning.
 
-  When you have your schema, call ``submit_schema`` with it. That tool
-  call IS the answer — do not also reply with prose.
+  That ``submit_schema`` call IS the answer — do not also reply with prose.
 
 # ── Grounded extraction: value extraction, phase 1 (values + page numbers) ────
 # System prompt is used verbatim (contains literal braces); the user prompt is

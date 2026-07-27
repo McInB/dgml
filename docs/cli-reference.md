@@ -168,7 +168,9 @@ failed operations.
 
 ### `dgml cluster [--skip-existing] [--config PRESET|PATH] [--mode auto|fresh|incremental] [--method auto|embedding|llm] [--small-corpus-threshold N]`
 
-Requires `pip install dgml[clustering]`. The extra pulls in the
+Requires the `clustering` extra — `uv sync --extra clustering` from a repo
+checkout (`pip install dgml[clustering]` once DGML is published to PyPI).
+The extra pulls in the
 `dgml-clustering` workspace package and its ML stack (embedding models,
 `leidenalg`, `scipy`, `sklearn`); without it the
 command exits 1 with `MISSING_EXTRA`.
@@ -291,7 +293,7 @@ LLM naming requires the same workspace setup as `--auto-classify`:
 
 - A `classification` section in `<workspace>/config.json` (see
   "Auto-classification" above).
-- `pip install dgml[classification]` (provides `litellm`).
+- `litellm`, which ships with the base `dgml` install (no extra needed).
 
 If neither is in place, every unmatched cluster's files end up in
 `failed_file_ids`; matched files still get assigned. The clustering
@@ -422,7 +424,7 @@ alignment (rare-n-gram anchoring + windowed diff), with a
 weighted-similarity recovery pass for OCR noise, a span-search rescue for
 repeated content, and a row-context pass for punctuation-only cells,
 interleaved multi-line table cells, and digit-discrepant text. A file
-with no `page_text/` (added without `--text-mode digital`/`ocr`/`hybrid`)
+with no `page_text/`
 is written but left ungrounded, with a warning — it does not fail the run.
 
 **The `dg:origin` attribute.** Qualified to whatever URI the document binds
@@ -584,6 +586,30 @@ A `failed` entry looks like:
   "error": { "code": "FILE_NOT_FOUND", "message": "source not found at ..." } }
 ```
 
+A `converted` entry carries `output` (the written DGML path), `links` (the
+semantic-link count), the grounding fields (`grounded`, then either
+`matched_token_pct` + `elements_annotated` or `grounding_error`), and — **only
+when that file's labeling could not reach the model at all** (a wrong/absent
+`generation.label_model` key, a bad model id, or a network error) — a
+`label_error`:
+
+```json
+{ "status": "converted", "file_id": "k7q3xb91pmrf", "source": "contract-a.pdf",
+  "output": "/ws/.../contract-a.dgml.xml", "links": 0, "grounded": true,
+  "matched_token_pct": 99.6, "elements_annotated": 445,
+  "label_error": { "code": "LABEL_MODEL_UNREACHABLE", "message": "AuthenticationError: ..." } }
+```
+
+The document still converts (`status: "converted"`, exit 0) — it just renders
+without concept tags. `label_error` makes a misconfigured `label_model` visible
+in the normal JSON, not only under `--verbose`. It is present *only* on affected
+files (like `grounding_error`), and only for a hard "couldn't reach the model"
+failure — a model that runs but simply produces few/no labels is a normal soft
+outcome and is not flagged. Most misconfigurations are caught earlier by the
+pre-flight check below; `label_error` covers the runtime failures that slip past
+it (a transient network/rate-limit error, or a well-formed but nonexistent model
+id).
+
 Errors (run-level, error envelope + exit 1):
 
 | Code | Cause |
@@ -591,7 +617,8 @@ Errors (run-level, error envelope + exit 1):
 | `DOCSET_NOT_FOUND` | `<docset_id>` does not exist. |
 | `EMPTY_DOCSET` | DocSet exists but has no files assigned. |
 | `GENERATION_CONFIG_MISSING` | No `generation` section (or a missing `model` / `label_model`) in `<workspace>/config.json`. |
-| `GENERATION_CONFIG_INVALID` | The `generation` section is malformed (bad model string, both `api_key` and `api_key_env` set, etc.). |
+| `GENERATION_CONFIG_INVALID` | The `generation` section is malformed (bad model string, both `api_key` and `api_key_env` set, etc.). A **pre-flight check** (before any transcription spend) also raises this for a model string with no resolvable provider. |
+| `AUTH_ERROR` | Pre-flight check: the API key for `model` or `label_model`'s provider is absent (and no `api_key` / `api_key_env` set). Skipped when `generation.api_base` is set, since a custom endpoint may authenticate differently. |
 
 > stdout is a single JSON object. The transcription / labeling / render
 > progress lines go to stderr, and only when `--verbose` is passed.
@@ -636,6 +663,13 @@ Ask the configured `schema_model` to propose an extraction schema from one or
 more sample PDFs, then store it as `extraction-schema.rnc`. `--from-file` is repeatable and
 defaults to every file in the DocSet. Errors `NO_FILES` if the DocSet is empty
 and no `--from-file` is given.
+
+The model submits a **typed field tree** — each leaf carries the XSD datatype it
+chose (`date`, `decimal`, `integer`, `boolean`, `gYear`, …, or `text`) — which
+is rendered straight to the at-rest RNC (leaves emit `xsd:date`, `xsd:decimal`,
+etc.). There is no grounded-field JSON Schema intermediate; datatypes are native
+to the generated schema, and downstream extraction normalizes each typed value
+to a `dg:value`/`xsi:type`. The output shape is unchanged.
 
 ```json
 {
@@ -776,7 +810,7 @@ ignored when `<path>` is a single file.
 | `--text-mode` | Behavior |
 |---|---|
 | `digital` (default) | Extract digital text from the PDF with `pdfminer.six`. A permanent text-extraction error is recorded for files with no digital text — the File record is still created (soft fail). |
-| `ocr` | Send each rendered page image to the cloud provider configured in `<workspace>/config.json`. Requires `pip install dgml[azure]` or `pip install dgml[aws]`. See "OCR configuration" below. |
+| `ocr` | Send each rendered page image to the cloud provider configured in `<workspace>/config.json`. Requires the `azure` or `aws` extra (`uv sync --extra azure` / `uv sync --extra aws` from a repo checkout; `pip install dgml[azure]`/`dgml[aws]` once DGML is published to PyPI). See "OCR configuration" below. |
 | `hybrid` | Run `digital` then `ocr` and merge the two per-page results by grouping words covering the same area into overlap regions (boxes overlap on IoU > 0.5 *or* one mostly contained in the other, so split/merge tokenization is resolved as a unit). Each region is resolved as a whole: OCR-only regions are kept; digital-only regions (no overlapping OCR) are assumed invisible to the human eye and dropped; mixed regions compare both sides' concatenated text by dash-normalized Levenshtein distance — if they agree (distance ≤ 2) digital wins (its characters come straight from the PDF font, more reliable than OCR even when OCR's tokenization is finer), and if they disagree OCR wins. A page whose digital text is mostly unresolved glyphs (pdfminer `(cid:N)` sentinels) falls back to OCR entirely. Default is silent — pass the global `--verbose` flag to surface per-page warnings and the merge summary on stderr. Requires the same `ocr` workspace config as `--text-mode ocr`. Optionally, an LLM can make the per-region decision instead of this heuristic — declare a `text_extraction` section in `config.json` (e.g. a local Ollama model); see [storage-layout.md](storage-layout.md#text_extraction-optional). Any LLM failure falls back to the heuristic for that page. |
 
 Conflict types recorded in the success payload as `conflict_kind`:
@@ -1459,7 +1493,8 @@ filter was requested, `dgml discover` warns on stderr and falls back to
 
 Anchor a DGMLX bundle's Merkle root, or a single node's hash, directly
 on an EVM chain — no MCP server. These commands require the `chain`
-extra (`pip install dgml[chain]`); without it they return a
+extra (`uv sync --extra chain` from a repo checkout; `pip install
+dgml[chain]` once DGML is published to PyPI); without it they return a
 `MISSING_EXTRA` error envelope. The local Merkle/hashing is identical to
 the `dgmlx`/`node` commands; these add the chain transport (a stdlib
 JSON-RPC client, anchor-precompile ABI encoding, EIP-1559 signing).
@@ -1592,6 +1627,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `CLASSIFICATION_FAILED` | soft | The classification LLM call failed; lands in `classification.error`. |
 | `CLUSTERING_CONFIG_INVALID` | hard | The optional `clustering` config section failed validation. |
 | `GROUNDING_FAILED` | soft | Grounding a file failed; surfaces as `grounded: false` with a `grounding_error` on that file's `docset generate` result entry. |
+| `LABEL_MODEL_UNREACHABLE` | soft | A file's labeling could not reach the `label_model` at all (auth / bad model id / network); surfaces as a `label_error` on that file's `docset generate` result entry. The file still converts, unlabeled. |
 | `GENERATION_FAILED` | soft | `docset generate` produced no output for a file (transcription failed) or two files shared a filename; per-item `failed` entry in `results`. |
 | `SCHEMA_NOT_FOUND` | hard | An `extraction` command needs an `extraction-schema.rnc` the DocSet doesn't have. |
 | `SCHEMA_INVALID` | hard | A schema passed to `extraction set-schema` is not valid RNC (within the supported subset) or not a JSON object. |

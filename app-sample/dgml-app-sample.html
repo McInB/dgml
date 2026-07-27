@@ -818,6 +818,22 @@ function buildComputedIndex(xmlStr) {
 // viewBox="0 0 100 100" + rects at percent coords + CSS inset:0 fill parent.
 // Zero dependency on image pixel dimensions — always correct regardless of timing.
 // ═══════════════════════════════════════════════════════════════════
+// A pinned node selection lights up that node AND its whole subtree — selecting
+// a parent (e.g. a LineItem) highlights its children (Type, Amount, …) too.
+// Node ids are hierarchical paths ("r/0/1"), so a descendant is any id that
+// starts with "<selNodeId>/".
+function nodeIsInSelection(nid) {
+  const sel = S.selNodeId;
+  return !!sel && (nid === sel || nid.startsWith(sel + '/'));
+}
+
+// Same subtree rule for hover: hovering a parent node lights up its whole
+// subtree (the node plus its descendants), mirroring nodeIsInSelection.
+function nodeIsInHover(nid) {
+  const hov = S.hovNodeId;
+  return !!hov && (nid === hov || nid.startsWith(hov + '/'));
+}
+
 function renderOverlay() {
   const svg = document.getElementById('pg-svg');
   if (!svg) return;
@@ -843,9 +859,10 @@ function renderOverlay() {
     const x = r.x * 100 / imgW, y = r.y * 100 / imgH;
     const w = r.w * 100 / imgW, h = r.h * 100 / imgH;
     const tag = stripNs(r.tag);
-    // Exact React OR logic: selected = nodeId match OR tag match
-    const isSel = (!!selNodeId && r.nodeId === selNodeId) || (!!selTag && tag === selTag);
-    const isHov = !isSel && ((!!hovNodeId && r.nodeId === hovNodeId) || (!!hovTag && tag === hovTag));
+    // A pinned node selection (tree/box click) identifies ONE instance and wins;
+    // a bare tag selection (chip) highlights every instance. Same rule for hover.
+    const isSel = selNodeId ? nodeIsInSelection(r.nodeId) : (!!selTag && tag === selTag);
+    const isHov = !isSel && (hovNodeId ? nodeIsInHover(r.nodeId) : (!!hovTag && tag === hovTag));
     const isSource = !isSel && !isHov && !!sourceNodeIds && sourceNodeIds.has(r.nodeId);
     const isBasket = !isSel && !isHov && !isSource && basket.includes(tag);
 
@@ -873,7 +890,9 @@ function renderOverlay() {
     rect.addEventListener('pointerenter', () => { S.hovNodeId = nid; S.hovTag = tag; refreshTagChips(); renderTreePanel(); renderAnchorStrip(); updateOverlayStyles(); });
     rect.addEventListener('pointerleave', () => { S.hovNodeId = null; S.hovTag = null; refreshTagChips(); renderTreePanel(); renderAnchorStrip(); updateOverlayStyles(); });
     rect.addEventListener('click', () => {
-      // toggle selNodeId; always set selTag (matches React: toggleSelectedDgmlNodeId + setSelectedTagName)
+      // Clicking a box pins that one instance (selNodeId, which wins in the
+      // isSel rule → only this box highlights). selTag is kept only so the
+      // chip/basket know the tag; it no longer drives page highlighting.
       S.selNodeId = S.selNodeId === nid ? null : nid;
       S.selTag = tag;
       if (S.selNodeId) expandAncestorsOf(S.selNodeId);
@@ -893,8 +912,8 @@ function updateOverlayStyles() {
   svg.querySelectorAll('rect[data-tag]').forEach(rect => {
     const tag = rect.dataset.tag;
     const nid = rect.dataset.nid;
-    const isSel = (!!selNodeId && nid === selNodeId) || (!!selTag && tag === selTag);
-    const isHov = !isSel && ((!!hovNodeId && nid === hovNodeId) || (!!hovTag && tag === hovTag));
+    const isSel = selNodeId ? nodeIsInSelection(nid) : (!!selTag && tag === selTag);
+    const isHov = !isSel && (hovNodeId ? nodeIsInHover(nid) : (!!hovTag && tag === hovTag));
     const isSource = !isSel && !isHov && !!sourceNodeIds && sourceNodeIds.has(nid);
     const isBasket = !isSel && !isHov && !isSource && basket.includes(tag);
     let fill, stroke, sw;
@@ -2019,7 +2038,11 @@ function refreshTagChips() {
     chip.addEventListener('mouseenter', () => { S.hovTag = tag; updateChipStyles(); renderAnchorStrip(); updateOverlayStyles(); });
     chip.addEventListener('mouseleave', () => { S.hovTag = null; updateChipStyles(); renderAnchorStrip(); updateOverlayStyles(); });
     chip.addEventListener('click', () => {
-      S.selTag = S.selTag === tag ? null : tag;  // toggle selTag only, never touch selNodeId
+      // Selecting a tag is a tag-level action → highlight every instance. Clear
+      // any pinned single-instance selection so node-id precedence (in the
+      // overlay/tree isSel rule) doesn't shadow the all-instances highlight.
+      S.selTag = S.selTag === tag ? null : tag;
+      S.selNodeId = null;
       refreshTagChips(); renderTreePanel(); renderAnchorStrip(); renderOverlay();
     });
   });
@@ -2108,7 +2131,10 @@ function renderTreePanel() {
       refreshTagChips(); renderAnchorStrip(); renderOverlay();
     });
     btn.addEventListener('click', () => {
-      // Always set selTag (React: always dispatch setSelectedTagName)
+      // Set selTag so the tag chip + anchor "basket" know which tag this
+      // instance belongs to — but page/tree highlighting is driven by
+      // selNodeId (set below), which takes precedence in the isSel rule, so a
+      // tree click highlights only THIS instance, not every one of the tag.
       S.selTag = tag;
       // Toggle selNodeId regardless of hasBoxes — a tree click always
       // identifies one concrete node (buildTreeNodes gives every node an
@@ -2143,8 +2169,10 @@ function renderTreeNode(node, depth) {
   const tag = stripNs(node.tag);
   const hasKids = node.children.length > 0;
   const expanded = treeExpanded.has(node.id);
-  const isSel = (!!S.selNodeId && node.id === S.selNodeId) || (!!S.selTag && tag === S.selTag);
-  const isHov = !isSel && ((!!S.hovNodeId && node.id === S.hovNodeId) || (!!S.hovTag && tag === S.hovTag));
+  // Node-id selection pins one instance and wins; a bare tag selection (chip)
+  // lights up every instance's row. Mirrors the page overlay's rule.
+  const isSel = S.selNodeId ? nodeIsInSelection(node.id) : (!!S.selTag && tag === S.selTag);
+  const isHov = !isSel && (S.hovNodeId ? nodeIsInHover(node.id) : (!!S.hovTag && tag === S.hovTag));
   const indent = depth * 12;
   let btnCls = 'tree-node-btn';
   if (isSel) btnCls += ' tag-sel';

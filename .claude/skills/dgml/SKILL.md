@@ -372,6 +372,22 @@ no `page_text/` is written but left ungrounded (the `outputs[]` entry has
 sidecar (match rates, largest ungrounded snippets) — `matched_token_pct`
 below the high 90s usually means generation dropped or paraphrased text.
 
+**Labeling failures are visible without `--verbose`.** A misconfigured
+`generation.label_model` is caught two ways. Before any transcription spend, a
+pre-flight check fails the whole run fast — `AUTH_ERROR` if the model's provider
+key is absent (unless `api_base` is set), `GENERATION_CONFIG_INVALID` for a
+malformed model string. A failure that slips past it at runtime (transient
+network error, or a well-formed but nonexistent model id) doesn't discard the
+transcription: the file still converts (`status: converted`, exit 0, unlabeled)
+and its `results[]` entry carries a `label_error: {code:
+"LABEL_MODEL_UNREACHABLE", message}`. So after a `generate`, check for it rather
+than assuming labeled output:
+
+```bash
+uv run dgml docset generate "$ds" \
+  | jq '.results[] | select(.label_error) | {source, label_error}'
+```
+
 **Resume on rerun.** If a file's per-(docset, file) `<stem>.dgml.xml`
 already holds a generated document tree, that file is skipped — re-invoking
 the same command after a crash only re-processes unfinished documents. When
@@ -451,7 +467,10 @@ The workflow is generate-schema → extract → get-values:
 
 ```bash
 # 1) Propose a schema from sample PDFs (stored as extraction-schema.rnc). --from-file is
-#    repeatable; omit it to sample every file in the docset.
+#    repeatable; omit it to sample every file in the docset. The model picks an
+#    XSD datatype per leaf, so the generated RNC has typed leaves natively
+#    (xsd:date, xsd:decimal, xsd:integer, …) — dates/amounts/counts come back as
+#    typed dg:value at extraction, not bare text.
 uv run dgml extraction generate-schema "$ds" --from-file "$fid"
 
 #    …or set one yourself. set-schema accepts RNC *or* a grounded-field JSON
