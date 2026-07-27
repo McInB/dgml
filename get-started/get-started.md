@@ -128,7 +128,7 @@ value-extraction ← `advanced`, classification/style ← `light`, schema-genera
 
 ```toml
 [models]
-light    = "gemini/gemini-2.0-flash-lite"
+light    = "gemini/gemini-2.5-flash-lite"
 standard = "anthropic/claude-haiku-4-5"
 advanced = "anthropic/claude-sonnet-4-6"
 expert   = "anthropic/claude-opus-4-8"

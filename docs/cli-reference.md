@@ -45,13 +45,17 @@ or after a command group (`dgml docset --format text list`).
 ## Workspace commands
 
 ### `dgml init [--provider PROVIDER] [--force]`
-Establish the **user-level config** — nothing else. `init` writes
-`~/.config/dgml/config.toml` (on Windows, `%APPDATA%\dgml\config.toml`;
-`$XDG_CONFIG_HOME` wins when set) with a `[models]`
-block, and does **not** create `docsets/`, `files/`, or any workspace config —
-that is `dgml workspace create`. Configure once per machine; every workspace
-inherits this config (see [storage-layout.md](storage-layout.md) for the full
-resolution order).
+Establish the **user-level config** — nothing else. `init` writes the
+user-level config with a `[models]` block, choosing its location in this order:
+
+- `$XDG_CONFIG_HOME/dgml/config.toml` when `$XDG_CONFIG_HOME` is set;
+- otherwise `%APPDATA%\dgml\config.toml` on Windows;
+- otherwise `~/.config/dgml/config.toml`.
+
+It does **not** create `docsets/`, `files/`, or any workspace config — that is
+`dgml workspace create`. Configure once per machine; every workspace inherits
+this config (see [storage-layout.md](storage-layout.md) for the full resolution
+order).
 
 The `[models]` block names four tiers — `light`, `standard`, `advanced`,
 `expert` — that back the per-task models (classification/style, transcription/
@@ -964,7 +968,7 @@ section in `<workspace>/config.toml`:
 ```json
 {
   "classification": {
-    "model": "gemini/gemini-3.1-flash-lite",
+    "model": "gemini/gemini-2.5-flash-lite",
     "max_pages": 3,
     "api_key_env": "GEMINI_API_KEY"
   }
@@ -973,7 +977,7 @@ section in `<workspace>/config.toml`:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-3.1-flash-lite`, `anthropic/claude-opus-4-7`, `openai/gpt-4o`. |
+| `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-2.5-flash-lite`, `anthropic/claude-opus-4-7`, `openai/gpt-4o`. |
 | `max_pages` | no (default `3`) | How many rendered page images (`page_images/page_1.png` …) to send to the LLM. Cap is per-classification cost: 1 is the cheap setting, 4+ is the thorough one. |
 | `api_key` | no | Optional literal API key. Use only on per-developer workspaces (config.toml isn't checked in). Mutually exclusive with `api_key_env`. |
 | `api_key_env` | no | Optional name of the env var to read the API key from. Mutually exclusive with `api_key`. When neither is set, litellm uses its built-in per-provider lookup (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …). When `api_key_env` references an unset env var, `AUTH_ERROR` is raised. |
@@ -1003,7 +1007,7 @@ The `classification` payload block:
 ```json
 "classification": {
   "performed": true,
-  "model": "gemini/gemini-3.1-flash-lite",
+  "model": "gemini/gemini-2.5-flash-lite",
   "decision": "existing",
   "docset_id": "k7q3xb91pmrf",
   "docset_created": false,
@@ -1623,6 +1627,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `TEXT_EXTRACTION_CONFIG_INVALID` | hard | The optional `text_extraction` (hybrid-merge) config is malformed. |
 | `STYLE_CONFIG_INVALID` | hard | The optional `style` (image-based `dg:style` for OCR files) config section is malformed; fails `generate` up front. |
 | `AUTH_ERROR` | hard / soft | A referenced API-key env var is unset (soft in `classification.error`). |
+| `MODEL_NOT_SUPPORTED` | hard | A configured model id isn't recognized by litellm (misspelling, wrong/absent `provider/` prefix, or unavailable in this litellm version). Checked up front for every LLM call; skipped when that section's `api_base` is set (custom endpoint). |
 | `CLASSIFICATION_CONFIG_MISSING` | hard | `--auto-classify` with no `classification` config. |
 | `CLASSIFICATION_CONFIG_INVALID` | hard | The `classification` config has a missing/invalid field. |
 | `CLASSIFICATION_FAILED` | soft | The classification LLM call failed; lands in `classification.error`. |

@@ -39,7 +39,7 @@ from dgml_core.utils import gather_file_pages
 
 from .conftest import write_classification_config
 
-DEFAULT_TEST_MODEL = "gemini/gemini-3.1-flash-lite"
+DEFAULT_TEST_MODEL = "gemini/gemini-2.5-flash-lite"
 
 
 # ---------------------------------------------------------------------------
@@ -123,9 +123,9 @@ def test_load_config_section_not_object(workspace: Workspace) -> None:
 def test_load_config_model_from_light_tier(workspace: Workspace) -> None:
     from .conftest import write_config
 
-    write_config(workspace, {"models": {"light": "gemini/gemini-2.0-flash-lite"}})
+    write_config(workspace, {"models": {"light": "gemini/gemini-2.5-flash-lite"}})
     cfg = load_classification_config(workspace)
-    assert cfg.model == "gemini/gemini-2.0-flash-lite"
+    assert cfg.model == "gemini/gemini-2.5-flash-lite"
 
 
 def test_load_config_happy_minimal(workspace: Workspace) -> None:

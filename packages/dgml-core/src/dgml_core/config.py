@@ -16,9 +16,10 @@ The workspace config is assembled by merging, in increasing precedence:
 
 1. built-in defaults ............. the dataclass field defaults in each loader
    (each section defaults to an empty table here — nothing to overlay)
-2. user config ................... ``~/.config/dgml/config.toml`` (or, on
-   Windows, ``%APPDATA%\\dgml\\config.toml``; ``$XDG_CONFIG_HOME`` wins when set —
-   see :func:`dgml_core.storage.user_config_path`)
+2. user config ................... ``$XDG_CONFIG_HOME/dgml/config.toml`` when
+   ``$XDG_CONFIG_HOME`` is set, else ``%APPDATA%\\dgml\\config.toml`` on Windows,
+   else ``~/.config/dgml/config.toml`` (see
+   :func:`dgml_core.storage.user_config_path`)
 3. workspace config .............. ``<workspace>/config.toml`` (optional)
 4. environment variables ......... ``DGML_``-prefixed, ``__`` nesting
 5. CLI flags ..................... an overlay dict passed by the caller

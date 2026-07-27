@@ -297,3 +297,33 @@ def test_record_usage_for_aggregates_calls_into_one_row(
     assert events[0]["operation"] == "agg"
     assert events[0]["cost_usd"] == pytest.approx(0.03)  # 3x 0.01, summed
     assert events[0]["total_tokens"] == 600  # 3x 200
+
+
+# ---------------------------------------------------------------------------
+# Up-front model validation (_require_supported_model)
+# ---------------------------------------------------------------------------
+
+
+def test_unrecognized_model_raises_model_not_supported() -> None:
+    """A model litellm doesn't map is rejected up front with a clear,
+    model-focused error — not a confusing downstream param error."""
+    from dgml_core.errors import ModelNotSupported
+
+    cfg = llm.LLMConfig(model="gemini/gemini-9.9-nonexistent")
+    with pytest.raises(ModelNotSupported, match="not a recognized model id"):
+        llm._build_completion_kwargs(cfg, messages=[{"role": "user", "content": "hi"}])
+
+
+def test_recognized_model_passes_validation() -> None:
+    cfg = llm.LLMConfig(model="anthropic/claude-haiku-4-5")
+    kwargs = llm._build_completion_kwargs(cfg, messages=[{"role": "user", "content": "hi"}])
+    assert kwargs["model"] == "anthropic/claude-haiku-4-5"
+
+
+def test_api_base_skips_model_validation() -> None:
+    """A custom endpoint (proxy / self-hosted) serves models litellm has no
+    metadata for, so the existence check is skipped when api_base is set."""
+    cfg = llm.LLMConfig(model="my-local/whatever-model", api_base="http://localhost:11434")
+    kwargs = llm._build_completion_kwargs(cfg, messages=[{"role": "user", "content": "hi"}])
+    assert kwargs["model"] == "my-local/whatever-model"
+    assert kwargs["api_base"] == "http://localhost:11434"

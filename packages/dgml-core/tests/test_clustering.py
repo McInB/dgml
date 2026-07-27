@@ -416,7 +416,7 @@ def test_load_clustering_overrides_returns_empty_when_no_config(workspace: Works
 def test_load_clustering_overrides_returns_empty_when_no_section(workspace: Workspace) -> None:
     """A config.toml without a ``clustering`` section is treated the same
     as a missing file — bundled defaults stand."""
-    _write_config(workspace, {"classification": {"model": "gemini/gemini-3.1-flash-lite"}})
+    _write_config(workspace, {"classification": {"model": "gemini/gemini-2.5-flash-lite"}})
     assert load_clustering_overrides(workspace) == {}
 
 
@@ -424,7 +424,7 @@ def test_load_clustering_overrides_reads_section(workspace: Workspace) -> None:
     _write_config(
         workspace,
         {
-            "classification": {"model": "gemini/gemini-3.1-flash-lite"},
+            "classification": {"model": "gemini/gemini-2.5-flash-lite"},
             "clustering": {"training": {"epochs": 42}},
         },
     )

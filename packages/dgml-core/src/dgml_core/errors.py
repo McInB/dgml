@@ -131,6 +131,15 @@ class AuthError(DgmlError):
     code = "AUTH_ERROR"
 
 
+class ModelNotSupported(DgmlError):
+    """An LLM model id litellm doesn't recognize — usually a misspelling, a
+    wrong/absent provider prefix, or a model this litellm version doesn't know.
+    Checked up front so a bad id surfaces clearly instead of as a confusing
+    downstream parameter error at call time."""
+
+    code = "MODEL_NOT_SUPPORTED"
+
+
 class OcrFailed(DgmlError):
     code = "OCR_FAILED"
 

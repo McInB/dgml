@@ -129,7 +129,7 @@ of those above it (a layer overrides only what it sets and inherits the rest):
 | # | Layer | Location |
 |---|---|---|
 | 1 | Built-in defaults | shipped in the wheel (dataclass defaults: `max_pages`, `temperature`, …) |
-| 2 | **User config** | `~/.config/dgml/config.toml` (Windows: `%APPDATA%\dgml\config.toml`; `$XDG_CONFIG_HOME` wins when set) — written by `dgml init` |
+| 2 | **User config** | `$XDG_CONFIG_HOME/dgml/config.toml` if set, else `%APPDATA%\dgml\config.toml` on Windows, else `~/.config/dgml/config.toml` — written by `dgml init` |
 | 3 | Workspace config | `<workspace>/config.toml` (optional per-workspace overrides) |
 | 4 | Environment variables | `DGML_`-prefixed, `__` for nesting |
 | 5 | CLI flags | per invocation (e.g. `--schema-model`) |
@@ -158,7 +158,7 @@ back the per-task models:
 
 ```toml
 [models]
-light    = "gemini/gemini-2.0-flash-lite"  # classification, style
+light    = "gemini/gemini-2.5-flash-lite"  # classification, style
 standard = "anthropic/claude-haiku-4-5"    # transcription, text extraction
 advanced = "anthropic/claude-sonnet-4-6"   # labeling, value extraction
 expert   = "anthropic/claude-opus-4-8"     # schema generation
@@ -201,7 +201,7 @@ override it or set classification-specific credentials.
 
 ```toml
 [classification]
-model = "gemini/gemini-2.0-flash-lite"
+model = "gemini/gemini-2.5-flash-lite"
 ```
 
 Field rules:

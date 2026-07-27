@@ -48,7 +48,7 @@ from typing import Any, cast
 
 import litellm
 
-from .errors import now_iso
+from .errors import ModelNotSupported, now_iso, short_error_message
 from .storage import Workspace
 from .usage import (
     OUTCOME_ERROR,
@@ -376,6 +376,32 @@ def _is_tool_choice_forced(tool_choice: Any) -> bool:
     return False
 
 
+def _require_supported_model(model: str, api_base: str | None) -> None:
+    """Fail fast when litellm doesn't recognize *model*.
+
+    An unrecognized id (a misspelling, a missing/wrong provider prefix, or a
+    model this litellm version doesn't know) otherwise surfaces indirectly at
+    call time — e.g. litellm blames a parameter it can't validate for the
+    unknown model. Checking up front raises a clear :class:`ModelNotSupported`
+    naming the model instead.
+
+    Skipped when ``api_base`` is set: a custom endpoint (proxy / self-hosted,
+    e.g. Ollama or vLLM) legitimately serves models litellm has no metadata for,
+    so we trust the caller — mirroring the generation pre-flight, which likewise
+    skips its key check when ``api_base`` is set.
+    """
+    if api_base:
+        return
+    try:
+        litellm.get_model_info(model)
+    except Exception as exc:
+        raise ModelNotSupported(
+            f"model '{model}' is not a recognized model id — check the spelling and "
+            "provider prefix (e.g. 'gemini/gemini-2.5-pro'); it may be unavailable in "
+            f"this litellm version ({short_error_message(exc)})"
+        ) from exc
+
+
 def _build_completion_kwargs(
     config: LLMConfig,
     *,
@@ -394,6 +420,7 @@ def _build_completion_kwargs(
     sent to Anthropic-routed models — newer Claude models reject it as
     deprecated, and older ones only accept 1 with thinking enabled.
     """
+    _require_supported_model(config.model, config.api_base)
     kwargs: dict[str, Any] = {
         "model": config.model,
         "messages": messages,

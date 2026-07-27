@@ -281,7 +281,7 @@ PROVIDER_MODELS: dict[str, dict[str, str]] = {
         # Gemini Flash-Lite for the cheap high-volume vision work
         # (classification/style); Anthropic for the document-reasoning pipeline
         # (transcription → labeling/value-extraction → schema generation).
-        "light": "gemini/gemini-2.0-flash-lite",
+        "light": "gemini/gemini-2.5-flash-lite",
         "standard": "anthropic/claude-haiku-4-5",
         "advanced": "anthropic/claude-sonnet-4-6",
         "expert": "anthropic/claude-opus-4-8",
@@ -293,10 +293,10 @@ PROVIDER_MODELS: dict[str, dict[str, str]] = {
         "expert": "anthropic/claude-opus-4-8",
     },
     "google": {
-        "light": "gemini/gemini-2.0-flash-lite",
-        "standard": "gemini/gemini-2.0-flash",
+        "light": "gemini/gemini-2.5-flash-lite",
+        "standard": "gemini/gemini-2.5-flash",
         "advanced": "gemini/gemini-2.5-pro",
-        "expert": "gemini/gemini-2.5-ultra",
+        "expert": "gemini/gemini-2.5-pro",
     },
     "openai": {
         "light": "openai/gpt-5-nano",
