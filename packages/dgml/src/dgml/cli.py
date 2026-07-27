@@ -38,7 +38,6 @@ from dgml_core.errors import DgmlError, WorkspaceNotInitialized, short_error_mes
 from dgml_core.files import AddFileResult, ConflictPolicy, FileStore
 from dgml_core.models import DocSet
 from dgml_core.storage import (
-    PROVIDER_ALIASES,
     PROVIDER_MODELS,
     Workspace,
     canonical_provider,
@@ -221,7 +220,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     init_p.add_argument(
         "--provider",
-        choices=sorted(set(PROVIDER_MODELS) | set(PROVIDER_ALIASES)),
+        choices=sorted(PROVIDER_MODELS),
         default=None,
         help=(
             "Force a provider's default [models] block. Omit to auto-detect from the "

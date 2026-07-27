@@ -137,10 +137,11 @@ def test_detected_api_keys_report_order() -> None:
     assert got == ["ANTHROPIC_API_KEY", "GEMINI_API_KEY"]
 
 
-def test_canonical_provider_resolves_aliases() -> None:
-    assert canonical_provider("gemini") == "google"
+def test_canonical_provider_validates() -> None:
     assert canonical_provider("google") == "google"
     assert canonical_provider("mixed") == "mixed"
+    with pytest.raises(KeyError):
+        canonical_provider("gemini")
     with pytest.raises(KeyError):
         canonical_provider("bogus")
 

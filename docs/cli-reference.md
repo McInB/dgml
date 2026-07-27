@@ -61,7 +61,7 @@ The `[models]` block names four tiers — `light`, `standard`, `advanced`,
 `expert` — that back the per-task models (classification/style, transcription/
 text-extraction, labeling/value-extraction, schema-generation respectively).
 
-- **`--provider {anthropic,google,gemini,openai,mixed}`:** write that provider's
+- **`--provider {anthropic,google,openai,mixed}`:** write that provider's
   default `[models]` table. Omit to **auto-detect** from the API-key env vars
   that are set (both `ANTHROPIC_API_KEY` + `GEMINI_API_KEY` → `mixed`; one of
   them → that provider; otherwise `OPENAI_API_KEY`/`AZURE_OPENAI_API_KEY` →

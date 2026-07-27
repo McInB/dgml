@@ -306,9 +306,6 @@ PROVIDER_MODELS: dict[str, dict[str, str]] = {
     },
 }
 
-# `--provider` values accepted on the CLI, mapped to a `PROVIDER_MODELS` key.
-PROVIDER_ALIASES: dict[str, str] = {"gemini": "google"}
-
 # Env vars checked by auto-detect (the standard names litellm reads). Order is
 # the reporting order for `detected_api_keys`.
 API_KEY_ENV_VARS: tuple[str, ...] = (
@@ -335,12 +332,11 @@ _OCR_GUIDANCE = """\
 
 
 def canonical_provider(provider: str) -> str:
-    """Resolve a ``--provider`` value (incl. aliases like ``gemini``) to a
-    :data:`PROVIDER_MODELS` key. Raises ``KeyError`` for an unknown provider."""
-    key = PROVIDER_ALIASES.get(provider, provider)
-    if key not in PROVIDER_MODELS:
+    """Validate a ``--provider`` value against :data:`PROVIDER_MODELS` and
+    return it. Raises ``KeyError`` for an unknown provider."""
+    if provider not in PROVIDER_MODELS:
         raise KeyError(provider)
-    return key
+    return provider
 
 
 def detect_provider(environ: dict[str, str]) -> str | None:
