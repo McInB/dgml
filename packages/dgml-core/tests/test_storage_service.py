@@ -132,16 +132,19 @@ def test_docset_and_workspace_collections(tmp_path: Path) -> None:
     assert json.loads((tmp_path / "workspace.json").read_text())["organization"] == "Acme"
 
 
-def test_assignments_as_documents(tmp_path: Path) -> None:
+def test_assignments_as_empty_marker_dirs(tmp_path: Path) -> None:
     store = local_store(tmp_path)
     store.insert_doc("assignments", {"_id": "d1/f1", "docset_id": "d1", "file_id": "f1"})
     store.insert_doc("assignments", {"_id": "d1/f2", "docset_id": "d1", "file_id": "f2"})
     store.insert_doc("assignments", {"_id": "d2/f1", "docset_id": "d2", "file_id": "f1"})
-    # stored at the pair's marker dir, verbatim (no _id persisted)
-    on_disk = json.loads(
-        (tmp_path / "docsets" / "d1" / "files" / "f1" / "assignment.json").read_text()
-    )
-    assert on_disk == {"docset_id": "d1", "file_id": "f1"}
+    # on disk it's today's empty marker directory — no assignment.json file
+    pair = tmp_path / "docsets" / "d1" / "files" / "f1"
+    assert pair.is_dir()
+    assert not (pair / "assignment.json").exists()
+    assert list(pair.iterdir()) == []
+    # the body is reconstructed from the path
+    assert store.get_doc("assignments", "d1/f1") == {"docset_id": "d1", "file_id": "f1"}
+    assert store.get_doc("assignments", "d1/nope") is None
     # both relationship directions are queryable
     assert sorted(d["file_id"] for d in store.find_docs("assignments", {"docset_id": "d1"})) == [
         "f1",
@@ -152,6 +155,10 @@ def test_assignments_as_documents(tmp_path: Path) -> None:
         "d2",
     ]
     assert len(store.find_docs("assignments", {})) == 3
+    # delete removes the whole pair dir (matches the historical remove_file)
+    store.delete_doc("assignments", "d1/f1")
+    assert not pair.exists()
+    assert len(store.find_docs("assignments", {})) == 2
 
 
 def test_insert_doc_requires_id(tmp_path: Path) -> None:

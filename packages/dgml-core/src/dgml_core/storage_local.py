@@ -24,10 +24,12 @@ it is today — no migration, and everything that reads the tree directly
   ``docsets/<did>/full-schema.rnc``.
 - **JSON documents map by ``(collection, id)`` to their real manifest paths**:
   ``files`` → ``files/<id>/file.json``, ``docsets`` → ``docsets/<id>/docset.json``,
-  ``assignments`` → ``docsets/<did>/files/<fid>/assignment.json``, and so on. The
-  document is stored **verbatim** — no ``_id`` is injected, so ``file.json`` is
-  exactly the ``FileRecord`` JSON it is today. The ``usage`` collection is the
-  append-only ``usage.jsonl`` (one JSON object per line).
+  and so on. The document is stored **verbatim** — no ``_id`` is injected, so
+  ``file.json`` is exactly the ``FileRecord`` JSON it is today. Two collections are
+  special-cased: ``usage`` is the append-only ``usage.jsonl`` (one JSON object per
+  line), and ``assignments`` is today's **empty marker directory**
+  ``docsets/<did>/files/<fid>/`` — its ``{docset_id, file_id}`` body is reconstructed
+  from the path, so no ``assignment.json`` file is written.
 
 Blobs and documents interleave in the same directories, so :meth:`list_blobs`
 excludes the recognized document/reserved filenames. Every write is temp-file +
@@ -60,7 +62,6 @@ DOCSET_MANIFEST = "docset.json"
 ERRORS_FILE = "errors.json"
 GENERATION_SCHEMA_FILE = "schema.json"
 WORKSPACE_FILE = "workspace.json"
-ASSIGNMENT_FILE = "assignment.json"
 EXTRACTION_STATS_FILE = "extraction_stats.json"
 CONFIG_FILE = "config.json"
 USAGE_FILE = "usage.jsonl"
@@ -89,7 +90,7 @@ class _DocLayout:
     """How a document collection maps onto the on-disk tree.
 
     ``template`` is a format string over the id parts (e.g. ``"files/{id}/file.json"``,
-    ``"docsets/{did}/files/{fid}/assignment.json"``); ``id_parts`` names the
+    ``"docsets/{did}/files/{fid}/extraction_stats.json"``); ``id_parts`` names the
     ``/``-separated segments of ``doc_id`` the template consumes. ``glob`` (derived
     from ``template`` by replacing each placeholder with ``*``) enumerates the
     collection under the workspace root.
@@ -128,9 +129,6 @@ _DOC_LAYOUTS: dict[str, _DocLayout] = {
     Collection.DOCSETS: _DocLayout(f"{docset_dir_template()}/{DOCSET_MANIFEST}", ("id",)),
     Collection.SCHEMAS: _DocLayout(f"{docset_dir_template()}/{GENERATION_SCHEMA_FILE}", ("id",)),
     Collection.WORKSPACE: _DocLayout(WORKSPACE_FILE, ()),
-    Collection.ASSIGNMENTS: _DocLayout(
-        f"{docset_file_dir_template()}/{ASSIGNMENT_FILE}", ("did", "fid")
-    ),
     Collection.EXTRACTION_STATS: _DocLayout(
         f"{docset_file_dir_template()}/{EXTRACTION_STATS_FILE}", ("did", "fid")
     ),
@@ -261,6 +259,11 @@ class LocalStore(StorageService):
 
     # ---- JSON documents (Mongo-shaped): mapped to today's manifest paths ----
 
+    def _assignment_dir(self, doc_id: str) -> Path:
+        """The per-(docset, file) marker directory for an assignment id ``did/fid``."""
+        did, fid = _split_id(doc_id, 2)
+        return self._root / DOCSETS_DIR / did / DOCSET_FILES_DIR / fid
+
     def _doc_path(self, collection: str, doc_id: str) -> Path:
         layout = _DOC_LAYOUTS.get(collection)
         if layout is None:
@@ -291,6 +294,11 @@ class LocalStore(StorageService):
     def get_doc(self, collection: str, doc_id: str) -> dict[str, Any] | None:
         if collection == Collection.USAGE:
             return None  # append-only; read via find_docs, not by id
+        if collection == Collection.ASSIGNMENTS:
+            did, fid = _split_id(doc_id, 2)
+            if not self._assignment_dir(doc_id).is_dir():
+                return None
+            return {"docset_id": did, "file_id": fid}
         path = self._doc_path(collection, doc_id)
         if not path.is_file():
             return None
@@ -300,6 +308,12 @@ class LocalStore(StorageService):
         return [doc for doc in self._iter_docs(collection) if _matches(doc, query)]
 
     def put_doc(self, collection: str, doc_id: str, doc: dict[str, Any]) -> None:
+        if collection == Collection.ASSIGNMENTS:
+            # An assignment is an empty marker directory (as today); its
+            # ``{docset_id, file_id}`` body is reconstructed from the path, so the
+            # doc body is not persisted.
+            self._assignment_dir(doc_id).mkdir(parents=True, exist_ok=True)
+            return
         # Stored verbatim — the manifest keeps its own fields (e.g. ``id``); no
         # ``_id`` is injected, so ``file.json`` is byte-identical to today.
         _write_text_atomic(
@@ -309,6 +323,11 @@ class LocalStore(StorageService):
 
     def delete_doc(self, collection: str, doc_id: str) -> None:
         if collection == Collection.USAGE:
+            return
+        if collection == Collection.ASSIGNMENTS:
+            # Matches the historical remove_file: drop the whole pair directory
+            # (marker + any generated dgml.xml / extraction_stats inside).
+            shutil.rmtree(self._assignment_dir(doc_id), ignore_errors=True)
             return
         self._doc_path(collection, doc_id).unlink(missing_ok=True)
 
@@ -323,6 +342,11 @@ class LocalStore(StorageService):
                 path, "".join(json.dumps(d, separators=(",", ":")) + "\n" for d in kept)
             )
             return len(docs) - len(kept)
+        if collection == Collection.ASSIGNMENTS:
+            matched = self.find_docs(collection, query)
+            for doc in matched:
+                self.delete_doc(collection, f"{doc['docset_id']}/{doc['file_id']}")
+            return len(matched)
         removed = 0
         for path in self._doc_paths(collection):
             doc = self._read_doc(path)
@@ -353,6 +377,14 @@ class LocalStore(StorageService):
                     continue  # tolerate a corrupt tail line from a crashed append
                 if isinstance(obj, dict):
                     yield obj
+            return
+        if collection == Collection.ASSIGNMENTS:
+            # Enumerate the per-(docset, file) marker directories, reconstructing
+            # each assignment's body from the path.
+            pattern = f"{DOCSETS_DIR}/*/{DOCSET_FILES_DIR}/*"
+            for path in sorted(self._root.glob(pattern)):
+                if path.is_dir():
+                    yield {"docset_id": path.parent.parent.name, "file_id": path.name}
             return
         for path in self._doc_paths(collection):
             try:
