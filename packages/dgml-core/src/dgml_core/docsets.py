@@ -17,7 +17,6 @@ from __future__ import annotations
 import shutil
 
 from .errors import (
-    CorruptMetadata,
     DocSetNotFound,
     FileNotFound,
     InvalidArgument,
@@ -26,7 +25,7 @@ from .errors import (
 )
 from .ids import new_id
 from .models import DocSet
-from .storage import Workspace, read_json, write_json_atomic, write_text_atomic
+from .storage import Workspace, write_text_atomic
 
 
 class DocSetStore:
@@ -36,29 +35,17 @@ class DocSetStore:
         self.ws = workspace
 
     def list_all(self) -> list[DocSet]:
-        if not self.ws.docsets_dir.exists():
-            return []
-        out: list[DocSet] = []
-        for entry in sorted(self.ws.docsets_dir.iterdir()):
-            if not entry.is_dir():
-                continue
-            json_path = entry / "docset.json"
-            if not json_path.exists():
-                continue
-            try:
-                data = read_json(json_path)
-            except CorruptMetadata:
-                continue
-            out.append(DocSet.from_json(data))
-        return out
+        # find_docs enumerates docsets/*/docset.json (sorted, skipping corrupt),
+        # matching the historical directory scan.
+        return [DocSet.from_json(data) for data in self.ws.store.find_docs("docsets", {})]
 
     def get(self, docset_id: str) -> DocSet:
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
-        json_path = self.ws.docset_json_path(docset_id)
-        if not json_path.exists():
+        data = self.ws.store.get_doc("docsets", docset_id)
+        if data is None:
             raise DocSetNotFound(f"docset '{docset_id}' not found")
-        return DocSet.from_json(read_json(json_path))
+        return DocSet.from_json(data)
 
     def create(
         self,
@@ -78,7 +65,7 @@ class DocSetStore:
         )
         self.ws.docset_dir(docset_id).mkdir(parents=True, exist_ok=False)
         self.ws.docset_files_dir(docset_id).mkdir(parents=True, exist_ok=True)
-        write_json_atomic(self.ws.docset_json_path(docset_id), ds.to_json())
+        self.ws.store.put_doc("docsets", docset_id, ds.to_json())
         return ds
 
     def update(
@@ -98,7 +85,7 @@ class DocSetStore:
             ds.description = description
         if key_questions is not None:
             ds.key_questions = list(key_questions)
-        write_json_atomic(self.ws.docset_json_path(docset_id), ds.to_json())
+        self.ws.store.put_doc("docsets", docset_id, ds.to_json())
         return ds
 
     def delete(self, docset_id: str) -> None:

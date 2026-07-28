@@ -37,6 +37,7 @@ atomic rename.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -44,6 +45,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from .errors import CorruptMetadata
+from .storage import read_json
 from .storage_service import StorageConfig, StorageService
 
 # On-disk directory names (see docs/storage-layout.md).
@@ -87,42 +90,49 @@ class _DocLayout:
 
     ``template`` is a format string over the id parts (e.g. ``"files/{id}/file.json"``,
     ``"docsets/{did}/files/{fid}/assignment.json"``); ``id_parts`` names the
-    ``/``-separated segments of ``doc_id`` the template consumes; ``glob`` enumerates
-    the collection under the workspace root.
+    ``/``-separated segments of ``doc_id`` the template consumes. ``glob`` (derived
+    from ``template`` by replacing each placeholder with ``*``) enumerates the
+    collection under the workspace root.
     """
 
     template: str
     id_parts: tuple[str, ...]
-    glob: str
+
+    @property
+    def glob(self) -> str:
+        return re.sub(r"\{[^}]+\}", "*", self.template)
 
 
-# Format-string layout templates for the known collections. ``USAGE`` is absent —
-# it is append-only and handled separately (``usage.jsonl``).
+# Directory templates (format strings over id parts), mirroring the ``*_dir``
+# helpers on ``Workspace`` in storage.py so the layout lives in one place.
+def file_dir_template() -> str:
+    """Per-file directory template, e.g. ``files/{id}``."""
+    return f"{FILES_DIR}/{{id}}"
+
+
+def docset_dir_template() -> str:
+    """Per-docset directory template, e.g. ``docsets/{id}``."""
+    return f"{DOCSETS_DIR}/{{id}}"
+
+
+def docset_file_dir_template() -> str:
+    """Per-(docset, file) directory template, e.g. ``docsets/{did}/files/{fid}``."""
+    return f"{DOCSETS_DIR}/{{did}}/{DOCSET_FILES_DIR}/{{fid}}"
+
+
+# Layout templates for the known collections, composed from the directory templates
+# above. ``USAGE`` is absent — it is append-only and handled separately (usage.jsonl).
 _DOC_LAYOUTS: dict[str, _DocLayout] = {
-    Collection.FILES: _DocLayout(
-        f"{FILES_DIR}/{{id}}/{FILE_MANIFEST}", ("id",), f"{FILES_DIR}/*/{FILE_MANIFEST}"
-    ),
-    Collection.ERRORS: _DocLayout(
-        f"{FILES_DIR}/{{id}}/{ERRORS_FILE}", ("id",), f"{FILES_DIR}/*/{ERRORS_FILE}"
-    ),
-    Collection.DOCSETS: _DocLayout(
-        f"{DOCSETS_DIR}/{{id}}/{DOCSET_MANIFEST}", ("id",), f"{DOCSETS_DIR}/*/{DOCSET_MANIFEST}"
-    ),
-    Collection.SCHEMAS: _DocLayout(
-        f"{DOCSETS_DIR}/{{id}}/{GENERATION_SCHEMA_FILE}",
-        ("id",),
-        f"{DOCSETS_DIR}/*/{GENERATION_SCHEMA_FILE}",
-    ),
-    Collection.WORKSPACE: _DocLayout(WORKSPACE_FILE, (), WORKSPACE_FILE),
+    Collection.FILES: _DocLayout(f"{file_dir_template()}/{FILE_MANIFEST}", ("id",)),
+    Collection.ERRORS: _DocLayout(f"{file_dir_template()}/{ERRORS_FILE}", ("id",)),
+    Collection.DOCSETS: _DocLayout(f"{docset_dir_template()}/{DOCSET_MANIFEST}", ("id",)),
+    Collection.SCHEMAS: _DocLayout(f"{docset_dir_template()}/{GENERATION_SCHEMA_FILE}", ("id",)),
+    Collection.WORKSPACE: _DocLayout(WORKSPACE_FILE, ()),
     Collection.ASSIGNMENTS: _DocLayout(
-        f"{DOCSETS_DIR}/{{did}}/{DOCSET_FILES_DIR}/{{fid}}/{ASSIGNMENT_FILE}",
-        ("did", "fid"),
-        f"{DOCSETS_DIR}/*/{DOCSET_FILES_DIR}/*/{ASSIGNMENT_FILE}",
+        f"{docset_file_dir_template()}/{ASSIGNMENT_FILE}", ("did", "fid")
     ),
     Collection.EXTRACTION_STATS: _DocLayout(
-        f"{DOCSETS_DIR}/{{did}}/{DOCSET_FILES_DIR}/{{fid}}/{EXTRACTION_STATS_FILE}",
-        ("did", "fid"),
-        f"{DOCSETS_DIR}/*/{DOCSET_FILES_DIR}/*/{EXTRACTION_STATS_FILE}",
+        f"{docset_file_dir_template()}/{EXTRACTION_STATS_FILE}", ("did", "fid")
     ),
 }
 
@@ -345,11 +355,18 @@ class LocalStore(StorageService):
                     yield obj
             return
         for path in self._doc_paths(collection):
-            yield self._read_doc(path)
+            try:
+                yield self._read_doc(path)
+            except CorruptMetadata:
+                # A corrupt manifest reads as absent for enumeration (matches the
+                # historical list_all behavior of skipping unparseable docsets).
+                continue
 
     @staticmethod
     def _read_doc(path: Path) -> dict[str, Any]:
-        obj = json.loads(path.read_text(encoding="utf-8"))
+        # ``read_json`` gives duplicate-key rejection and raises CorruptMetadata on
+        # bad JSON — the same contract the manifest readers relied on.
+        obj = read_json(path)
         if not isinstance(obj, dict):
             raise ValueError(f"document {path} is not a JSON object")
         return obj

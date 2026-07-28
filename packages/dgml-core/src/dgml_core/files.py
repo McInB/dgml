@@ -30,7 +30,6 @@ from .conversion import (
 from .errors import (
     AuthError,
     ConflictError,
-    CorruptMetadata,
     DgmlError,
     FileNotFound,
     InvalidArgument,
@@ -49,7 +48,7 @@ from .ids import new_id
 from .models import FileRecord
 from .ocr import extract_text_ocr, load_ocr_config
 from .pages import DEFAULT_DPI, RENDERER_NAME, pdf_page_count, render_pages
-from .storage import Workspace, read_json, write_json_atomic
+from .storage import Workspace
 from .text_extraction import TextMode, classify_extraction_outcome, extract_text_digital
 from .text_extraction_config import load_text_extraction_config
 
@@ -98,29 +97,17 @@ class FileStore:
         self.ws = workspace
 
     def list_all(self) -> list[FileRecord]:
-        if not self.ws.files_dir.exists():
-            return []
-        records: list[FileRecord] = []
-        for entry in sorted(self.ws.files_dir.iterdir()):
-            if not entry.is_dir():
-                continue
-            json_path = entry / "file.json"
-            if not json_path.exists():
-                continue
-            try:
-                data = read_json(json_path)
-            except CorruptMetadata:
-                continue
-            records.append(FileRecord.from_json(data))
-        return records
+        # find_docs enumerates files/*/file.json (sorted, skipping corrupt),
+        # matching the historical directory scan.
+        return [FileRecord.from_json(data) for data in self.ws.store.find_docs("files", {})]
 
     def get(self, file_id: str) -> FileRecord:
         if not file_id.strip():
             raise InvalidArgument("file id must not be empty")
-        json_path = self.ws.file_json_path(file_id)
-        if not json_path.exists():
+        data = self.ws.store.get_doc("files", file_id)
+        if data is None:
             raise FileNotFound(f"file '{file_id}' not found")
-        return FileRecord.from_json(read_json(json_path))
+        return FileRecord.from_json(data)
 
     def _find_conflicts(
         self, sha256: str, original_path: str
@@ -286,7 +273,7 @@ class FileStore:
                 text_mode=text_mode.value,
                 pdf_converter=pdf_converter,
             )
-            write_json_atomic(self.ws.file_json_path(file_id), record.to_json())
+            self.ws.store.put_doc("files", file_id, record.to_json())
             return AddFileResult(
                 record=record,
                 created=True,
@@ -317,7 +304,7 @@ class FileStore:
             page_image_renderer=RENDERER_NAME,
             pdf_converter=pdf_converter,
         )
-        write_json_atomic(self.ws.file_json_path(file_id), record.to_json())
+        self.ws.store.put_doc("files", file_id, record.to_json())
         return AddFileResult(
             record=record,
             created=True,

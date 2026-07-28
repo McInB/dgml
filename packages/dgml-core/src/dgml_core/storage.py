@@ -19,7 +19,10 @@ import os
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .storage_service import StorageService
 
 ENV_VAR = "DGML_HOME"
 DEFAULT_DIR_NAME = "dgml-workspace"
@@ -164,20 +167,27 @@ class Workspace:
         (``http://dgml.io/<organization>/<DocSetSlug>``)."""
         return self.root / WORKSPACE_META_NAME
 
+    @property
+    def store(self) -> StorageService:
+        """The workspace's storage backend, resolved from the ``storage`` section
+        of ``config.json`` (defaulting to the bundled local-disk store). All
+        workspace data is read/written through this rather than the filesystem
+        directly, so a workspace can live on any pluggable backend."""
+        from .storage_service import load_storage_config, make_store
+
+        return make_store(load_storage_config(self))
+
     def read_meta(self) -> dict[str, Any]:
         """Return the parsed ``workspace.json`` mapping, or ``{}`` when the file
         is absent (workspaces created before ``workspace.json`` existed)."""
-        path = self.meta_path
-        if not path.exists():
-            return {}
-        data = read_json(path)
+        data = self.store.get_doc("workspace", "workspace")
         return data if isinstance(data, dict) else {}
 
     def write_meta(self, *, name: str, organization: str) -> None:
         """Persist the workspace identity (``name`` + ``organization``) to
         ``workspace.json``. The organization is embedded in docset namespace
         URIs. Backs ``dgml workspace create``."""
-        write_json_atomic(self.meta_path, {"name": name, "organization": organization})
+        self.store.put_doc("workspace", "workspace", {"name": name, "organization": organization})
 
     @property
     def organization(self) -> str:
