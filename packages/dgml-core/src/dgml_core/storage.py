@@ -140,6 +140,16 @@ class Workspace:
     def file_text_dir(self, file_id: str) -> Path:
         return self.file_dir(file_id) / "page_text"
 
+    def blob_key(self, path: Path) -> str:
+        """The storage key for a workspace artifact ``path``.
+
+        Blob keys are workspace-root-relative POSIX strings (``files/<id>/…``);
+        ``LocalStore`` maps a key back onto ``root/<key>``, while a remote store
+        treats it as an opaque object key. Derived from the ``Workspace`` path
+        methods so the on-disk layout stays single-sourced here — callers route
+        payload I/O through ``store`` by handing it ``blob_key(some_path)``."""
+        return path.relative_to(self.root).as_posix()
+
     @property
     def config_path(self) -> Path:
         return self.root / "config.json"

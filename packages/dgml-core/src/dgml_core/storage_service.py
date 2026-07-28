@@ -45,8 +45,10 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import tempfile
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -143,6 +145,48 @@ class StorageService(ABC):
     @abstractmethod
     def download_blob(self, key: str, dest: Path) -> None:
         """Write the blob ``key`` to the local path ``dest`` (S3 ``download_file``)."""
+
+    # ---- Path bridge — for tools that demand a real filesystem path ----
+    #
+    # Some pipeline steps speak *paths*, not bytes: ghostscript renders page
+    # images to ``-sOutputFile=<dir>/page_%d.png``, pdfminer / the PDF converter
+    # read a PDF path, ``lxml.etree.parse`` wants a path. These two concrete
+    # helpers bridge that gap on top of the blob primitives, so every store gets
+    # them for free; ``LocalStore`` overrides both for a zero-copy passthrough
+    # (the key already *is* an on-disk path), keeping local I/O byte-for-byte
+    # identical to the pre-store code.
+
+    @contextmanager
+    def materialize(self, key: str) -> Iterator[Path]:
+        """Yield a real local path holding the blob at ``key`` for a
+        path-only reader (ghostscript, pdfminer, ``lxml.etree.parse``).
+
+        Default: download to a temp file, cleaned up on exit. ``LocalStore``
+        yields the real file with no copy. Raises :class:`FileNotFoundError`
+        if the blob is absent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / Path(key).name
+            self.download_blob(key, dest)
+            yield dest
+
+    @contextmanager
+    def staged_write(self, key_prefix: str) -> Iterator[Path]:
+        """Yield a local directory for a tool that emits a *batch* of files by
+        path (ghostscript rendering a file's page images).
+
+        On clean exit every file written under the yielded directory is stored
+        as a blob under ``key_prefix`` (preserving relative paths); if the body
+        raises, nothing is persisted. Default: a temp dir uploaded on exit.
+        ``LocalStore`` yields the real destination directory so the tool writes
+        final bytes in place (zero copy)."""
+        prefix = key_prefix.rstrip("/")
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp)
+            yield staging
+            for path in sorted(staging.rglob("*")):
+                if path.is_file():
+                    rel = path.relative_to(staging).as_posix()
+                    self.upload_blob(f"{prefix}/{rel}", path)
 
     # ---- JSON documents — modeled on the MongoDB collection API ----
 

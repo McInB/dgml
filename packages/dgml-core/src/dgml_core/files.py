@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -254,15 +253,15 @@ class FileStore:
         file_id = new_id()
         file_dir = self.ws.file_dir(file_id)
         file_dir.mkdir(parents=True, exist_ok=False)
-        # The original source is stored under its own name. A convertible
+        # The original source is stored under its own name (a blob). A convertible
         # source is converted to a PDF here (persisted alongside it as
         # `<stem>.pdf` by _ensure_pdf) to drive page rendering / count / text
         # extraction; generation later reuses that same persisted PDF.
-        dest_source = file_dir / source_path.name
-        shutil.copy2(source_path, dest_source)
+        source_key = self.ws.blob_key(file_dir / source_path.name)
+        self.ws.store.upload_blob(source_key, source_path)
 
-        pdf_path, conversion_error, pdf_converter = self._ensure_pdf(dest_source, file_id)
-        if pdf_path is None:
+        pdf_key, conversion_error, pdf_converter = self._ensure_pdf(source_key, file_id)
+        if pdf_key is None:
             record = FileRecord(
                 id=file_id,
                 original_path=original_path,
@@ -281,16 +280,20 @@ class FileStore:
                 conversion_error=conversion_error,
             )
 
-        page_count, page_count_error = self._safe_page_count(pdf_path, file_id)
-        page_render_error = self._render_pages(pdf_path, file_id, expected=page_count)
-        text_extraction_error, text_summary = self._extract_text(
-            pdf_path,
-            file_id,
-            text_mode=text_mode,
-            page_count=page_count,
-            verbose=verbose,
-            debug=debug,
-        )
+        # Page count, render, and text extraction all need a real PDF path; one
+        # materialize yields it (zero-copy on LocalStore, a temp download on a
+        # remote store) and all three share it.
+        with self.ws.store.materialize(pdf_key) as pdf_path:
+            page_count, page_count_error = self._safe_page_count(pdf_path, file_id)
+            page_render_error = self._render_pages(pdf_path, file_id, expected=page_count)
+            text_extraction_error, text_summary = self._extract_text(
+                pdf_path,
+                file_id,
+                text_mode=text_mode,
+                page_count=page_count,
+                verbose=verbose,
+                debug=debug,
+            )
 
         record = FileRecord(
             id=file_id,
@@ -316,50 +319,53 @@ class FileStore:
         )
 
     def _ensure_pdf(
-        self, stored_source: Path, file_id: str
-    ) -> tuple[Path | None, str | None, str | None]:
-        """Return ``(pdf_path, error, converter_name)`` for the stored source.
+        self, source_key: str, file_id: str
+    ) -> tuple[str | None, str | None, str | None]:
+        """Return ``(pdf_key, error, converter_name)`` for the stored source.
 
-        For a ``.pdf`` source this is the stored file itself. For a convertible
+        For a ``.pdf`` source this is the source blob itself. For a convertible
         source it runs the configured converter and **persists** the resulting
-        PDF alongside the original at ``<stem>.pdf`` in the file directory. That
-        persisted PDF is what page rendering / count / text extraction run on
-        here, and what generation later reuses (see
+        PDF alongside the original at ``<stem>.pdf`` (a blob). That persisted PDF
+        is what page rendering / count / text extraction run on here, and what
+        generation later reuses (see
         :func:`dgml_core.generation.document.load_document_as_pdf`) — so the document
         is converted exactly once, and the bytes the page images were rendered
         from are byte-identical to those generation slices.
 
-        The third element is the converter's name (``None`` for a ``.pdf``
-        source), recorded on the file regardless of whether the conversion
-        ultimately succeeded so a failed convert still names what was tried.
+        The converter needs a real filesystem path, so the source blob is
+        materialized for the call (zero-copy on LocalStore). The third element is
+        the converter's name (``None`` for a ``.pdf`` source), recorded on the
+        file regardless of whether the conversion ultimately succeeded so a
+        failed convert still names what was tried.
 
         On conversion failure a permanent error is recorded and
         ``(None, message, converter_name)`` is returned so the file record is
         still created (consistent with the page-render / text soft-fail pattern).
         """
-        if stored_source.suffix.lower() == ".pdf":
-            return stored_source, None, None
+        if source_key.lower().endswith(".pdf"):
+            return source_key, None, None
 
         converters = load_conversion_config(self.ws)
-        converter_name = converter_name_for_path(stored_source, converters)
-        try:
-            pdf_bytes = convert_to_pdf_bytes(stored_source, converters)
-        except DgmlError as exc:
-            message = str(exc)
-            append_recorded_error(
-                self.ws.file_errors_path(file_id),
-                RecordedError(
-                    operation="convert_to_pdf",
-                    message=message,
-                    occurred_at=now_iso(),
-                    permanent=True,
-                ),
-            )
-            return None, message, converter_name
+        with self.ws.store.materialize(source_key) as src:
+            converter_name = converter_name_for_path(src, converters)
+            try:
+                pdf_bytes = convert_to_pdf_bytes(src, converters)
+            except DgmlError as exc:
+                message = str(exc)
+                append_recorded_error(
+                    self.ws.file_errors_path(file_id),
+                    RecordedError(
+                        operation="convert_to_pdf",
+                        message=message,
+                        occurred_at=now_iso(),
+                        permanent=True,
+                    ),
+                )
+                return None, message, converter_name
 
-        pdf_path = stored_source.with_suffix(".pdf")
-        pdf_path.write_bytes(pdf_bytes)
-        return pdf_path, None, converter_name
+        pdf_key = Path(source_key).with_suffix(".pdf").as_posix()
+        self.ws.store.put_blob(pdf_key, pdf_bytes)
+        return pdf_key, None, converter_name
 
     def _safe_page_count(self, pdf_path: Path, file_id: str) -> tuple[int | None, str | None]:
         """Read the PDF's page count. On failure, record a permanent error
@@ -383,7 +389,9 @@ class FileStore:
         """Render pages, recording errors. Returns a human-readable error
         message on failure or partial success, or ``None`` on full success."""
         try:
-            rendered = render_pages(pdf_path, self.ws.file_pages_dir(file_id))
+            pages_prefix = self.ws.blob_key(self.ws.file_pages_dir(file_id))
+            with self.ws.store.staged_write(pages_prefix) as pages_dir:
+                rendered = render_pages(pdf_path, pages_dir)
         except PageRenderFailed as exc:
             append_recorded_error(
                 self.ws.file_errors_path(file_id),

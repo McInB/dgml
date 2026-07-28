@@ -317,3 +317,75 @@ def test_third_party_plugin_resolves_by_dotted_path() -> None:
     # own dotted path — proving the plug-in mechanism end to end.
     cfg = StorageConfig(provider="dgml_core.storage_local:LocalStore", root=Path("."))
     assert isinstance(make_store(cfg), LocalStore)
+
+
+# --------------------------------------------------------------------------- path bridge
+
+
+class _DefaultBridgeStore(LocalStore):
+    """A store with LocalStore's blob primitives but the *base* path bridge —
+    exercises the default download-to-temp / upload-on-exit implementations that
+    every third-party store inherits (LocalStore itself overrides them)."""
+
+    materialize = StorageService.materialize
+    staged_write = StorageService.staged_write
+
+
+def default_bridge_store(root: Path) -> _DefaultBridgeStore:
+    cfg = LocalStore.parse_config(StorageConfig(DEFAULT_STORAGE_PROVIDER, root))
+    return _DefaultBridgeStore(cfg)
+
+
+def test_materialize_local_yields_real_path_zero_copy(tmp_path: Path) -> None:
+    store = local_store(tmp_path)
+    store.put_blob("files/a/report.pdf", b"%PDF-1.7")
+    with store.materialize("files/a/report.pdf") as path:
+        # zero copy: it's the actual on-disk blob, not a temp copy
+        assert path == tmp_path / "files" / "a" / "report.pdf"
+        assert path.read_bytes() == b"%PDF-1.7"
+
+
+def test_materialize_missing_raises(tmp_path: Path) -> None:
+    store = local_store(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        with store.materialize("files/a/nope.pdf"):
+            pass
+
+
+def test_materialize_default_downloads_to_temp_and_cleans_up(tmp_path: Path) -> None:
+    store = default_bridge_store(tmp_path)
+    store.put_blob("files/a/report.pdf", b"%PDF-1.7")
+    with store.materialize("files/a/report.pdf") as path:
+        # default impl: a temp copy, NOT the real blob path
+        assert path != tmp_path / "files" / "a" / "report.pdf"
+        assert path.read_bytes() == b"%PDF-1.7"
+        held = path
+    assert not held.exists()  # cleaned up on exit
+
+
+def test_staged_write_local_renders_in_place(tmp_path: Path) -> None:
+    store = local_store(tmp_path)
+    with store.staged_write("files/a/page_images") as d:
+        # the staging dir IS the destination (zero copy)
+        assert d == tmp_path / "files" / "a" / "page_images"
+        (d / "page_1.png").write_bytes(b"img1")
+        (d / "page_2.png").write_bytes(b"img2")
+    assert store.get_blob("files/a/page_images/page_1.png") == b"img1"
+    assert store.get_blob("files/a/page_images/page_2.png") == b"img2"
+
+
+def test_staged_write_default_uploads_on_exit(tmp_path: Path) -> None:
+    store = default_bridge_store(tmp_path)
+    with store.staged_write("files/a/page_images") as d:
+        assert d != tmp_path / "files" / "a" / "page_images"  # temp, not destination
+        (d / "page_1.png").write_bytes(b"img1")
+    assert store.get_blob("files/a/page_images/page_1.png") == b"img1"
+
+
+def test_staged_write_does_not_persist_on_error(tmp_path: Path) -> None:
+    store = default_bridge_store(tmp_path)
+    with pytest.raises(RuntimeError):
+        with store.staged_write("files/a/page_images") as d:
+            (d / "page_1.png").write_bytes(b"img1")
+            raise RuntimeError("render failed")
+    assert store.blob_exists("files/a/page_images/page_1.png") is False

@@ -258,6 +258,23 @@ class LocalStore(StorageService):
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
 
+    # ---- Path bridge — zero-copy: the key already IS an on-disk path ----
+
+    @contextlib.contextmanager
+    def materialize(self, key: str) -> Iterator[Path]:
+        path = self._blob_path(key)
+        if not path.is_file():
+            raise FileNotFoundError(f"no blob at key {key!r}")
+        yield path
+
+    @contextlib.contextmanager
+    def staged_write(self, key_prefix: str) -> Iterator[Path]:
+        # The staging dir IS the destination, so the tool renders final bytes in
+        # place — no upload step (the base default would copy temp → root).
+        dest = self._blob_path(key_prefix.rstrip("/"))
+        dest.mkdir(parents=True, exist_ok=True)
+        yield dest
+
     def delete_blobs(self, prefix: str) -> None:
         # Remove only blob files under the prefix (documents that live beside them —
         # file.json, extraction_stats.json, … — are left for delete_doc), then prune
