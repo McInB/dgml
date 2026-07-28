@@ -1599,7 +1599,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                 f"docset '{args.docset_id}' has no files; pass --from-file or add files first",
                 fmt,
             )
-        rnc = generate_schema(ws, file_ids, config=config, docset_name=ds.name)
+        rnc = generate_schema(ws, file_ids, config=config, docset_name=ds.name, debug=args.debug)
         store.set_schema(args.docset_id, rnc)
         _emit(
             {
