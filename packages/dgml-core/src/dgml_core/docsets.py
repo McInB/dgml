@@ -100,10 +100,8 @@ class DocSetStore:
             raise InvalidArgument("docset id must not be empty")
         if not self.ws.docset_dir(docset_id).exists():
             raise DocSetNotFound(f"docset '{docset_id}' not found")
-        files_dir = self.ws.docset_files_dir(docset_id)
-        if not files_dir.exists():
-            return []
-        return sorted(p.name for p in files_dir.iterdir() if p.is_dir())
+        assignments = self.ws.store.find_docs("assignments", {"docset_id": docset_id})
+        return sorted(str(a["file_id"]) for a in assignments)
 
     def add_file(self, docset_id: str, file_id: str) -> None:
         if not docset_id.strip():
@@ -114,8 +112,12 @@ class DocSetStore:
             raise DocSetNotFound(f"docset '{docset_id}' not found")
         if not self.ws.file_dir(file_id).exists():
             raise FileNotFound(f"file '{file_id}' not found")
-        ref = self.ws.docset_files_dir(docset_id) / file_id
-        ref.mkdir(parents=True, exist_ok=True)
+        # An assignment is a document keyed by the (docset, file) pair. Re-adding
+        # is idempotent (overwrites the same marker), matching the old mkdir.
+        self.ws.store.insert_doc(
+            "assignments",
+            {"_id": f"{docset_id}/{file_id}", "docset_id": docset_id, "file_id": file_id},
+        )
 
     def remove_file(self, docset_id: str, file_id: str) -> None:
         if not docset_id.strip():
