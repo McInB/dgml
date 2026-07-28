@@ -96,6 +96,26 @@ class LocalConfigMissing(DgmlError):
     code = "LOCAL_CONFIG_MISSING"
 
 
+class StorageConfigInvalid(DgmlError):
+    """Malformed ``storage`` section (bad shape or provider option fields)."""
+
+    code = "STORAGE_CONFIG_INVALID"
+
+
+class StorageProviderUnresolvable(DgmlError):
+    """A ``storage.provider`` dotted path is malformed, not importable, or does
+    not resolve to a :class:`~dgml_core.storage_service.StorageService` subclass."""
+
+    code = "STORAGE_PROVIDER_UNRESOLVABLE"
+
+
+class StorageBackendMismatch(DgmlError):
+    """The live ``storage`` config differs from the store this workspace was
+    created with. Changing the store is a migration, not a config edit."""
+
+    code = "STORAGE_BACKEND_MISMATCH"
+
+
 class OcrConfigInvalid(DgmlError):
     code = "OCR_CONFIG_INVALID"
 

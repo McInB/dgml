@@ -1,0 +1,355 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The bundled local-disk :class:`StorageService`.
+
+Maps both APIs onto the **existing** workspace directory layout (see
+``docs/storage-layout.md``), so a local workspace on disk is byte-for-byte what
+it is today — no migration, and everything that reads the tree directly
+(``dgml check``, attestation, DGMLX bundles, external tooling) keeps working.
+
+- **Blob keys are the on-disk relative paths** themselves: a blob is stored at
+  ``<root>/<key>`` — ``files/<id>/page_images/page_1.png``, ``files/<id>/<name>``,
+  ``files/<id>/page_text/page_1.json`` (bulky per-page word boxes, a blob like the
+  page images despite the ``.json`` name), ``docsets/<did>/files/<fid>/<stem>.dgml.xml``,
+  ``docsets/<did>/full-schema.rnc``.
+- **JSON documents map by ``(collection, id)`` to their real manifest paths**:
+  ``files`` → ``files/<id>/file.json``, ``docsets`` → ``docsets/<id>/docset.json``,
+  ``assignments`` → ``docsets/<did>/files/<fid>/assignment.json``, and so on. The
+  document is stored **verbatim** — no ``_id`` is injected, so ``file.json`` is
+  exactly the ``FileRecord`` JSON it is today. The ``usage`` collection is the
+  append-only ``usage.jsonl`` (one JSON object per line).
+
+Blobs and documents interleave in the same directories, so :meth:`list_blobs`
+excludes the recognized document/reserved filenames. Every write is temp-file +
+atomic rename.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+from .storage_service import StorageConfig, StorageService
+
+# On-disk directory names (see docs/storage-layout.md).
+FILES_DIR = "files"
+DOCSETS_DIR = "docsets"
+DOCSET_FILES_DIR = "files"  # the per-docset assignment/output dir: docsets/<id>/files/
+
+# Manifest / bootstrap filenames.
+FILE_MANIFEST = "file.json"
+DOCSET_MANIFEST = "docset.json"
+ERRORS_FILE = "errors.json"
+GENERATION_SCHEMA_FILE = "schema.json"
+WORKSPACE_FILE = "workspace.json"
+ASSIGNMENT_FILE = "assignment.json"
+EXTRACTION_STATS_FILE = "extraction_stats.json"
+CONFIG_FILE = "config.json"
+USAGE_FILE = "usage.jsonl"
+
+
+class Collection(StrEnum):
+    """The document collections the DGML workspace layout recognizes.
+
+    A ``StrEnum`` so it stays interchangeable with the generic ``collection: str``
+    interface — callers may pass ``Collection.FILES`` or ``"files"``, and a
+    third-party store can still use any collection name it likes.
+    """
+
+    FILES = "files"
+    DOCSETS = "docsets"
+    WORKSPACE = "workspace"
+    SCHEMAS = "schemas"
+    ERRORS = "errors"
+    ASSIGNMENTS = "assignments"
+    EXTRACTION_STATS = "extraction_stats"
+    USAGE = "usage"  # append-only; special-cased to usage.jsonl
+
+
+@dataclass(frozen=True)
+class _DocLayout:
+    """How a document collection maps onto the on-disk tree.
+
+    ``template`` is a format string over the id parts (e.g. ``"files/{id}/file.json"``,
+    ``"docsets/{did}/files/{fid}/assignment.json"``); ``id_parts`` names the
+    ``/``-separated segments of ``doc_id`` the template consumes; ``glob`` enumerates
+    the collection under the workspace root.
+    """
+
+    template: str
+    id_parts: tuple[str, ...]
+    glob: str
+
+
+# Format-string layout templates for the known collections. ``USAGE`` is absent —
+# it is append-only and handled separately (``usage.jsonl``).
+_DOC_LAYOUTS: dict[str, _DocLayout] = {
+    Collection.FILES: _DocLayout(
+        f"{FILES_DIR}/{{id}}/{FILE_MANIFEST}", ("id",), f"{FILES_DIR}/*/{FILE_MANIFEST}"
+    ),
+    Collection.ERRORS: _DocLayout(
+        f"{FILES_DIR}/{{id}}/{ERRORS_FILE}", ("id",), f"{FILES_DIR}/*/{ERRORS_FILE}"
+    ),
+    Collection.DOCSETS: _DocLayout(
+        f"{DOCSETS_DIR}/{{id}}/{DOCSET_MANIFEST}", ("id",), f"{DOCSETS_DIR}/*/{DOCSET_MANIFEST}"
+    ),
+    Collection.SCHEMAS: _DocLayout(
+        f"{DOCSETS_DIR}/{{id}}/{GENERATION_SCHEMA_FILE}",
+        ("id",),
+        f"{DOCSETS_DIR}/*/{GENERATION_SCHEMA_FILE}",
+    ),
+    Collection.WORKSPACE: _DocLayout(WORKSPACE_FILE, (), WORKSPACE_FILE),
+    Collection.ASSIGNMENTS: _DocLayout(
+        f"{DOCSETS_DIR}/{{did}}/{DOCSET_FILES_DIR}/{{fid}}/{ASSIGNMENT_FILE}",
+        ("did", "fid"),
+        f"{DOCSETS_DIR}/*/{DOCSET_FILES_DIR}/*/{ASSIGNMENT_FILE}",
+    ),
+    Collection.EXTRACTION_STATS: _DocLayout(
+        f"{DOCSETS_DIR}/{{did}}/{DOCSET_FILES_DIR}/{{fid}}/{EXTRACTION_STATS_FILE}",
+        ("did", "fid"),
+        f"{DOCSETS_DIR}/*/{DOCSET_FILES_DIR}/*/{EXTRACTION_STATS_FILE}",
+    ),
+}
+
+# Filenames that are documents or bootstrap/config, never returned by ``list_blobs``
+# even though they live beside blobs. Derived from the layouts' fixed basenames plus
+# the bootstrap files. (page_text is a *blob*, like page images — bulky per-page data
+# that is round-tripped, not a queried document — so it is not listed here.)
+_NON_BLOB_BASENAMES = frozenset(
+    layout.template.rsplit("/", 1)[-1]
+    for layout in _DOC_LAYOUTS.values()
+    if "{" not in layout.template.rsplit("/", 1)[-1]
+) | {CONFIG_FILE, USAGE_FILE}
+
+
+def _safe_segment(seg: str) -> str:
+    """A single path segment, rejecting traversal / separators."""
+    if not seg or "/" in seg or seg in (".", "..") or "\\" in seg:
+        raise ValueError(f"invalid id/key segment {seg!r}")
+    return seg
+
+
+def _safe_rel(rel: str) -> Path:
+    """A workspace-relative POSIX path, rejecting absolute paths and ``..``."""
+    if not rel or rel.startswith("/"):
+        raise ValueError(f"invalid storage key {rel!r}: must be a non-empty relative path")
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        raise ValueError(f"invalid storage key {rel!r}: '..' is not allowed")
+    return Path(*parts)
+
+
+def _split_id(doc_id: str, n: int) -> list[str]:
+    """Split a composite document id (e.g. ``"<did>/<fid>"``) into ``n`` safe
+    segments."""
+    parts = doc_id.split("/")
+    if len(parts) != n:
+        raise ValueError(f"document id {doc_id!r} must have {n} '/'-separated parts")
+    return [_safe_segment(p) for p in parts]
+
+
+def _write_bytes_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _matches(doc: Mapping[str, Any], query: Mapping[str, Any]) -> bool:
+    return all(doc.get(k) == v for k, v in query.items())
+
+
+class LocalStore(StorageService):
+    """Local-disk store over today's workspace layout. Takes no options; its
+    location is the workspace root."""
+
+    name = "local"
+    config_fields = frozenset()
+
+    @classmethod
+    def parse_config(cls, config: StorageConfig) -> StorageConfig:
+        cls._check_no_extra_fields(config.options)
+        return config
+
+    def __init__(self, config: StorageConfig) -> None:
+        self._root = Path(config.root)
+
+    # ---- Blobs (S3-shaped): the key *is* the on-disk relative path ----
+
+    def _blob_path(self, key: str) -> Path:
+        return self._root / _safe_rel(key)
+
+    def put_blob(self, key: str, data: bytes) -> None:
+        _write_bytes_atomic(self._blob_path(key), data)
+
+    def get_blob(self, key: str) -> bytes:
+        path = self._blob_path(key)
+        if not path.is_file():
+            raise FileNotFoundError(f"no blob at key {key!r}")
+        return path.read_bytes()
+
+    def delete_blob(self, key: str) -> None:
+        self._blob_path(key).unlink(missing_ok=True)
+
+    def blob_exists(self, key: str) -> bool:
+        return self._blob_path(key).is_file()
+
+    def list_blobs(self, prefix: str) -> list[str]:
+        root = self._root
+        keys = [
+            rel
+            for path in root.rglob("*")
+            if path.is_file() and self._is_blob(rel := path.relative_to(root).as_posix())
+        ]
+        return sorted(k for k in keys if k.startswith(prefix))
+
+    @staticmethod
+    def _is_blob(rel: str) -> bool:
+        parts = rel.split("/")
+        name = parts[-1]
+        if name.endswith(".tmp"):
+            return False
+        if name in _NON_BLOB_BASENAMES:
+            return False
+        return True
+
+    def upload_blob(self, key: str, src: Path) -> None:
+        dest = self._blob_path(key)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        shutil.copyfile(src, tmp)
+        tmp.replace(dest)
+
+    def download_blob(self, key: str, dest: Path) -> None:
+        src = self._blob_path(key)
+        if not src.is_file():
+            raise FileNotFoundError(f"no blob at key {key!r}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest)
+
+    # ---- JSON documents (Mongo-shaped): mapped to today's manifest paths ----
+
+    def _doc_path(self, collection: str, doc_id: str) -> Path:
+        layout = _DOC_LAYOUTS.get(collection)
+        if layout is None:
+            # Unknown collection: a generic per-id file, kept out of the blob
+            # namespace by its ``.json`` extension under a same-named directory.
+            return self._root / _safe_segment(collection) / f"{_safe_segment(doc_id)}.json"
+        if not layout.id_parts:
+            rel = layout.template
+        else:
+            segments = _split_id(doc_id, len(layout.id_parts))
+            rel = layout.template.format(**dict(zip(layout.id_parts, segments, strict=True)))
+        return self._root / _safe_rel(rel)
+
+    def insert_doc(self, collection: str, doc: dict[str, Any]) -> None:
+        if collection == Collection.USAGE:
+            line = json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
+            path = self._root / USAGE_FILE
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+            return
+        doc_id = doc.get("_id")
+        if not isinstance(doc_id, str) or not doc_id:
+            raise ValueError(f"insert_doc into {collection!r} requires a string '_id'")
+        # ``_id`` routes the write; it is not persisted (manifests stay verbatim).
+        self.put_doc(collection, doc_id, {k: v for k, v in doc.items() if k != "_id"})
+
+    def get_doc(self, collection: str, doc_id: str) -> dict[str, Any] | None:
+        if collection == Collection.USAGE:
+            return None  # append-only; read via find_docs, not by id
+        path = self._doc_path(collection, doc_id)
+        if not path.is_file():
+            return None
+        return self._read_doc(path)
+
+    def find_docs(self, collection: str, query: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return [doc for doc in self._iter_docs(collection) if _matches(doc, query)]
+
+    def put_doc(self, collection: str, doc_id: str, doc: dict[str, Any]) -> None:
+        # Stored verbatim — the manifest keeps its own fields (e.g. ``id``); no
+        # ``_id`` is injected, so ``file.json`` is byte-identical to today.
+        _write_text_atomic(
+            self._doc_path(collection, doc_id),
+            json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
+        )
+
+    def delete_doc(self, collection: str, doc_id: str) -> None:
+        if collection == Collection.USAGE:
+            return
+        self._doc_path(collection, doc_id).unlink(missing_ok=True)
+
+    def delete_docs(self, collection: str, query: Mapping[str, Any]) -> int:
+        if collection == Collection.USAGE:
+            path = self._root / USAGE_FILE
+            if not path.is_file():
+                return 0
+            docs = list(self._iter_docs(collection))
+            kept = [doc for doc in docs if not _matches(doc, query)]
+            _write_text_atomic(
+                path, "".join(json.dumps(d, separators=(",", ":")) + "\n" for d in kept)
+            )
+            return len(docs) - len(kept)
+        removed = 0
+        for path in self._doc_paths(collection):
+            doc = self._read_doc(path)
+            if _matches(doc, query):
+                path.unlink(missing_ok=True)
+                removed += 1
+        return removed
+
+    # ---- document enumeration ----
+
+    def _doc_paths(self, collection: str) -> list[Path]:
+        layout = _DOC_LAYOUTS.get(collection)
+        pattern = layout.glob if layout is not None else f"{collection}/*.json"
+        return sorted(p for p in self._root.glob(pattern) if p.is_file())
+
+    def _iter_docs(self, collection: str) -> Iterator[dict[str, Any]]:
+        if collection == Collection.USAGE:
+            path = self._root / USAGE_FILE
+            if not path.is_file():
+                return
+            for raw in path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # tolerate a corrupt tail line from a crashed append
+                if isinstance(obj, dict):
+                    yield obj
+            return
+        for path in self._doc_paths(collection):
+            yield self._read_doc(path)
+
+    @staticmethod
+    def _read_doc(path: Path) -> dict[str, Any]:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(obj, dict):
+            raise ValueError(f"document {path} is not a JSON object")
+        return obj

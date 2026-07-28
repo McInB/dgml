@@ -59,10 +59,20 @@ from .file_attestation import (
 from .files import AddFileResult, ConflictPolicy, FileStore
 from .models import DocSet, FileRecord
 from .storage import Workspace
+from .storage_local import LocalStore
+from .storage_service import (
+    DEFAULT_STORAGE_PROVIDER,
+    StorageConfig,
+    StorageService,
+    load_storage_config,
+    make_store,
+    storage_fingerprint,
+)
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "DEFAULT_STORAGE_PROVIDER",
     "AddFileResult",
     "ArtifactKind",
     "ArtifactRef",
@@ -89,7 +99,10 @@ __all__ = [
     "InvalidArgument",
     "InvalidPDF",
     "Issue",
+    "LocalStore",
     "PageRenderFailed",
+    "StorageConfig",
+    "StorageService",
     "UnsupportedFileType",
     "VerifyResult",
     "Workspace",
@@ -102,8 +115,11 @@ __all__ = [
     "collect_from_attestation",
     "export_attestation",
     "load_conversion_config",
+    "load_storage_config",
     "make_converter",
+    "make_store",
     "read_attestation",
+    "storage_fingerprint",
     "verify_attestation_dir",
     "verify_bundle",
     "verify_file_version",
