@@ -478,13 +478,17 @@ class FileStore:
             return self._record_text_failure(file_id, str(exc), permanent=True), None
 
         text_prefix = self.ws.blob_key(self.ws.file_text_dir(file_id))
+        pages_prefix = self.ws.blob_key(self.ws.file_pages_dir(file_id))
         try:
-            with self.ws.store.staged_write(text_prefix) as text_dir:
+            with (
+                self.ws.store.materialize_dir(pages_prefix) as pages_dir,
+                self.ws.store.staged_write(text_prefix) as text_dir,
+            ):
                 result = extract_text_ocr(
                     pdf_path,
                     text_dir,
                     file_id=file_id,
-                    page_images_dir=self.ws.file_pages_dir(file_id),
+                    page_images_dir=pages_dir,
                     config=config,
                 )
         except (OcrFailed, AuthError) as exc:
@@ -511,13 +515,17 @@ class FileStore:
             return self._record_text_failure(file_id, str(exc), permanent=True), None
 
         text_prefix = self.ws.blob_key(self.ws.file_text_dir(file_id))
+        pages_prefix = self.ws.blob_key(self.ws.file_pages_dir(file_id))
         try:
-            with self.ws.store.staged_write(text_prefix) as text_dir:
+            with (
+                self.ws.store.materialize_dir(pages_prefix) as pages_dir,
+                self.ws.store.staged_write(text_prefix) as text_dir,
+            ):
                 result = extract_text_hybrid(
                     pdf_path,
                     text_dir,
                     file_id=file_id,
-                    page_images_dir=self.ws.file_pages_dir(file_id),
+                    page_images_dir=pages_dir,
                     config=config,
                     text_extraction_config=text_extraction_config,
                     workspace=self.ws,

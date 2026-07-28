@@ -188,6 +188,23 @@ class StorageService(ABC):
                     rel = path.relative_to(staging).as_posix()
                     self.upload_blob(f"{prefix}/{rel}", path)
 
+    @contextmanager
+    def materialize_dir(self, prefix: str) -> Iterator[Path]:
+        """Yield a local directory holding every blob under ``prefix`` (each at
+        its path relative to ``prefix``), for a tool that *scans a directory* of
+        files (OCR reading a file's rendered page images).
+
+        Default: download the matching blobs into a temp dir, cleaned up on
+        exit. ``LocalStore`` yields the real directory with no copy. The
+        directory may be empty/absent if nothing matches — the caller handles
+        that (OCR raises its own \"no page images\" error)."""
+        base = prefix.rstrip("/") + "/"
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            for key in self.list_blobs(base):
+                self.download_blob(key, out / key[len(base) :])
+            yield out
+
     # ---- JSON documents — modeled on the MongoDB collection API ----
 
     @abstractmethod

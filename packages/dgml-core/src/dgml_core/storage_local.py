@@ -275,6 +275,11 @@ class LocalStore(StorageService):
         dest.mkdir(parents=True, exist_ok=True)
         yield dest
 
+    @contextlib.contextmanager
+    def materialize_dir(self, prefix: str) -> Iterator[Path]:
+        # The blobs already live under this directory — hand it back directly.
+        yield self._blob_path(prefix.rstrip("/"))
+
     def delete_blobs(self, prefix: str) -> None:
         # Remove only blob files under the prefix (documents that live beside them —
         # file.json, extraction_stats.json, … — are left for delete_doc), then prune

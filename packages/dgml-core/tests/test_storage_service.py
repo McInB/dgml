@@ -329,6 +329,7 @@ class _DefaultBridgeStore(LocalStore):
 
     materialize = StorageService.materialize
     staged_write = StorageService.staged_write
+    materialize_dir = StorageService.materialize_dir
 
 
 def default_bridge_store(root: Path) -> _DefaultBridgeStore:
@@ -389,3 +390,24 @@ def test_staged_write_does_not_persist_on_error(tmp_path: Path) -> None:
             (d / "page_1.png").write_bytes(b"img1")
             raise RuntimeError("render failed")
     assert store.blob_exists("files/a/page_images/page_1.png") is False
+
+
+def test_materialize_dir_local_yields_real_dir_zero_copy(tmp_path: Path) -> None:
+    store = local_store(tmp_path)
+    store.put_blob("files/a/page_images/page_1.png", b"img1")
+    store.put_blob("files/a/page_images/page_2.png", b"img2")
+    with store.materialize_dir("files/a/page_images") as d:
+        assert d == tmp_path / "files" / "a" / "page_images"  # zero copy
+        assert sorted(p.name for p in d.glob("*.png")) == ["page_1.png", "page_2.png"]
+
+
+def test_materialize_dir_default_downloads_and_cleans_up(tmp_path: Path) -> None:
+    store = default_bridge_store(tmp_path)
+    store.put_blob("files/a/page_images/page_1.png", b"img1")
+    store.put_blob("files/a/page_images/page_2.png", b"img2")
+    with store.materialize_dir("files/a/page_images") as d:
+        assert d != tmp_path / "files" / "a" / "page_images"  # a temp copy
+        assert (d / "page_1.png").read_bytes() == b"img1"
+        assert (d / "page_2.png").read_bytes() == b"img2"
+        held = d
+    assert not held.exists()  # cleaned up on exit
