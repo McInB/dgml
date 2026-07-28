@@ -79,7 +79,7 @@ from .matching import (
     walk_computed_leaves,
 )
 from .prompts import get as prompt
-from .storage import Workspace, read_config, read_json, write_json_atomic, write_text_atomic
+from .storage import Workspace, read_config, write_json_atomic, write_text_atomic
 from .usage import (
     OPERATION_EXTRACT_VALUES,
     OPERATION_SCHEMA_GENERATE,
@@ -277,13 +277,12 @@ def get_page_words(
     """
     if page < 1:
         raise ValueError("page must be 1-indexed (≥ 1)")
-    text_path = workspace.file_text_dir(file_id) / f"page_{page}.json"
-    if not text_path.exists():
+    payload = workspace.read_page_text(file_id, page)
+    if payload is None:
         raise FileNotFound(
-            f"no page_text for file '{file_id}' page {page} "
-            f"(expected at {text_path}); was the file added with --text-mode digital or ocr?"
+            f"no page_text for file '{file_id}' page {page}; "
+            "was the file added with --text-mode digital or ocr?"
         )
-    payload = read_json(text_path)
     words: list[dict[str, Any]] = payload.get("words", [])
 
     s = 0 if start_idx is None else max(0, start_idx)

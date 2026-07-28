@@ -150,6 +150,24 @@ class Workspace:
         payload I/O through ``store`` by handing it ``blob_key(some_path)``."""
         return path.relative_to(self.root).as_posix()
 
+    def read_page_text(self, file_id: str, page: int) -> dict[str, Any] | None:
+        """The per-page word-box JSON for ``page`` of ``file_id`` (a blob),
+        read through the store, or ``None`` if it was never extracted.
+
+        Parsed with the same duplicate-key rejection as every workspace JSON, so
+        malformed content raises :class:`~dgml_core.errors.CorruptMetadata`."""
+        from .errors import CorruptMetadata
+
+        key = self.blob_key(self.file_text_dir(file_id) / f"page_{page}.json")
+        try:
+            data = self.store.get_blob(key)
+        except FileNotFoundError:
+            return None
+        try:
+            return json.loads(data, object_pairs_hook=_reject_duplicate_keys)  # type: ignore[no-any-return]
+        except ValueError as exc:
+            raise CorruptMetadata(f"page_text {key} is not valid JSON: {exc}") from exc
+
     @property
     def config_path(self) -> Path:
         return self.root / "config.json"

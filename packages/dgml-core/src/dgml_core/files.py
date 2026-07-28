@@ -455,8 +455,10 @@ class FileStore:
         *,
         page_count: int | None,
     ) -> tuple[str | None, dict[str, Any] | None]:
+        text_prefix = self.ws.blob_key(self.ws.file_text_dir(file_id))
         try:
-            result = extract_text_digital(pdf_path, self.ws.file_text_dir(file_id), file_id=file_id)
+            with self.ws.store.staged_write(text_prefix) as text_dir:
+                result = extract_text_digital(pdf_path, text_dir, file_id=file_id)
         except TextExtractionFailed as exc:
             return self._record_text_failure(file_id, str(exc), permanent=True), None
         return self._classify_and_record(result, file_id, page_count, mode_label="digital")
@@ -475,14 +477,16 @@ class FileStore:
             # config has to be fixed before retrying.
             return self._record_text_failure(file_id, str(exc), permanent=True), None
 
+        text_prefix = self.ws.blob_key(self.ws.file_text_dir(file_id))
         try:
-            result = extract_text_ocr(
-                pdf_path,
-                self.ws.file_text_dir(file_id),
-                file_id=file_id,
-                page_images_dir=self.ws.file_pages_dir(file_id),
-                config=config,
-            )
+            with self.ws.store.staged_write(text_prefix) as text_dir:
+                result = extract_text_ocr(
+                    pdf_path,
+                    text_dir,
+                    file_id=file_id,
+                    page_images_dir=self.ws.file_pages_dir(file_id),
+                    config=config,
+                )
         except (OcrFailed, AuthError) as exc:
             # Provider/auth failures are recorded as permanent — re-running
             # without changing config or credentials won't help. `dgml check
@@ -506,18 +510,20 @@ class FileStore:
         except DgmlError as exc:
             return self._record_text_failure(file_id, str(exc), permanent=True), None
 
+        text_prefix = self.ws.blob_key(self.ws.file_text_dir(file_id))
         try:
-            result = extract_text_hybrid(
-                pdf_path,
-                self.ws.file_text_dir(file_id),
-                file_id=file_id,
-                page_images_dir=self.ws.file_pages_dir(file_id),
-                config=config,
-                text_extraction_config=text_extraction_config,
-                workspace=self.ws,
-                verbose=verbose,
-                debug=debug,
-            )
+            with self.ws.store.staged_write(text_prefix) as text_dir:
+                result = extract_text_hybrid(
+                    pdf_path,
+                    text_dir,
+                    file_id=file_id,
+                    page_images_dir=self.ws.file_pages_dir(file_id),
+                    config=config,
+                    text_extraction_config=text_extraction_config,
+                    workspace=self.ws,
+                    verbose=verbose,
+                    debug=debug,
+                )
         except (OcrFailed, AuthError) as exc:
             return self._record_text_failure(file_id, str(exc), permanent=True), None
 
