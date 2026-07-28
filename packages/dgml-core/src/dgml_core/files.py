@@ -552,9 +552,11 @@ class FileStore:
             raise InvalidArgument("file id must not be empty")
         if not self.ws.file_dir(file_id).exists():
             raise FileNotFound(f"file '{file_id}' not found")
-        if self.ws.docsets_dir.exists():
-            for docset_dir in self.ws.docsets_dir.iterdir():
-                ref = docset_dir / "files" / file_id
-                if ref.exists():
-                    shutil.rmtree(ref)
-        shutil.rmtree(self.ws.file_dir(file_id))
+        # Unassign from every docset (removing each pair's marker + generated
+        # outputs), then delete the file's own documents and blobs. delete_blobs
+        # runs last so it prunes the now-empty file directory.
+        for assignment in self.ws.store.find_docs("assignments", {"file_id": file_id}):
+            self.ws.unassign(assignment["docset_id"], file_id)
+        self.ws.store.delete_doc("files", file_id)
+        self.ws.store.delete_doc("errors", file_id)
+        self.ws.store.delete_blobs(f"files/{file_id}/")

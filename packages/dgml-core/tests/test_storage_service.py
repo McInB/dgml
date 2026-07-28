@@ -83,6 +83,42 @@ def test_list_blobs_excludes_documents(tmp_path: Path) -> None:
     ]
 
 
+def test_delete_blobs_is_blob_only_and_prunes(tmp_path: Path) -> None:
+    store = local_store(tmp_path)
+    store.put_blob("files/f1/report.pdf", b"pdf")
+    store.put_blob("files/f1/page_images/page_1.png", b"png")
+    store.put_doc("files", "f1", {"id": "f1"})
+    store.put_blob("files/f2/report.pdf", b"other")
+
+    store.delete_blobs("files/f1/")
+    # blobs under the prefix are gone; the document beside them is untouched
+    assert store.list_blobs("files/f1/") == []
+    assert store.get_doc("files", "f1") == {"id": "f1"}
+    # the emptied blob subdir is pruned; the file dir stays (still holds file.json)
+    assert not (tmp_path / "files" / "f1" / "page_images").exists()
+    assert (tmp_path / "files" / "f1").is_dir()
+    # a sibling under the same parent is untouched; a missing prefix is a no-op
+    assert store.get_blob("files/f2/report.pdf") == b"other"
+    store.delete_blobs("files/nope/")
+
+    # once the document is gone too, delete_blobs prunes the now-empty file dir
+    store.delete_doc("files", "f1")
+    store.delete_blobs("files/f1/")
+    assert not (tmp_path / "files" / "f1").exists()
+
+
+def test_delete_blobs_preserves_assignment_markers(tmp_path: Path) -> None:
+    store = local_store(tmp_path)
+    # an assignment is an empty marker dir; a generated dgml.xml blob sits beside it
+    store.insert_doc("assignments", {"_id": "d1/f1", "docset_id": "d1", "file_id": "f1"})
+    store.put_blob("docsets/d1/files/f1/report.dgml.xml", b"<x/>")
+    store.delete_blobs("docsets/d1/files/f1/")
+    # the blob is gone, but pruning must not remove the marker → assignment survives
+    assert not store.blob_exists("docsets/d1/files/f1/report.dgml.xml")
+    assert store.get_doc("assignments", "d1/f1") == {"docset_id": "d1", "file_id": "f1"}
+    assert (tmp_path / "docsets" / "d1" / "files" / "f1").is_dir()
+
+
 def test_upload_download_blob(tmp_path: Path) -> None:
     store = local_store(tmp_path)
     src = tmp_path / "src.bin"

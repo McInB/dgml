@@ -174,6 +174,15 @@ class StorageService(ABC):
         """Delete every document in ``collection`` matching ``query`` (Mongo
         ``delete_many``). Returns the number deleted."""
 
+    @abstractmethod
+    def delete_blobs(self, prefix: str) -> None:
+        """Delete every **blob** whose key is under ``prefix`` (an object store: list
+        + batch-delete; ``LocalStore``: remove the blob files and prune now-empty
+        directories). Documents are left untouched — a cascade delete composes this
+        with ``delete_doc`` / ``delete_docs`` in the caller, so each store only ever
+        does operations native to it (no store needs the blob/document layout). A
+        prefix that matches nothing is a no-op."""
+
 
 def _resolve_store_class(provider: str) -> type[StorageService]:
     """Import and return the :class:`StorageService` subclass named by ``provider``.

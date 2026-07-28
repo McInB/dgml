@@ -38,6 +38,7 @@ atomic rename.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
@@ -256,6 +257,57 @@ class LocalStore(StorageService):
             raise FileNotFoundError(f"no blob at key {key!r}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
+
+    def delete_blobs(self, prefix: str) -> None:
+        # Remove only blob files under the prefix (documents that live beside them —
+        # file.json, extraction_stats.json, … — are left for delete_doc), then prune
+        # any directories emptied as a result so the tree matches a recursive remove.
+        base = self._root / _safe_rel(prefix)
+        if base.is_dir():
+            for path in base.rglob("*"):
+                if path.is_file() and self._is_blob(path.relative_to(self._root).as_posix()):
+                    path.unlink()
+        elif base.is_file() and self._is_blob(base.relative_to(self._root).as_posix()):
+            base.unlink()
+        self._prune_empty_dirs(base)
+
+    def _is_assignment_marker(self, directory: Path) -> bool:
+        """Whether ``directory`` is a ``docsets/<did>/files/<fid>`` pair directory —
+        an *empty one is itself a live assignment* (see the assignments collection),
+        so pruning must never remove it; only ``delete_doc("assignments", …)`` does."""
+        try:
+            parts = directory.relative_to(self._root).parts
+        except ValueError:
+            return False
+        return len(parts) == 4 and parts[0] == DOCSETS_DIR and parts[2] == DOCSET_FILES_DIR
+
+    def _prune_empty_dirs(self, base: Path) -> None:
+        """Remove empty directories in and above ``base`` (bottom-up), stopping at
+        the workspace root's top-level directories (``files/``, ``docsets/``) and the
+        root itself — so composed blob+document deletes leave no lingering empty dirs
+        (matching the historical recursive remove). Assignment marker directories are
+        preserved: an empty one is a live assignment, not garbage."""
+        if base.is_dir():
+            subdirs = sorted(
+                (p for p in base.rglob("*") if p.is_dir()),
+                key=lambda p: len(p.parts),
+                reverse=True,
+            )
+            for sub in subdirs:
+                if self._is_assignment_marker(sub):
+                    continue
+                with contextlib.suppress(OSError):
+                    sub.rmdir()
+        directory = base
+        while directory != self._root and directory.parent != self._root:
+            if self._is_assignment_marker(directory):
+                break
+            try:
+                parent = directory.parent
+                directory.rmdir()
+            except OSError:
+                break  # not empty (or already gone) → stop
+            directory = parent
 
     # ---- JSON documents (Mongo-shaped): mapped to today's manifest paths ----
 

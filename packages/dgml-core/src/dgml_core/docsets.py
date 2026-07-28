@@ -14,8 +14,6 @@
 
 from __future__ import annotations
 
-import shutil
-
 from .errors import (
     DocSetNotFound,
     FileNotFound,
@@ -93,7 +91,14 @@ class DocSetStore:
             raise InvalidArgument("docset id must not be empty")
         if not self.ws.docset_dir(docset_id).exists():
             raise DocSetNotFound(f"docset '{docset_id}' not found")
-        shutil.rmtree(self.ws.docset_dir(docset_id))
+        # Unassign every file (removing each pair's outputs), then the docset's own
+        # documents and blobs; delete_blobs runs last so it prunes the empty subtree.
+        # The underlying files under files/ are left untouched.
+        for assignment in self.ws.store.find_docs("assignments", {"docset_id": docset_id}):
+            self.ws.unassign(docset_id, assignment["file_id"])
+        self.ws.store.delete_doc("schemas", docset_id)
+        self.ws.store.delete_doc("docsets", docset_id)
+        self.ws.store.delete_blobs(f"docsets/{docset_id}/")
 
     def list_files(self, docset_id: str) -> list[str]:
         if not docset_id.strip():
@@ -126,10 +131,9 @@ class DocSetStore:
             raise InvalidArgument("file id must not be empty")
         if not self.ws.docset_dir(docset_id).exists():
             raise DocSetNotFound(f"docset '{docset_id}' not found")
-        ref = self.ws.docset_files_dir(docset_id) / file_id
-        if not ref.exists():
+        if self.ws.store.get_doc("assignments", f"{docset_id}/{file_id}") is None:
             raise FileNotFound(f"file '{file_id}' is not assigned to docset '{docset_id}'")
-        shutil.rmtree(ref)
+        self.ws.unassign(docset_id, file_id)
 
     # ---- extraction schema (docsets/<id>/extraction-schema.rnc, RELAX NG Compact) --
 

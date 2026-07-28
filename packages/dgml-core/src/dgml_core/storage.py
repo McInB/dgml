@@ -177,6 +177,15 @@ class Workspace:
 
         return make_store(load_storage_config(self))
 
+    def unassign(self, docset_id: str, file_id: str) -> None:
+        """Remove a docset↔file assignment and that pair's generated artifacts
+        (the ``dgml.xml`` blob and the extraction-stats document). Composed from
+        native store ops — blob-prefix delete + document deletes — so it is correct
+        on any backend, not just local disk."""
+        self.store.delete_blobs(f"docsets/{docset_id}/files/{file_id}/")
+        self.store.delete_doc("extraction_stats", f"{docset_id}/{file_id}")
+        self.store.delete_doc("assignments", f"{docset_id}/{file_id}")
+
     def read_meta(self) -> dict[str, Any]:
         """Return the parsed ``workspace.json`` mapping, or ``{}`` when the file
         is absent (workspaces created before ``workspace.json`` existed)."""
