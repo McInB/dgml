@@ -14,9 +14,9 @@ below the fold.
 
 ```mermaid
 flowchart TD
-    Q1{"Do you have category NAMES?<br/>(e.g. Invoice, Contract, Loss Run)"}
+    Q1{"Do you have category NAMES?<br/>&#40;e.g. Invoice, Contract, Loss Run&#41;"}
     Q1 -->|"No — I know nothing<br/>about the categories"| S1["S1 · Unsupervised<br/>Discover the clusters from scratch,<br/>then name them afterwards"]
-    Q1 -->|"Yes, some — and NEW<br/>categories may still appear"| Q2{"Do you also have labeled<br/>EXAMPLES for each category?<br/>(already-sorted docs)"}
+    Q1 -->|"Yes, some — and NEW<br/>categories may still appear"| Q2{"Do you also have labeled<br/>EXAMPLES for each category?<br/>&#40;already-sorted docs&#41;"}
     Q1 -->|"Yes, ALL of them — and the<br/>set is FIXED (no new ones)"| Q3{"Do you also have labeled<br/>EXAMPLES for each category?"}
 
     Q2 -->|"No, names only"| S2["S2 · Assign by category NAME<br/>Docs too far from any name →<br/>emergent 'unknown_*' cluster"]
@@ -27,7 +27,7 @@ flowchart TD
     S1 -.-> OPEN(["OPEN set — new categories can emerge<br/>Run with: dgml cluster"])
     S2 -.-> OPEN
     S3 -.-> OPEN
-    S4 -.-> CLOSED(["CLOSED set — every doc gets a known label<br/>Run with: run_clustering(all_categories_known=True)"])
+    S4 -.-> CLOSED(["CLOSED set — every doc gets a known label<br/>Run with: run_clustering&#40;all_categories_known=True&#41;"])
     S5 -.-> CLOSED
 
     style S1 fill:#e8d6ff,stroke:#7b2ff7,color:#111
@@ -100,16 +100,32 @@ dgml cluster
 ### Closed set → library (S4 / S5)
 
 Every document is forced into a named category; no `unknown_*` bucket. Exposed
-through `dgml_core.run_clustering`, not a CLI mode:
+through the `dgml_core.run_clustering` *module* (it is not re-exported from
+`dgml_core`'s top level), not a CLI mode:
 
 ```python
-from dgml_core.run_clustering import run_clustering
+from pathlib import Path
+
+from dgml_core.run_clustering import resolve_text_settings, run_clustering
+
+# The bundled default text encoder is corpus-fitted TF-IDF: it has to see the
+# whole corpus once to learn document frequencies, and the dataset has to
+# assemble `record.text` under the same text view the encoder fits on.
+# resolve_text_settings derives both from the config — skip it and the run
+# fails with "tfidf encoder requires cfg.extra['corpus_dir']".
+# The argument is a DGML workspace's `files/` dir (the per-file `page_text/`
+# written by `dgml add` is what gets read), NOT a flat folder of PDFs.
+text_view, overrides = resolve_text_settings(Path("my-workspace/files"), None)
+
+# Build `dataset` (and, for S5, `support`) over that same workspace, with
+# `record.text` under `text_view` — see packages/clustering/README.md.
 
 # S4 — all category names, no labeled examples.
 labels = run_clustering(
     dataset,
     known_categories=["Invoice", "Contract", "Loss Run"],
     all_categories_known=True,        # closed set → no emergent clusters
+    overrides=overrides,
 )
 
 # S5 — you also have labeled examples (a support_dataset whose records carry a
@@ -120,8 +136,19 @@ labels = run_clustering(
     all_categories_known=True,
     n_samples_per_category=8,
     support_dataset=support,
+    overrides=overrides,
 )
 ```
+
+`n_samples_per_category` is a **cap**, not a requirement: each category's
+prototype averages at most that many of its labeled examples (in dataset order),
+so a category with fewer is fine — but one with *none* raises. 8 for S5 and 4 for
+S3 are the scenarios' own defaults and a reasonable starting point.
+
+Swapping the text encoder (`overrides={"encoder_text": {...}}`) means also
+matching `manifold.dim` to its `embedding_dim`: the default
+`training.identity_projector` is a parameter-free passthrough, so mismatched
+widths are rejected rather than adapted.
 
 That's enough to run any scenario. **The rest of this page is background** — read on
 only if you want the reasoning, the exact inputs, or tuning knobs.
