@@ -20,6 +20,7 @@ non-interactive flag-driven commands.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -2023,7 +2024,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     # original_filename → list of (file_id, pdf_path, out_xml, page_text_dir).
     # Grouped by filename to detect collisions: convert_batch keys documents by
     # filename, so two files sharing a basename can't both convert in one run.
-    candidates: dict[str, list[tuple[str, Path, Path, Path | None]]] = {}
+    candidates: dict[str, list[tuple[str, Path, Path, str | None]]] = {}
     # Already-generated docs, for whole-docset roster reuse + namespacing recompute.
     prior_stems: dict[str, str] = {}  # cache stem → original_filename
     prior_out_paths: dict[str, Path] = {}  # original_filename → existing .dgml.xml
@@ -2061,9 +2062,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             name_to_fid[name] = fid  # in case it re-renders below and needs re-grounding
             _diag(f"Skipping {name} (already converted)")
             continue
-        ptd = ws.file_text_dir(fid)
+        pt_prefix = ws.blob_key(ws.file_text_dir(fid))
         candidates.setdefault(name, []).append(
-            (fid, pdf_path, out_xml, ptd if ptd.is_dir() else None)
+            (fid, pdf_path, out_xml, pt_prefix if ws.store.list_blobs(pt_prefix) else None)
         )
 
     # Same-basename collision: the typed-block pipeline keys documents by
@@ -2073,9 +2074,10 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     dgml_xml_paths: dict[str, Path] = {}
     filename_to_fid: dict[str, str] = {}
     page_text_dirs: dict[str, Path] = {}
+    page_text_prefixes: dict[str, str] = {}
     for name, group in candidates.items():
         if len(group) > 1:
-            for fid, _pdf, _out, _ptd in group:
+            for fid, _pdf, _out, _pref in group:
                 failed_results.append(
                     _file_result(
                         "failed",
@@ -2093,13 +2095,13 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 )
             _diag(f"Duplicate filename '{name}' across {len(group)} files — reported as failed")
             continue
-        fid, pdf_path, out_xml, pt_dir = group[0]
+        fid, pdf_path, out_xml, pt_pfx = group[0]
         pdf_paths.append(pdf_path)
         dgml_xml_paths[name] = out_xml
         filename_to_fid[name] = fid
         name_to_fid[name] = fid
-        if pt_dir is not None:
-            page_text_dirs[name] = pt_dir
+        if pt_pfx is not None:
+            page_text_prefixes[name] = pt_pfx
 
     # Coverage is computed (and its per-file summary printed) whenever the user
     # didn't pass --no-coverage, but the coverage_report.json *file* is an
@@ -2276,35 +2278,42 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             prior_outputs[nm] = prior_out_paths[nm].read_text(encoding="utf-8")
             dgml_xml_paths[nm] = prior_out_paths[nm]
 
-        options = ConvertOptions(
-            model=gen_model,
-            label_model=label_model,
-            api_key=gen_api_key,
-            api_base=gen_api_base,
-            window_size=args.window_size,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            max_parallel_docs=args.max_parallel_calls,
-            cache_dir=cache_dir,
-            debug=args.debug,
-            page_text_dirs=page_text_dirs,
-            workspace=ws,
-            dgml_header=build_header(ws.organization, ds.name),
-            converters=load_conversion_config(ws),
-            roster_seed=roster_seed,
-            schema_seed=schema_seed,
-            parent_map=parent_map_seed or None,
-            progress=_diag,
-        )
-        convert_batch(
-            pdf_paths,
-            options=options,
-            on_output=_on_output,
-            on_error=_on_error,
-            on_label_error=_on_label_error,
-            prior_docs=prior_docs,
-            prior_outputs=prior_outputs,
-        )
+        # Materialize each file's page_text/ into a local dir the pipeline
+        # (transcribe gate + coverage) reads. LocalStore yields the real dir
+        # zero-copy; a remote store downloads it to a temp dir held open for
+        # the whole batch. Populate the same dict `_on_output` closes over.
+        with contextlib.ExitStack() as pt_stack:
+            for nm, pref in page_text_prefixes.items():
+                page_text_dirs[nm] = pt_stack.enter_context(ws.store.materialize_dir(pref))
+            options = ConvertOptions(
+                model=gen_model,
+                label_model=label_model,
+                api_key=gen_api_key,
+                api_base=gen_api_base,
+                window_size=args.window_size,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                max_parallel_docs=args.max_parallel_calls,
+                cache_dir=cache_dir,
+                debug=args.debug,
+                page_text_dirs=page_text_dirs,
+                workspace=ws,
+                dgml_header=build_header(ws.organization, ds.name),
+                converters=load_conversion_config(ws),
+                roster_seed=roster_seed,
+                schema_seed=schema_seed,
+                parent_map=parent_map_seed or None,
+                progress=_diag,
+            )
+            convert_batch(
+                pdf_paths,
+                options=options,
+                on_output=_on_output,
+                on_error=_on_error,
+                on_label_error=_on_label_error,
+                prior_docs=prior_docs,
+                prior_outputs=prior_outputs,
+            )
         # convert_batch silently drops documents whose transcription failed, so
         # `_on_output` never fires for them. Reconcile: any queued file with no
         # output is a per-file failure, not a vanished row (keeps counts summing
