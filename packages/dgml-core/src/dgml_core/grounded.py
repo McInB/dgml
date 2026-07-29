@@ -63,7 +63,12 @@ from .errors import (
     ValuesExtractionFailed,
     now_iso,
 )
-from .extraction_schema import field_tree_to_rnc, parse_rnc, rnc_to_json_schema
+from .extraction_schema import (
+    FIELD_DATATYPES,
+    field_tree_to_rnc,
+    parse_rnc,
+    rnc_to_json_schema,
+)
 from .extraction_xml import (
     count_dropped_refs,
     embed_extraction_into,
@@ -413,11 +418,61 @@ def _schema_user_prompt(n_files: int) -> str:
     return intro + "\n\n" + prompt("extraction_schema_user_body")
 
 
+#: Max nesting depth of the *declared* field-tree schema. Only constrains
+#: constrain-decoders (Gemini); the parser handles arbitrary depth, so other
+#: providers may return deeper. Bounded because Gemini rejects the deeper
+#: (~27 KB) form with "too many states for serving"; depth 3 (~13 KB) is
+#: accepted and covers the docset schemas seen so far.
+_SCHEMA_TREE_MAX_DEPTH = 3
+
+_NODE_KINDS = ("field", "container", "collection")
+
+
+def _field_node_schema(depth: int, *, allow_item: bool = True) -> dict[str, Any]:
+    """JSON Schema for one field-tree node, with keys ``_field_node_to_tag`` reads.
+
+    Declared explicitly rather than as a bare ``{"type": "object"}``: Gemini
+    constrain-decodes tool arguments against the schema, so an empty object makes
+    it return empty ``{}`` nodes and generation fails with "missing 'name'"
+    (issue #73). Nesting is inlined, not ``$ref``'d (adapters resolve $ref
+    inconsistently). The deepest level narrows ``kind`` to ``field`` (no child
+    slot left); ``item`` does not consume a level (the parser flattens it); and
+    ``datatype`` is enum-narrowed to spellings ``_normalize_datatype`` already
+    canonicalizes.
+    """
+    kinds = list(_NODE_KINDS) if depth > 0 else ["field"]
+    props: dict[str, Any] = {
+        "name": {"type": "string", "description": "Field name, in the document's own wording."},
+        "kind": {"type": "string", "enum": kinds},
+        "datatype": {"type": "string", "enum": ["text", *sorted(FIELD_DATATYPES)]},
+        "description": {"type": "string"},
+        "example": {"type": "string"},
+        "prompt": {"type": "string"},
+    }
+    if depth > 0:
+        props["fields"] = {
+            "type": "array",
+            "description": "Children of a 'container' (or a 'collection' item's fields).",
+            "items": _field_node_schema(depth - 1),
+        }
+        if allow_item:
+            props["item"] = {
+                **_field_node_schema(depth, allow_item=False),
+                "description": "A 'collection''s repeated item, described explicitly.",
+            }
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["name", "kind"],
+        "additionalProperties": False,
+    }
+
+
 def _submit_schema_tool() -> dict[str, Any]:
-    # The tree structure is documented in the prompt and enforced by the
-    # deterministic Python parser (``field_tree_to_vocabulary``); the tool
-    # schema keeps ``fields`` a free-form array of objects so providers don't
-    # have to support a recursive JSON Schema.
+    # The tree structure is also documented in the prompt and enforced by the
+    # deterministic Python parser (``field_tree_to_vocabulary``); the tool schema
+    # declares it too so providers that constrain-decode tool arguments emit a
+    # populated tree rather than empty objects.
     return {
         "type": "function",
         "function": {
@@ -441,10 +496,13 @@ def _submit_schema_tool() -> dict[str, Any]:
                             "'text', 'date', 'dateTime', 'decimal', 'integer', "
                             "'boolean', 'gYear', 'time', 'anyURI'."
                         ),
-                        "items": {"type": "object"},
+                        "items": _field_node_schema(_SCHEMA_TREE_MAX_DEPTH),
                     }
                 },
                 "required": ["fields"],
+                # Same rationale as _expand_refs: closes the hole where Gemini
+                # accepts a fabricated sibling property next to the required one.
+                "additionalProperties": False,
             },
         },
     }
