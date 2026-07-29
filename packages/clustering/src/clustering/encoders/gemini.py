@@ -29,16 +29,22 @@ here rather than an assumption:
   environment, which is how Vertex service-account and ``GOOGLE_API_KEY``
   setups work. A genuinely absent credential surfaces as litellm's own
   authentication error on the first call.
-* **Input length.** Gemini embedding models cap input at a couple of thousand
-  tokens and reject anything longer, so a full multi-page document does not
-  fit. ``cfg.max_length`` is honoured as a *token* budget (the same unit the
-  local encoders use) and applied by truncating the text, since there is no
-  local tokenizer to count with — see :data:`_CHARS_PER_TOKEN` for why that is
-  an approximation and not a guarantee. ``None`` sends the text through
-  untouched, which is correct when the caller already truncated.
-* **Failure.** One rate-limit response would otherwise discard every embedding
-  already paid for in the same run, so requests retry (``extra.num_retries``,
-  default :data:`_DEFAULT_NUM_RETRIES`).
+* **Input length.** ``gemini-embedding-001`` documents a 2048-token input
+  limit, and a multi-page document blows past it. What the endpoint does with
+  the excess is *its* choice, not ours — in our own benchmark runs it accepted
+  every over-limit request without error — which is the reason to cut the text
+  ourselves: an explicit window is reproducible and bounds what we pay for,
+  where an implicit one leaves both to the provider. ``cfg.max_length`` sets
+  it, as a token budget converted to characters (see :data:`_CHARS_PER_TOKEN`);
+  ``None`` sends the text through untouched, for callers that already
+  truncated.
+* **Failure.** One rate-limit response mid-corpus would otherwise discard every
+  embedding already paid for in the same run, so transient failures are retried
+  with exponential backoff (``extra.num_retries``, default
+  :data:`_DEFAULT_NUM_RETRIES`). The retry loop lives *here*, in
+  :meth:`GeminiEncoder._embed_chunk`, and not in a ``num_retries=`` kwarg:
+  litellm's retry dispatch is keyed on call type and covers ``completion`` /
+  ``responses`` only, so that kwarg is accepted and ignored for ``embedding``.
 
 Select with ``encoder_text=gemini``.
 """
@@ -46,6 +52,7 @@ Select with ``encoder_text=gemini``.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -56,19 +63,22 @@ from clustering.encoders.base import Encoder, EncoderOutput, register_encoder
 
 _DEFAULT_MODEL = "gemini/gemini-embedding-001"
 
-# Retries are per-request inside litellm and cover 429 / 5xx / timeout. Three
-# is enough to ride out the burst rate limits an embedding sweep provokes
-# without turning a hard failure into a long hang.
+# Retries for the transient failures a corpus-sized sweep provokes (429s
+# especially). Three rides out a burst without turning a permanent failure into
+# a long hang; the backoff below is what actually gives the quota time to refill.
 _DEFAULT_NUM_RETRIES = 3
+_BACKOFF_BASE_SECONDS = 2.0
+_BACKOFF_CAP_SECONDS = 30.0
 
 # ``cfg.max_length`` is a token count; the API takes text. Converting needs a
 # chars-per-token figure, and 4 is the usual English average — an *average*,
-# not an upper bound. A token-dense document (dense tables, long numbers, many
-# rare words) can still exceed the model's cap after truncation, in which case
-# the API rejects the request and the fix is a lower ``max_length``. Erring
-# high rather than low is deliberate: silently discarding text a model would
-# have accepted costs recall on exactly the long documents where the extra
-# pages carry the signal.
+# not a bound. Measured on 36 documents from the corpora this encoder was
+# benchmarked on (first 3 pages, cut at 8000 characters): median 3.7
+# chars/token, minimum 2.1, and 8% of them still over 2048 tokens after the
+# cut. So treat the resulting window as approximate. It is not load-bearing for
+# correctness — the endpoint accepted those over-limit inputs — but it does mean
+# ``max_length`` is a budget, not a guarantee, and a token-dense corpus lands
+# nearer 2 chars/token than 4.
 _CHARS_PER_TOKEN = 4
 
 
@@ -89,14 +99,15 @@ class GeminiEncoder(Encoder[str]):
         )
         # Optional passthroughs. Only sent when the caller sets them, so the
         # provider's own defaults (and any measurement taken against them)
-        # stay in force. ``dimensions`` asks the model to truncate its output
-        # via Matryoshka representation learning; it has to agree with
-        # ``embedding_dim``, which the width check below enforces anyway.
+        # stay in force. ``dimensions`` asks the model for a narrower output via
+        # Matryoshka representation learning, and is what makes an
+        # ``embedding_dim`` below the model's native width work at all — the
+        # check in :meth:`encode` rejects the mismatch you get without it.
         self.extra_kwargs: dict[str, Any] = {}
-        for key in ("task_type", "dimensions"):
-            value = cfg.extra.get(key)
+        for field in ("task_type", "dimensions"):
+            value = cfg.extra.get(field)
             if value is not None:
-                self.extra_kwargs[key] = value
+                self.extra_kwargs[field] = value
         api_key: Any = cfg.extra.get("api_key")
         if not api_key:
             env = str(cfg.extra.get("api_key_env", "GEMINI_API_KEY"))
@@ -107,17 +118,53 @@ class GeminiEncoder(Encoder[str]):
         self.api_key: str | None = str(api_key) if api_key else None
 
     def _prepare(self, batch: Sequence[str]) -> list[str]:
-        texts = [str(x) for x in batch]
         if self.max_chars is None:
-            return texts
-        return [t[: self.max_chars] for t in texts]
+            return list(batch)
+        return [t[: self.max_chars] for t in batch]
+
+    def _embed_chunk(self, litellm: Any, chunk: list[str]) -> Any:
+        """One request, retried on the failures that are worth retrying.
+
+        ``litellm.num_retries`` does not cover this call: litellm's retry
+        dispatch is keyed on call type and only ``completion`` / ``responses``
+        reach it, so the kwarg is accepted and ignored for ``embedding``. Hence
+        the loop. Only transient classes are retried — an auth or bad-request
+        failure is deterministic, and sleeping 2/4/8s before repeating it just
+        delays the traceback.
+
+        The module comes in as an argument because the import is deferred to
+        :meth:`encode` (litellm is an optional dependency for this package).
+        """
+        transient = (
+            litellm.RateLimitError,
+            litellm.Timeout,
+            litellm.APIConnectionError,
+            litellm.InternalServerError,
+            litellm.ServiceUnavailableError,
+        )
+        for attempt in range(self.num_retries + 1):
+            try:
+                return litellm.embedding(
+                    model=self.model,
+                    input=chunk,
+                    api_key=self.api_key,
+                    timeout=self.timeout,
+                    **self.extra_kwargs,
+                )
+            except transient:
+                if attempt == self.num_retries:
+                    raise
+                time.sleep(min(_BACKOFF_BASE_SECONDS * 2**attempt, _BACKOFF_CAP_SECONDS))
+        raise AssertionError("unreachable")  # pragma: no cover — loop returns or raises
 
     @torch.no_grad()
     def encode(self, batch: Sequence[str]) -> EncoderOutput:
-        # An empty batch reaches here from CachingEncoder (a fully-cached
-        # batch forwards the empty remainder). Answer it with a correctly
-        # shaped empty tensor instead of spending a request: ``torch.tensor([])``
-        # would be 1-D and break the caller's ``[N, D]`` contract.
+        # Nothing to embed: answer with a correctly shaped empty tensor rather
+        # than sending a request, because ``torch.tensor([])`` would be 1-D and
+        # break the caller's ``[N, D]`` contract. No shipped caller passes an
+        # empty batch today (CachingEncoder forwards only its misses, under an
+        # ``if missing:``), so this is a guard on the ABC's contract, not a hot
+        # path.
         if not batch:
             return EncoderOutput(pooled=torch.zeros((0, self.embedding_dim), dtype=torch.float32))
 
@@ -134,14 +181,7 @@ class GeminiEncoder(Encoder[str]):
         rows: list[list[float]] = []
         for start in range(0, len(texts), self.batch_size):
             chunk = texts[start : start + self.batch_size]
-            resp = litellm.embedding(
-                model=self.model,
-                input=chunk,
-                api_key=self.api_key,
-                timeout=self.timeout,
-                num_retries=self.num_retries,
-                **self.extra_kwargs,
-            )
+            resp = self._embed_chunk(litellm, chunk)
             for item in resp.data:
                 vec = getattr(item, "embedding", None)
                 if vec is None:

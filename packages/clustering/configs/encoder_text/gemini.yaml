@@ -12,21 +12,23 @@ model_id: gemini/gemini-embedding-001
 embedding_dim: 3072
 multi_vector: false
 # Token budget per document; the encoder truncates to roughly 4x this many
-# characters. Gemini embedding models reject inputs past a couple of thousand
-# tokens, so a multi-page document has to be cut somewhere — first pages first,
-# which is where the document type is usually declared. Unset it to send the
-# text through untouched (only safe if you truncate upstream).
+# characters. gemini-embedding-001 documents a 2048-token limit but does not
+# enforce it — it accepts longer input and decides for itself what to do with
+# the tail. Cutting here instead keeps the run reproducible and the bill
+# bounded, and keeps the kept text at the front of the document, where the type
+# is usually declared. Unset it to send the text through untouched.
 max_length: 2000
 extra:
   # Name of the env var holding the key (preferred over a literal api_key).
   # Leave both unset to let litellm resolve credentials itself (GOOGLE_API_KEY,
   # Vertex ADC, ...).
   api_key_env: GEMINI_API_KEY
-  # Documents per request. 100 at the max_length above is a measured-good
-  # combination; raising max_length without lowering this can overrun the
-  # per-request token budget.
+  # Documents per request — the value the encoder benchmark ran at. Batching is
+  # about round-trips, not price: billing is per token either way.
   batch_size: 100
   timeout: 60
-  # Retries per request (429 / 5xx / timeout), so one rate-limit response
-  # doesn't throw away the embeddings already paid for in this run.
+  # Attempts after the first, on 429 / 5xx / timeout only, with exponential
+  # backoff — so one rate-limit response doesn't throw away the embeddings
+  # already paid for in this run. Handled by the encoder itself; litellm's own
+  # num_retries kwarg does not apply to embedding calls.
   num_retries: 3

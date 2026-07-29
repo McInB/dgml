@@ -22,6 +22,7 @@ import torch
 from clustering.config.schema import EncoderConfig
 from clustering.encoders.caching import encoder_fingerprint
 from clustering.encoders.gemini import GeminiEncoder
+from litellm.exceptions import AuthenticationError, RateLimitError
 
 MODEL = "gemini/gemini-embedding-001"
 
@@ -70,8 +71,10 @@ def test_gemini_truncates_to_max_length(monkeypatch: pytest.MonkeyPatch) -> None
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr("litellm.embedding", _fake_embedding(calls))
 
-    # 10 tokens -> 40 characters. Gemini rejects over-long input outright, so
-    # an untruncated multi-page document would fail the whole request.
+    # 10 tokens -> 40 characters. The cut is ours, not the provider's: the
+    # endpoint accepts input past its documented 2048-token limit and silently
+    # decides what to do with the tail, so we pick the window instead — same
+    # bytes embedded on every run, and a bounded bill.
     enc = GeminiEncoder(_cfg(max_length=10))
     out = enc.encode(["x" * 500, "short"])
 
@@ -88,29 +91,85 @@ def test_gemini_without_max_length_sends_text_untouched(monkeypatch: pytest.Monk
     assert [len(t) for t in calls[0]["input"]] == [500]
 
 
-def test_gemini_retries_and_passes_optional_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gemini_passes_optional_kwargs_only_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr("litellm.embedding", _fake_embedding(calls))
 
     GeminiEncoder(_cfg()).encode(["a"])
-    # Retries default on: one 429 must not discard a run's paid-for embeddings.
-    assert calls[0]["num_retries"] == 3
     # Provider defaults left alone unless asked for.
     assert "task_type" not in calls[0] and "dimensions" not in calls[0]
+    # `num_retries` is ours, not litellm's — see _embed_chunk. Forwarding it
+    # would read as a retry policy and do nothing.
+    assert "num_retries" not in calls[0]
 
     calls.clear()
-    GeminiEncoder(_cfg(num_retries=0, task_type="CLUSTERING", dimensions=3)).encode(["a"])
-    assert calls[0]["num_retries"] == 0
+    GeminiEncoder(_cfg(task_type="CLUSTERING", dimensions=3)).encode(["a"])
     assert calls[0]["task_type"] == "CLUSTERING"
     assert calls[0]["dimensions"] == 3
+
+
+def test_gemini_retries_transient_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 429 mid-corpus must not throw away the embeddings already paid for."""
+    calls: list[dict[str, Any]] = []
+    ok = _fake_embedding(calls)
+    slept: list[float] = []
+    monkeypatch.setattr("time.sleep", slept.append)
+
+    attempts = 0
+
+    def flaky(**kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RateLimitError("slow down", llm_provider="gemini", model=MODEL)
+        return ok(**kwargs)
+
+    monkeypatch.setattr("litellm.embedding", flaky)
+    out = GeminiEncoder(_cfg()).encode(["abc"])
+
+    assert attempts == 3  # two failures, then the request that succeeded
+    assert out.pooled[:, 0].tolist() == [3.0]
+    assert slept == [2.0, 4.0]  # exponential, not a tight spin
+
+
+def test_gemini_gives_up_after_num_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = 0
+
+    def always_429(**kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        raise RateLimitError("slow down", llm_provider="gemini", model=MODEL)
+
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    monkeypatch.setattr("litellm.embedding", always_429)
+
+    with pytest.raises(RateLimitError):
+        GeminiEncoder(_cfg(num_retries=2)).encode(["a"])
+    assert attempts == 3  # the first try plus two retries — bounded, not forever
+
+
+def test_gemini_does_not_retry_a_deterministic_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bad key fails the same way every time; retrying only delays the error."""
+    attempts = 0
+
+    def bad_key(**kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        raise AuthenticationError("bad key", llm_provider="gemini", model=MODEL)
+
+    monkeypatch.setattr("litellm.embedding", bad_key)
+
+    with pytest.raises(AuthenticationError):
+        GeminiEncoder(_cfg()).encode(["a"])
+    assert attempts == 1
 
 
 def test_gemini_empty_batch_costs_no_request(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr("litellm.embedding", _fake_embedding(calls))
 
-    # A fully-cached batch forwards its empty remainder here; the result still
-    # has to be [0, D] so the caller can stack it.
+    # The Encoder ABC allows an empty batch, so honour it as [0, D] — stackable
+    # by the caller, and costing no request.
     out = GeminiEncoder(_cfg()).encode([])
 
     assert out.pooled.shape == (0, 3)
