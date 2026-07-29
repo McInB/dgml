@@ -43,6 +43,12 @@ umap = [
     "umap-learn>=0.5.6",
     "numba>=0.61",
 ]
+# The `gemini` text encoder calls Gemini embeddings through litellm (which is
+# provider-agnostic and MIT-licensed). Only needed for a bare `dgml-clustering`
+# install; `dgml[clustering]` already pulls litellm via dgml-core.
+gemini = [
+    "litellm>=1.51.0",
+]
 
 [build-system]
 requires = ["hatchling"]

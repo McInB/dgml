@@ -41,7 +41,8 @@ DocumentDataset
 ```
 
 - **Encoders** (`clustering.encoders`) — text: `st_minilm`, `e5`, `bge`,
-  `gte`, `stella`, `jina`; image: `dit`, `vit`, `donut`;
+  `gte`, `stella`, `jina`, `gemini` (API-based, needs `GEMINI_API_KEY`);
+  image: `dit`, `vit`, `donut`;
   multimodal: `qwen_vl`, `qwen3_vl_embedding`; plus `dummy` for tests.
 - **Fusion** (`clustering.fusion`) — `none`, `concat_norm`, `late_concat`,
   `cross_attention`, `gated`.

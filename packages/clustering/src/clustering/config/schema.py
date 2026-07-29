@@ -40,6 +40,7 @@ EncoderName = Literal[
     "gte",
     "stella",
     "jina",
+    "gemini",
     "tfidf",
     "dit",
     "vit",

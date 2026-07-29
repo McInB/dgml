@@ -1,0 +1,16 @@
+# @package encoder_text
+# Google Gemini text embeddings, called through litellm (no local model). Bring
+# your own key: set the GEMINI_API_KEY env var (or extra.api_key). Select with:
+#   encoder_text=gemini
+name: gemini
+# Any litellm-routable Gemini embedding model.
+model_id: gemini/gemini-embedding-001
+# Must match the model's output width (3072 for gemini-embedding-001). A
+# mismatch is rejected at encode time.
+embedding_dim: 3072
+multi_vector: false
+extra:
+  # Name of the env var holding the key (preferred over a literal api_key).
+  api_key_env: GEMINI_API_KEY
+  batch_size: 100
+  timeout: 60
