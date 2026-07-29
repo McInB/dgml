@@ -160,6 +160,16 @@ class ScenarioConfig(_StrictModel):
     k_clusters: int | None = None
     n_shots: int | None = None
     known_categories: list[str] | None = None
+    # ── Name+support prototype blend (S5) ─────────────────────────────────
+    name_prototype_blend: float | None = None
+    """Blend weight ``alpha`` in [0, 1] mixing the encoded category-*name* prototype
+    with the labelled-support mean prototype in S5:
+    ``proto = normalize(alpha*name + (1-alpha)*support)``. ``None``/``0.0`` = today's
+    behaviour (support mean only). The name prototype is a strong prior when support
+    is thin: measured gains are largest at low shot counts (K=1-2: +0.02 to +0.09
+    accuracy across claudio/discovery1/discovery2) and taper as K grows, so a value
+    around 0.4-0.6 helps few-shot S5 without hurting many-shot. Requires descriptive
+    category names to pay off."""
     # ── Multi-page image pooling ──────────────────────────────────────────
     pooling_pages: int = 1
     """How many leading page renders to mean-pool on the image side. ``1``
@@ -333,6 +343,13 @@ class ScenarioConfig(_StrictModel):
         "umap",
     ] = "none"
     reduce_dim: int = 0
+
+    @model_validator(mode="after")
+    def _check_name_prototype_blend(self) -> ScenarioConfig:
+        a = self.name_prototype_blend
+        if a is not None and not (0.0 <= a <= 1.0):
+            raise ValueError(f"name_prototype_blend must be in [0, 1]; got {a}.")
+        return self
 
     @model_validator(mode="after")
     def _check_pooling_pages(self) -> ScenarioConfig:
