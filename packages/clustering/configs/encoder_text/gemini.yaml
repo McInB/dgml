@@ -6,11 +6,27 @@ name: gemini
 # Any litellm-routable Gemini embedding model.
 model_id: gemini/gemini-embedding-001
 # Must match the model's output width (3072 for gemini-embedding-001). A
-# mismatch is rejected at encode time.
+# mismatch is rejected at encode time. With the default parameter-free
+# projector (training.identity_projector) this also has to equal manifold.dim,
+# so raise that to 3072 too — otherwise the run fails at projector construction.
 embedding_dim: 3072
 multi_vector: false
+# Token budget per document; the encoder truncates to roughly 4x this many
+# characters. Gemini embedding models reject inputs past a couple of thousand
+# tokens, so a multi-page document has to be cut somewhere — first pages first,
+# which is where the document type is usually declared. Unset it to send the
+# text through untouched (only safe if you truncate upstream).
+max_length: 2000
 extra:
   # Name of the env var holding the key (preferred over a literal api_key).
+  # Leave both unset to let litellm resolve credentials itself (GOOGLE_API_KEY,
+  # Vertex ADC, ...).
   api_key_env: GEMINI_API_KEY
+  # Documents per request. 100 at the max_length above is a measured-good
+  # combination; raising max_length without lowering this can overrun the
+  # per-request token budget.
   batch_size: 100
   timeout: 60
+  # Retries per request (429 / 5xx / timeout), so one rate-limit response
+  # doesn't throw away the embeddings already paid for in this run.
+  num_retries: 3
