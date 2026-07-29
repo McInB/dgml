@@ -17,7 +17,7 @@ flowchart TD
     Q1{"Do you have category NAMES?<br/>&#40;e.g. Invoice, Contract, Loss Run&#41;"}
     Q1 -->|"No — I know nothing<br/>about the categories"| S1["S1 · Unsupervised<br/>Discover the clusters from scratch,<br/>then name them afterwards"]
     Q1 -->|"Yes, some — and NEW<br/>categories may still appear"| Q2{"Do you also have labeled<br/>EXAMPLES for each category?<br/>&#40;already-sorted docs&#41;"}
-    Q1 -->|"Yes, ALL of them — and the<br/>set is FIXED (no new ones)"| Q3{"Do you also have labeled<br/>EXAMPLES for each category?"}
+    Q1 -->|"Yes, ALL of them — and the<br/>set is FIXED &#40;no new ones&#41;"| Q3{"Do you also have labeled<br/>EXAMPLES for each category?"}
 
     Q2 -->|"No, names only"| S2["S2 · Assign by category NAME<br/>Docs too far from any name →<br/>emergent 'unknown_*' cluster"]
     Q2 -->|"Yes, a few per category"| S3["S3 · Assign by few-shot EXAMPLES<br/>Docs too far from any →<br/>emergent 'unknown_*' cluster"]
@@ -106,33 +106,44 @@ through the `dgml_core.run_clustering` *module* (it is not re-exported from
 ```python
 from pathlib import Path
 
+from dgml_core.dataset import WorkspaceFileDataset
 from dgml_core.run_clustering import resolve_text_settings, run_clustering
+from dgml_core.storage import Workspace
+
+CATEGORIES = ["Invoice", "Contract", "Loss Run"]
+root = Path("my-workspace")
 
 # The bundled default text encoder is corpus-fitted TF-IDF: it has to see the
 # whole corpus once to learn document frequencies, and the dataset has to
 # assemble `record.text` under the same text view the encoder fits on.
 # resolve_text_settings derives both from the config — skip it and the run
 # fails with "tfidf encoder requires cfg.extra['corpus_dir']".
-# The argument is a DGML workspace's `files/` dir (the per-file `page_text/`
-# written by `dgml add` is what gets read), NOT a flat folder of PDFs.
-text_view, overrides = resolve_text_settings(Path("my-workspace/files"), None)
+# The argument is a DGML workspace's `files/` dir: what gets read is the
+# per-file `page_images/` and `page_text/` that `dgml file add` wrote, so this
+# is not a flat folder of PDFs.
+text_view, overrides = resolve_text_settings(root / "files", None)
 
-# Build `dataset` (and, for S5, `support`) over that same workspace, with
-# `record.text` under `text_view` — see packages/clustering/README.md.
+workspace = Workspace(root=root)
+# `text_view` is the reason to keep the returned value: pass it through, or the
+# dataset assembles text the encoder was not fitted on.
+dataset = WorkspaceFileDataset(workspace, to_classify_ids, text_view=text_view)
 
 # S4 — all category names, no labeled examples.
 labels = run_clustering(
     dataset,
-    known_categories=["Invoice", "Contract", "Loss Run"],
+    known_categories=CATEGORIES,
     all_categories_known=True,        # closed set → no emergent clusters
     overrides=overrides,
 )
 
-# S5 — you also have labeled examples (a support_dataset whose records carry a
-# `label` matching a known category). The supervised upper bound.
+# S5 — you also have labeled examples. The support dataset is the same class
+# with a {file_id: category} map, and every category needs at least one.
+support = WorkspaceFileDataset(
+    workspace, list(labeled_ids), labeled_ids, text_view=text_view
+)
 labels = run_clustering(
     dataset,
-    known_categories=["Invoice", "Contract", "Loss Run"],
+    known_categories=CATEGORIES,
     all_categories_known=True,
     n_samples_per_category=8,
     support_dataset=support,
@@ -140,15 +151,36 @@ labels = run_clustering(
 )
 ```
 
+`to_classify_ids` and `labeled_ids` are yours to supply — file IDs from
+`dgml file list`, and a `{file_id: category}` map whose values are drawn from
+`CATEGORIES`. Filter out any file whose `page_images/` is missing before passing
+it in: the dataset raises on a file it cannot render.
+
 `n_samples_per_category` is a **cap**, not a requirement: each category's
 prototype averages at most that many of its labeled examples (in dataset order),
-so a category with fewer is fine — but one with *none* raises. 8 for S5 and 4 for
-S3 are the scenarios' own defaults and a reasonable starting point.
+so a category with fewer is fine — but one with *none* raises. It has no
+scenario-aware default here — `run_clustering` defaults it to `0`, which is what
+selects S4 over S5 — so pass it explicitly. 8 is a reasonable starting point.
 
-Swapping the text encoder (`overrides={"encoder_text": {...}}`) means also
-matching `manifold.dim` to its `embedding_dim`: the default
-`training.identity_projector` is a parameter-free passthrough, so mismatched
-widths are rejected rather than adapted.
+Two things to know if you swap the text encoder
+(`overrides={"encoder_text": {...}}`):
+
+- **Match `manifold.dim` to the new `embedding_dim`.** With the bundled defaults
+  (`fusion.name: none`, `training.identity_projector: true`) the projector is a
+  parameter-free passthrough, so it requires `fusion.output_dim == manifold.dim`
+  and rejects a mismatch rather than adapting it. See the tuning section of
+  [quickstart-clustering.md](quickstart-clustering.md).
+- **For S4 specifically, consider not using the default encoder.** S4's
+  prototypes are the encoded category *names* (`"a scanned document of category:
+  {category}"`), and the bundled TF-IDF encoder only knows words it saw in your
+  corpus — and it drops rare terms (`min_df=2`) — so a category name outside that
+  vocabulary contributes nothing to its prototype. Measured on a 265-document
+  workspace: neither `invoice` nor `contract` made the fitted vocabulary, both
+  prompts collapsed onto the words they share, and the two prototypes came out
+  *identical* (cosine 1.0000) — which makes the choice between those categories a
+  tie-break rather than a measurement. A pretrained sentence encoder
+  (`st_minilm`, `e5`, …) embeds the names on their own terms and doesn't have this
+  failure mode. S5 is unaffected: its prototypes come from documents, not names.
 
 That's enough to run any scenario. **The rest of this page is background** — read on
 only if you want the reasoning, the exact inputs, or tuning knobs.
@@ -197,8 +229,13 @@ every document — pick it for routing/triage, not for exploring an unknown corp
 - **Very small corpora (≤ 8 files):** embeddings have too little signal — `--method
   auto` routes to a one-shot vision-LLM partitioner instead. See the "Only a handful
   of documents?" section of the quickstart.
-- **Building a `DocumentDataset` / `support_dataset`:** see
-  [`packages/clustering/README.md`](../packages/clustering/README.md).
+- **Building a `DocumentDataset` / `support_dataset`:** for documents already in a
+  DGML workspace, `dgml_core.dataset.WorkspaceFileDataset` is the one to use — it
+  reads the page renders and page text `dgml file add` produced. Only write your
+  own (see [`packages/clustering/README.md`](../packages/clustering/README.md))
+  for documents that live outside a workspace, and note that the example there
+  sets `text=""`: fine for an image-only run, but a text encoder needs real text
+  in every record.
 - **Per-parameter tuning** (encoders, reduction, Leiden/HDBSCAN, the novelty gate,
   compute presets): the "Tune the clustering" section of
   [quickstart-clustering.md](quickstart-clustering.md) and
