@@ -358,7 +358,7 @@ def test_binary_leaf_hash_is_sha256_of_file_bytes(workspace: Workspace) -> None:
     _seed_file(workspace, "f001", pages=1)
     version = collect_file_version(workspace, "f001")
     source_ref = next(a for a in version.artifacts if a.slot_id == "source")
-    expected = hashlib.sha256(source_ref.path.read_bytes()).hexdigest()
+    expected = hashlib.sha256(workspace.store.get_blob(source_ref.key)).hexdigest()
     assert source_ref.leaf_hash == expected
 
 
@@ -539,7 +539,7 @@ def test_artifact_ref_is_frozen_and_hashable() -> None:
     callers building 'changed-slot' diffs across two attestations."""
     from dataclasses import FrozenInstanceError
 
-    ref = ArtifactRef("source", Path("/tmp/x.pdf"), ArtifactKind.BINARY, "0" * 64)
+    ref = ArtifactRef("source", "files/x/x.pdf", ArtifactKind.BINARY, "0" * 64)
     with pytest.raises(FrozenInstanceError):
         ref.leaf_hash = "ff" * 32  # type: ignore[misc]
     assert hash(ref) == hash(ref)

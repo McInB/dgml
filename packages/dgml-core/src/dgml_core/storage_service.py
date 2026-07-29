@@ -124,7 +124,13 @@ class StorageService(ABC):
 
     @abstractmethod
     def get_blob(self, key: str) -> bytes:
-        """Return the blob at ``key``. Raise :class:`FileNotFoundError` if absent."""
+        """Return the blob at ``key``. Raise :class:`FileNotFoundError` if absent.
+
+        Returns the whole blob in memory — fine for DGML's artifact sizes (PDFs,
+        page images, schemas, one dgml.xml), which is the working assumption
+        throughout. A caller that must handle very large blobs without loading
+        them should stream instead via :meth:`download_blob` / :meth:`materialize`
+        to a path, then read/hash it chunk-wise."""
 
     @abstractmethod
     def delete_blob(self, key: str) -> None:

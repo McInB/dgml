@@ -27,3 +27,14 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(CHUNK_SIZE), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_bytes(data: bytes) -> str:
+    """Return the lowercase hex SHA-256 digest of ``data``.
+
+    One-shot: ``data`` is held in memory. Use this for content that is already
+    fully in memory (e.g. a ``StorageService.get_blob`` result, which itself
+    materializes the whole blob); for a large artifact you hold as a path,
+    prefer the chunked :func:`sha256_file`.
+    """
+    return hashlib.sha256(data).hexdigest()
