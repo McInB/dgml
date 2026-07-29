@@ -349,7 +349,9 @@ class ScenarioConfig(_StrictModel):
         a = self.name_prototype_blend
         if a is not None and not (0.0 <= a <= 1.0):
             raise ValueError(f"name_prototype_blend must be in [0, 1]; got {a}.")
-    
+        return self
+
+    @model_validator(mode="after")
     def _check_pooling_pages(self) -> ScenarioConfig:
         if self.pooling_pages < 1:
             raise ValueError(f"pooling_pages must be >= 1; got {self.pooling_pages}.")
