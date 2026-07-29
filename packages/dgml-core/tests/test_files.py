@@ -279,5 +279,5 @@ def test_page_count_failure_soft_fails(
     # The recorded error is permanent so consistency check won't loop.
     from dgml_core.errors import load_recorded_errors
 
-    recorded = load_recorded_errors(workspace.file_errors_path(result.record.id))
+    recorded = load_recorded_errors(workspace, result.record.id)
     assert any(e.operation == "pdf_page_count" and e.permanent for e in recorded)

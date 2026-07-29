@@ -118,7 +118,8 @@ def test_permanent_error_blocks_retry(workspace: Workspace, sample_pdf: Path) ->
     for p in workspace.file_pages_dir(f.record.id).glob(PAGE_GLOB):
         p.unlink()
     append_recorded_error(
-        workspace.file_errors_path(f.record.id),
+        workspace,
+        f.record.id,
         RecordedError(
             operation="render_pages",
             message="simulated permanent failure",
@@ -137,7 +138,8 @@ def test_retry_errors_clears_and_retries(workspace: Workspace, sample_pdf: Path)
     for p in workspace.file_pages_dir(f.record.id).glob(PAGE_GLOB):
         p.unlink()
     append_recorded_error(
-        workspace.file_errors_path(f.record.id),
+        workspace,
+        f.record.id,
         RecordedError(
             operation="render_pages",
             message="simulated permanent failure",
@@ -147,7 +149,7 @@ def test_retry_errors_clears_and_retries(workspace: Workspace, sample_pdf: Path)
     )
     report = check_workspace(workspace, retry_errors=True)
     assert len(list(workspace.file_pages_dir(f.record.id).glob(PAGE_GLOB))) == 2
-    assert load_recorded_errors(workspace.file_errors_path(f.record.id)) == []
+    assert load_recorded_errors(workspace, f.record.id) == []
     assert any(i.kind == "page_count_mismatch" and i.repaired for i in report.issues)
 
 

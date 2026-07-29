@@ -17,10 +17,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .storage import read_json, write_json_atomic
+if TYPE_CHECKING:
+    from .storage import Workspace
 
 
 class DgmlError(Exception):
@@ -291,38 +291,40 @@ def short_error_message(exc: BaseException, *, limit: int = 300) -> str:
     return summary
 
 
-def load_recorded_errors(path: Path) -> list[RecordedError]:
-    if not path.exists():
-        return []
+def load_recorded_errors(workspace: Workspace, file_id: str) -> list[RecordedError]:
     try:
-        raw = read_json(path)
+        doc = workspace.store.get_doc("errors", file_id)
     except CorruptMetadata:
         # Graceful: a corrupt errors.json should not block the consistency
         # check that reads it. Treat as "no errors recorded" — the caller
         # will (re)record any new failures it detects.
         return []
-    return [RecordedError.from_json(item) for item in raw.get("errors", [])]
+    if doc is None:
+        return []
+    return [RecordedError.from_json(item) for item in doc.get("errors", [])]
 
 
-def append_recorded_error(path: Path, err: RecordedError) -> None:
-    existing = load_recorded_errors(path)
+def append_recorded_error(workspace: Workspace, file_id: str, err: RecordedError) -> None:
+    existing = load_recorded_errors(workspace, file_id)
     existing.append(err)
-    write_json_atomic(path, {"errors": [e.to_json() for e in existing]})
+    workspace.store.put_doc("errors", file_id, {"errors": [e.to_json() for e in existing]})
 
 
-def clear_recorded_errors(path: Path, operations: Iterable[str] | None = None) -> int:
+def clear_recorded_errors(
+    workspace: Workspace, file_id: str, operations: Iterable[str] | None = None
+) -> int:
     """Delete recorded errors. If ``operations`` is given, only those are
     removed. Returns the number of errors removed."""
-    if not path.exists():
+    existing = load_recorded_errors(workspace, file_id)
+    if not existing:
         return 0
-    existing = load_recorded_errors(path)
     if operations is None:
-        path.unlink()
+        workspace.store.delete_doc("errors", file_id)
         return len(existing)
     ops = set(operations)
     keep = [e for e in existing if e.operation not in ops]
     if not keep:
-        path.unlink()
+        workspace.store.delete_doc("errors", file_id)
     else:
-        write_json_atomic(path, {"errors": [e.to_json() for e in keep]})
+        workspace.store.put_doc("errors", file_id, {"errors": [e.to_json() for e in keep]})
     return len(existing) - len(keep)

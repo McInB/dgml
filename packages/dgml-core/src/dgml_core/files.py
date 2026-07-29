@@ -353,7 +353,8 @@ class FileStore:
             except DgmlError as exc:
                 message = str(exc)
                 append_recorded_error(
-                    self.ws.file_errors_path(file_id),
+                    self.ws,
+                    file_id,
                     RecordedError(
                         operation="convert_to_pdf",
                         message=message,
@@ -375,7 +376,8 @@ class FileStore:
         except Exception as exc:  # pdfminer can raise a variety of errors.
             message = f"could not read PDF page count: {type(exc).__name__}: {exc}"
             append_recorded_error(
-                self.ws.file_errors_path(file_id),
+                self.ws,
+                file_id,
                 RecordedError(
                     operation="pdf_page_count",
                     message=message,
@@ -394,7 +396,8 @@ class FileStore:
                 rendered = render_pages(pdf_path, pages_dir)
         except PageRenderFailed as exc:
             append_recorded_error(
-                self.ws.file_errors_path(file_id),
+                self.ws,
+                file_id,
                 RecordedError(
                     operation="render_pages",
                     message=str(exc),
@@ -407,7 +410,8 @@ class FileStore:
         if expected is not None and rendered != expected:
             message = f"rendered {rendered} pages, PDF reports {expected}"
             append_recorded_error(
-                self.ws.file_errors_path(file_id),
+                self.ws,
+                file_id,
                 RecordedError(
                     operation="render_pages",
                     message=message,
@@ -559,7 +563,8 @@ class FileStore:
 
     def _record_text_failure(self, file_id: str, message: str, *, permanent: bool) -> str:
         append_recorded_error(
-            self.ws.file_errors_path(file_id),
+            self.ws,
+            file_id,
             RecordedError(
                 operation="text_extraction",
                 message=message,

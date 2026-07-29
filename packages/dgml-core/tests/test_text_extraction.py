@@ -114,7 +114,7 @@ def test_file_add_partial_empty_pdf_soft_fails_non_permanent(
     assert result.text_extraction["pages_with_words"] == 1
     assert result.text_extraction["pages_written"] == 2
 
-    errors = load_recorded_errors(workspace.file_errors_path(result.record.id))
+    errors = load_recorded_errors(workspace, result.record.id)
     text_errs = [e for e in errors if e.operation == "text_extraction"]
     assert text_errs and all(not e.permanent for e in text_errs)
 
@@ -137,7 +137,7 @@ def test_check_partial_empty_re_extract_records_non_permanent(
     assert not any(i.repaired for i in issues)
     assert any("had no extractable digital text" in i.message for i in issues)
 
-    errors = load_recorded_errors(workspace.file_errors_path(f.record.id))
+    errors = load_recorded_errors(workspace, f.record.id)
     text_errs = [e for e in errors if e.operation == "text_extraction"]
     assert text_errs and any(not e.permanent for e in text_errs)
 
@@ -150,7 +150,7 @@ def test_file_add_blank_pdf_soft_fails_text_extraction(
     assert result.text_extraction_error is not None
     assert "no digital text" in result.text_extraction_error.lower()
 
-    errors = load_recorded_errors(workspace.file_errors_path(result.record.id))
+    errors = load_recorded_errors(workspace, result.record.id)
     text_errs = [e for e in errors if e.operation == "text_extraction"]
     assert text_errs
     assert any(e.permanent for e in text_errs)
@@ -159,7 +159,7 @@ def test_file_add_blank_pdf_soft_fails_text_extraction(
 def test_check_retry_errors_re_runs_text_extraction(workspace: Workspace, sample_pdf: Path) -> None:
     f = FileStore(workspace).add(sample_pdf)
     # Confirm permanent text-extraction error was recorded.
-    errs = load_recorded_errors(workspace.file_errors_path(f.record.id))
+    errs = load_recorded_errors(workspace, f.record.id)
     assert any(e.operation == "text_extraction" and e.permanent for e in errs)
 
     # Without --retry-errors: the permanent marker blocks re-attempts.

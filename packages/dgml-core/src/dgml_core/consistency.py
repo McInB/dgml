@@ -133,10 +133,9 @@ def _check_file(
 ) -> None:
     file_dir = ws.file_dir(file_id)
     json_path = ws.file_json_path(file_id)
-    errors_path = ws.file_errors_path(file_id)
 
     if retry_errors:
-        clear_recorded_errors(errors_path)
+        clear_recorded_errors(ws, file_id)
 
     if not json_path.exists():
         report.issues.append(
@@ -201,7 +200,7 @@ def _check_file(
                 )
             )
 
-    recorded = load_recorded_errors(errors_path)
+    recorded = load_recorded_errors(ws, file_id)
     permanent_ops = {e.operation for e in recorded if e.permanent}
 
     pages_dir = ws.file_pages_dir(file_id)
@@ -237,9 +236,9 @@ def _check_file(
         expected = len(rendered_pages)
         if not expected:
             recovered = _recover_missing_pages(
+                ws=ws,
                 pdf_path=pdf_path,
                 pages_dir=pages_dir,
-                errors_path=errors_path,
                 permanent_ops=permanent_ops,
                 file_id=file_id,
                 report=report,
@@ -250,11 +249,11 @@ def _check_file(
             rendered_pages = sorted(pages_dir.glob(PAGE_GLOB))
 
     _check_page_rendering(
+        ws=ws,
         pdf_path=pdf_path,
         pages_dir=pages_dir,
         rendered_pages=rendered_pages,
         expected=expected,
-        errors_path=errors_path,
         permanent_ops=permanent_ops,
         file_id=file_id,
         report=report,
@@ -266,13 +265,12 @@ def _check_file(
         # a render_pages permanent error this run; that's fine — text
         # extraction is independent of page rendering and we want to refresh
         # the set for the text-extraction check.
-        permanent_ops = {e.operation for e in load_recorded_errors(errors_path) if e.permanent}
+        permanent_ops = {e.operation for e in load_recorded_errors(ws, file_id) if e.permanent}
         _check_text_extraction(
             ws=ws,
             pdf_path=pdf_path,
             text_dir=ws.file_text_dir(file_id),
             expected=expected,
-            errors_path=errors_path,
             permanent_ops=permanent_ops,
             file_id=file_id,
             text_mode=text_mode,
@@ -284,9 +282,9 @@ def _check_file(
 
 def _recover_missing_pages(
     *,
+    ws: Workspace,
     pdf_path: Path,
     pages_dir: Path,
-    errors_path: Path,
     permanent_ops: set[str],
     file_id: str,
     report: CheckReport,
@@ -314,7 +312,8 @@ def _recover_missing_pages(
         actual = render_pages(pdf_path, pages_dir)
     except (GhostscriptNotFound, PageRenderFailed) as exc:
         append_recorded_error(
-            errors_path,
+            ws,
+            file_id,
             RecordedError(
                 operation="render_pages",
                 message=str(exc),
@@ -357,11 +356,11 @@ def _recover_missing_pages(
 
 def _check_page_rendering(
     *,
+    ws: Workspace,
     pdf_path: Path,
     pages_dir: Path,
     rendered_pages: list[Path],
     expected: int,
-    errors_path: Path,
     permanent_ops: set[str],
     file_id: str,
     report: CheckReport,
@@ -387,7 +386,8 @@ def _check_page_rendering(
         actual = render_pages(pdf_path, pages_dir)
     except (GhostscriptNotFound, PageRenderFailed) as exc:
         append_recorded_error(
-            errors_path,
+            ws,
+            file_id,
             RecordedError(
                 operation="render_pages",
                 message=str(exc),
@@ -407,7 +407,8 @@ def _check_page_rendering(
 
     if actual != expected:
         append_recorded_error(
-            errors_path,
+            ws,
+            file_id,
             RecordedError(
                 operation="render_pages",
                 message=f"rendered {actual}, expected {expected}",
@@ -441,7 +442,6 @@ def _check_text_extraction(
     pdf_path: Path,
     text_dir: Path,
     expected: int,
-    errors_path: Path,
     permanent_ops: set[str],
     file_id: str,
     text_mode: str,
@@ -489,7 +489,8 @@ def _check_text_extraction(
         )
     except (TextExtractionFailed, OcrFailed, AuthError, DgmlError) as exc:
         append_recorded_error(
-            errors_path,
+            ws,
+            file_id,
             RecordedError(
                 operation="text_extraction",
                 message=str(exc),
@@ -521,7 +522,8 @@ def _check_text_extraction(
         return
 
     append_recorded_error(
-        errors_path,
+        ws,
+        file_id,
         RecordedError(
             operation="text_extraction",
             message=outcome.message,
