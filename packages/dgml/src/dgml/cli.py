@@ -1871,7 +1871,7 @@ def _file_result(status: str, file_id: str, source: str, **extra: Any) -> dict[s
     return {"status": status, "file_id": file_id, "source": source, **extra}
 
 
-def _has_generated_tree(xml_path: Path) -> bool:
+def _has_generated_tree(xml_text: str) -> bool:
     """True when a ``<stem>.dgml.xml`` holds a generated document tree — the
     `docset generate` skip test. An extraction-only file (whose root has just a
     ``dg:extraction`` child) or an unparseable one returns False so generation
@@ -1879,7 +1879,7 @@ def _has_generated_tree(xml_path: Path) -> bool:
     from dgml_core.extraction_xml import has_document_tree
 
     try:
-        return has_document_tree(xml_path.read_text(encoding="utf-8"))
+        return has_document_tree(xml_text)
     except Exception:
         return False
 
@@ -2051,7 +2051,10 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             _diag(f"Source missing for {name} (file '{fid}') — reported as failed")
             continue
         out_xml = ws.file_dgml_xml_path(args.docset_id, fid, pdf_path.stem)
-        if out_xml.exists() and _has_generated_tree(out_xml):
+        out_xml_key = ws.blob_key(out_xml)
+        if ws.store.blob_exists(out_xml_key) and _has_generated_tree(
+            ws.store.get_blob(out_xml_key).decode("utf-8")
+        ):
             # Skip only when a generated document tree is present. An
             # extraction-only file (`extraction extract` ran before
             # `generate`) falls through and gets its tree built; _on_output
@@ -2138,36 +2141,45 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
 
     def _on_output(name: str, xml: str) -> None:
         out_xml = dgml_xml_paths[name]
-        out_xml.parent.mkdir(parents=True, exist_ok=True)
-        # A file already at this path may carry extracted values — an
+        xml_key = ws.blob_key(out_xml)
+        # A blob already at this key may carry extracted values — an
         # extraction-only file getting its tree now, or a full-extraction
         # file being re-rendered. Capture its dg:extraction before the fresh
         # render overwrites it; re-embedded below after grounding + semlinks.
         prior_with_extraction: str | None = None
-        if out_xml.exists():
+        if ws.store.blob_exists(xml_key):
             try:
-                prior_text = out_xml.read_text(encoding="utf-8")
+                prior_text = ws.store.get_blob(xml_key).decode("utf-8")
                 if has_extraction(prior_text):
                     prior_with_extraction = prior_text
             except Exception:
                 prior_with_extraction = None  # unparseable prior — nothing to carry
-        out_xml.write_text(xml, encoding="utf-8")
+        ws.store.put_blob(xml_key, xml.encode("utf-8"))
         # Ground in place: re-parse the just-written tree, align it against the
         # file's page OCR, and rewrite <stem>.dgml.xml with dg:origin boxes.
         # Deterministic and free; a file with no page_text is left ungrounded.
         # Runs for re-rendered prior docs too — their fresh XML would otherwise
-        # lose the boxes a previous run grounded in.
+        # lose the boxes a previous run grounded in. Grounding needs a real path
+        # (lxml); materialize the blob to a working copy, ground in place, then
+        # persist the result (and its stats sidecar) back through the store.
         grounding: dict[str, Any]
         try:
-            res = ground_dgml_xml(
-                ws,
-                name_to_fid[name],
-                out_xml,
-                output_path=out_xml,
-                force=True,
-                write_stats=args.debug,
-                debug=args.debug,
-            )
+            with ws.store.materialize(xml_key) as gpath:
+                res = ground_dgml_xml(
+                    ws,
+                    name_to_fid[name],
+                    gpath,
+                    output_path=gpath,
+                    force=True,
+                    write_stats=args.debug,
+                    debug=args.debug,
+                )
+                ws.store.put_blob(xml_key, gpath.read_bytes())
+                if res.stats_path is not None and res.stats_path.exists():
+                    ws.store.put_blob(
+                        ws.blob_key(out_xml.with_name(res.stats_path.name)),
+                        res.stats_path.read_bytes(),
+                    )
         except DgmlError as exc:
             grounding = {
                 "grounded": False,
@@ -2189,8 +2201,8 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         links_added = 0
         if not args.no_semlinks:
             try:
-                linked, applied = add_links(out_xml.read_text(encoding="utf-8"), link_config)
-                out_xml.write_text(linked, encoding="utf-8")
+                linked, applied = add_links(ws.store.get_blob(xml_key).decode("utf-8"), link_config)
+                ws.store.put_blob(xml_key, linked.encode("utf-8"))
                 links_added = len(applied)
                 _diag(f"[semlinks] {name}: {links_added} link(s)")
             except Exception as exc:  # a link-pass failure must not lose the DGML
@@ -2201,9 +2213,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         if prior_with_extraction is not None:
             try:
                 merged = carry_extraction_over(
-                    prior_with_extraction, out_xml.read_text(encoding="utf-8")
+                    prior_with_extraction, ws.store.get_blob(xml_key).decode("utf-8")
                 )
-                out_xml.write_text(merged, encoding="utf-8")
+                ws.store.put_blob(xml_key, merged.encode("utf-8"))
                 _diag(f"[extraction] {name}: carried dg:extraction over into the fresh render")
             except Exception as exc:  # never lose the fresh DGML over the merge
                 _diag(f"[extraction] {name}: dg:extraction NOT carried over ({exc})")
@@ -2275,7 +2287,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         for stem, blocks in load_labeled_docs_from_cache(cache_dir, list(prior_stems)).items():
             nm = prior_stems[stem]
             prior_docs[nm] = blocks
-            prior_outputs[nm] = prior_out_paths[nm].read_text(encoding="utf-8")
+            prior_outputs[nm] = ws.store.get_blob(ws.blob_key(prior_out_paths[nm])).decode("utf-8")
             dgml_xml_paths[nm] = prior_out_paths[nm]
 
         # Materialize each file's page_text/ into a local dir the pipeline
