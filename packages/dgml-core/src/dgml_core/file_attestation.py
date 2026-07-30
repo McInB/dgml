@@ -105,7 +105,7 @@ from .errors import (
     FileNotFound,
     InvalidArgument,
 )
-from .hashing import sha256_bytes
+from .hashing import sha256_file
 from .merkle import merkle_root, merkle_root_from_hashes
 from .models import FileRecord
 from .opc import (
@@ -274,29 +274,35 @@ def collect_file_version(
     # absence means the file doesn't exist; a corrupt one is structurally broken
     # (get_doc lets that CorruptMetadata propagate). Existence is defined by the
     # manifest, not a directory, so this works on any store.
-    record_data = ws.store.get_doc("files", file_id)
+    store = ws.store  # bound once: ws.store re-resolves the backend on every access
+    record_data = store.get_doc("files", file_id)
     if record_data is None:
         raise FileNotFound(f"file '{file_id}' not found in workspace")
-    if docset_id is not None and ws.store.get_doc("docsets", docset_id) is None:
+    if docset_id is not None and store.get_doc("docsets", docset_id) is None:
         raise DocSetNotFound(f"docset '{docset_id}' not found in workspace")
     record = FileRecord.from_json(record_data)
 
     refs: list[ArtifactRef] = []
 
+    # Every BINARY slot below hashes via sha256_blob rather than get_blob: the
+    # bytes are never looked at, only digested, so there is no reason to hold an
+    # artifact whole — least of all the source document, the one leaf with no
+    # size bound (it is whatever the user added).
+
     # Slot 1: the original source document (a .pdf, or the .docx/.xls/… that
     # was converted). Named "source" — the role, not the file format.
     source_key = ws.blob_key(ws.file_dir(file_id) / record.original_filename)
-    if ws.store.blob_exists(source_key):
-        refs.append(_binary_ref("source", source_key, ws.store.get_blob(source_key)))
+    if store.blob_exists(source_key):
+        refs.append(_binary_ref("source", source_key, store.sha256_blob(source_key)))
 
     # Slot 2: page images, ordered by page number (not lexicographic —
     # 'page_10.png' sorts before 'page_2.png' alphabetically).
     for img_key in sorted(
-        ws.store.list_blobs(ws.blob_key(ws.file_pages_dir(file_id))),
+        store.list_blobs(ws.blob_key(ws.file_pages_dir(file_id))),
         key=lambda k: _page_num(Path(k)),
     ):
         n = _page_num(Path(img_key))
-        refs.append(_binary_ref(f"page_image[{n}]", img_key, ws.store.get_blob(img_key), number=n))
+        refs.append(_binary_ref(f"page_image[{n}]", img_key, store.sha256_blob(img_key), number=n))
 
     # Per-page text JSONs (`page_text/`) are deliberately *not* attested: the
     # token files are an intermediate text-extraction artifact, not part of the
@@ -309,9 +315,9 @@ def collect_file_version(
         # schema.json is deliberately not a leaf — the RNC carries every one
         # of its fields as `# Field: value` comments.
         full_schema_key = ws.blob_key(ws.docset_full_schema_path(docset_id))
-        if ws.store.blob_exists(full_schema_key):
+        if store.blob_exists(full_schema_key):
             refs.append(
-                _binary_ref("full_schema", full_schema_key, ws.store.get_blob(full_schema_key))
+                _binary_ref("full_schema", full_schema_key, store.sha256_blob(full_schema_key))
             )
 
         # Slot 4: the grounded extraction schema (`extraction-schema.rnc`,
@@ -319,12 +325,12 @@ def collect_file_version(
         # raw bytes — RNC is plain text, neither JSON nor XML. Present only once
         # `extraction set-schema` / `generate-schema` has run for the docset.
         extraction_schema_key = ws.blob_key(ws.docset_schema_path(docset_id))
-        if ws.store.blob_exists(extraction_schema_key):
+        if store.blob_exists(extraction_schema_key):
             refs.append(
                 _binary_ref(
                     "extraction_schema",
                     extraction_schema_key,
-                    ws.store.get_blob(extraction_schema_key),
+                    store.sha256_blob(extraction_schema_key),
                 )
             )
 
@@ -332,8 +338,10 @@ def collect_file_version(
         dgml_xml_key = ws.blob_key(
             ws.file_dgml_xml_path(docset_id, file_id, Path(record.original_filename).stem)
         )
-        if ws.store.blob_exists(dgml_xml_key):
-            refs.append(_xml_ref("dgml_xml", dgml_xml_key, ws.store.get_blob(dgml_xml_key)))
+        # The one leaf that genuinely needs the bytes: an XML leaf hash is the
+        # merkle_root of the parsed tree, not a digest of the file.
+        if store.blob_exists(dgml_xml_key):
+            refs.append(_xml_ref("dgml_xml", dgml_xml_key, store.get_blob(dgml_xml_key)))
 
     if not refs:
         scope = f" in docset '{docset_id}'" if docset_id else ""
@@ -482,9 +490,10 @@ def export_attestation(
     not ``unpacked``) — exactly one of the latter two is non-``None``.
     """
     attestation = attest_file(ws, file_id, docset_id)
+    store = ws.store  # bound once: ws.store re-resolves the backend on every access
     # attest_file already validated the file exists (via collect_file_version);
     # re-read its manifest through the store for the source stem.
-    record_data = ws.store.get_doc("files", file_id)
+    record_data = store.get_doc("files", file_id)
     if record_data is None:
         raise FileNotFound(f"file '{file_id}' not found in workspace")
     record = FileRecord.from_json(record_data)
@@ -500,8 +509,14 @@ def export_attestation(
         for ref in attestation.leaves:
             rel = _export_rel_path(ref)
             dest = staging / rel
+            # mkdir stays explicit: LocalStore.download_blob happens to create
+            # parents, but the StorageService contract doesn't promise it.
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(ws.store.get_blob(ref.key))
+            # download_blob, not get_blob + write_bytes: the store's own
+            # local-file transfer, so no artifact crosses the Python boundary
+            # whole (locally a kernel-side copy; on a remote store a managed,
+            # ranged, retried download).
+            store.download_blob(ref.key, dest)
             rel_paths[ref.slot_id] = rel
 
         attestation_path = write_attestation(staging, attestation, record, rel_paths)
@@ -831,11 +846,19 @@ def _collect_from_attestation(directory: Path, inventory: AttestationInventory) 
             raise AttestationInvalid(
                 f"attestation file references missing artifact: {entry.rel_path}"
             )
-        data = abs_path.read_bytes()
+        # Read bytes only for the XML leaf, which has to be parsed; a binary leaf
+        # is hashed chunk-wise off the path. This side runs against a bundle from
+        # an untrusted third party, so its size is not ours to assume.
         if entry.kind is ArtifactKind.BINARY:
-            refs.append(_binary_ref(entry.slot_id, entry.rel_path, data, number=entry.number))
+            refs.append(
+                _binary_ref(
+                    entry.slot_id, entry.rel_path, sha256_file(abs_path), number=entry.number
+                )
+            )
         else:
-            refs.append(_xml_ref(entry.slot_id, entry.rel_path, data, number=entry.number))
+            refs.append(
+                _xml_ref(entry.slot_id, entry.rel_path, abs_path.read_bytes(), number=entry.number)
+            )
     return FileVersion(
         file_id=inventory.file_id,
         docset_id=inventory.docset_id,
@@ -843,8 +866,18 @@ def _collect_from_attestation(directory: Path, inventory: AttestationInventory) 
     )
 
 
-def _binary_ref(slot_id: str, key: str, data: bytes, *, number: int | None = None) -> ArtifactRef:
-    return ArtifactRef(slot_id, key, ArtifactKind.BINARY, sha256_bytes(data), number)
+def _binary_ref(
+    slot_id: str, key: str, leaf_hash: str, *, number: int | None = None
+) -> ArtifactRef:
+    """Leaf for a BINARY artifact, whose hash is the plain SHA-256 of its bytes.
+
+    ``leaf_hash`` is supplied by the caller rather than computed here because the
+    two sides reach the bytes differently and neither should load them whole: the
+    collect side hashes through ``StorageService.sha256_blob`` (chunked, and
+    zero-copy on ``LocalStore``), the verify side through
+    :func:`~dgml_core.hashing.sha256_file` on the bundle path it already holds.
+    """
+    return ArtifactRef(slot_id, key, ArtifactKind.BINARY, leaf_hash, number)
 
 
 def _xml_ref(slot_id: str, key: str, data: bytes, *, number: int | None = None) -> ArtifactRef:

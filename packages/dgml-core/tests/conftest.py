@@ -19,11 +19,39 @@ import shutil
 from pathlib import Path
 
 import pytest
+from dgml_core import DEFAULT_STORAGE_PROVIDER, LocalStore, StorageConfig, StorageService
 from dgml_core.pages import GS_BINARIES
 from dgml_core.storage import Workspace
 
 PAGE_WIDTH_PTS = 612
 PAGE_HEIGHT_PTS = 792
+
+
+# --- store construction (shared by the storage and attestation suites) -------
+
+
+def local_store(root: Path) -> LocalStore:
+    cfg = StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=root)
+    return LocalStore(LocalStore.parse_config(cfg))
+
+
+class DefaultBridgeStore(LocalStore):
+    """A store with LocalStore's blob primitives but the *base* path bridge —
+    exercises the default download-to-temp / upload-on-exit implementations that
+    every third-party store inherits (LocalStore itself overrides them).
+
+    Attestation hashes through the path bridge, so this is also what proves the
+    remote-store code path produces identical leaf hashes and roots."""
+
+    materialize = StorageService.materialize
+    staged_write = StorageService.staged_write
+    materialize_dir = StorageService.materialize_dir
+    working_dir = StorageService.working_dir
+
+
+def default_bridge_store(root: Path) -> DefaultBridgeStore:
+    cfg = LocalStore.parse_config(StorageConfig(DEFAULT_STORAGE_PROVIDER, root))
+    return DefaultBridgeStore(cfg)
 
 
 def _write_blank_pdf(path: Path, pages: int) -> None:
