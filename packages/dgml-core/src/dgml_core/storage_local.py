@@ -280,6 +280,14 @@ class LocalStore(StorageService):
         # The blobs already live under this directory — hand it back directly.
         yield self._blob_path(prefix.rstrip("/"))
 
+    @contextlib.contextmanager
+    def working_dir(self, prefix: str) -> Iterator[Path]:
+        # The real directory IS under the store root — writes land in place, so
+        # there is nothing to download in or upload back out.
+        work = self._blob_path(prefix.rstrip("/"))
+        work.mkdir(parents=True, exist_ok=True)
+        yield work
+
     def delete_blobs(self, prefix: str) -> None:
         # Remove only blob files under the prefix (documents that live beside them —
         # file.json, extraction_stats.json, … — are left for delete_doc), then prune

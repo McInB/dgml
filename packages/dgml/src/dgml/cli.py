@@ -2248,116 +2248,143 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         # reloads (blocks, per-chunk labels, concept_roster.json). --debug only
         # controls whether the extra debug-only artifacts are also written
         # (threaded via ConvertOptions.debug below).
-        cache_dir = args.cache_dir or output_dir / "cache"
-        roster_path = Path(cache_dir) / "concept_roster.json"
-        schema_seed = None
-        roster_seed: dict[str, str] | None = None
-        parent_map_seed: dict[str, str] = {}
-        if args.schema_path:
-            schema_seed, parent_map_seed = _load_schema_seed(Path(args.schema_path))
-            _diag(
-                f"Loaded schema: {len(schema_seed.tags)} concept(s), "
-                f"{len(parent_map_seed)} container link(s) from {args.schema_path}"
-            )
-        elif not args.no_roster:
-            # Incremental reuse prefers the docset's own schema.json — full
-            # fidelity (role descriptions, observed examples, kind, hierarchy)
-            # — over the flat cache/concept_roster.json fallback. Unlike
-            # --schema-path, no parent_map is derived here: entity-container
-            # grouping stays an explicit opt-in.
-            from dgml_core.generation.schema import Schema
-
-            schema_json_path = Path(cache_dir).parent / "schema.json"
-            if schema_json_path.exists():
-                try:
-                    schema_seed = Schema.load(schema_json_path)
-                    _diag(f"Reusing docset schema: {len(schema_seed.tags)} tag(s)")
-                except (json.JSONDecodeError, TypeError, ValueError, OSError):
-                    schema_seed = None
-            if schema_seed is None and roster_path.exists():
-                try:
-                    roster_seed = _load_schema_roster(roster_path)
-                    _diag(f"Reusing docset roster: {len(roster_seed)} concept(s)")
-                except InvalidArgument:
-                    roster_seed = None
-
-        # Reload already-generated docs from cache so the whole docset stays
-        # consistent as its schema/roster grows; changed originals re-render
-        # (no re-LLM).
-        for stem, blocks in load_labeled_docs_from_cache(cache_dir, list(prior_stems)).items():
-            nm = prior_stems[stem]
-            prior_docs[nm] = blocks
-            prior_outputs[nm] = ws.store.get_blob(ws.blob_key(prior_out_paths[nm])).decode("utf-8")
-            dgml_xml_paths[nm] = prior_out_paths[nm]
-
-        # Materialize each file's page_text/ into a local dir the pipeline
-        # (transcribe gate + coverage) reads. LocalStore yields the real dir
-        # zero-copy; a remote store downloads it to a temp dir held open for
-        # the whole batch. Populate the same dict `_on_output` closes over.
-        with contextlib.ExitStack() as pt_stack:
-            for nm, pref in page_text_prefixes.items():
-                page_text_dirs[nm] = pt_stack.enter_context(ws.store.materialize_dir(pref))
-            options = ConvertOptions(
-                model=gen_model,
-                label_model=label_model,
-                api_key=gen_api_key,
-                api_base=gen_api_base,
-                window_size=args.window_size,
-                temperature=args.temperature,
-                max_tokens=args.max_tokens,
-                max_parallel_docs=args.max_parallel_calls,
-                cache_dir=cache_dir,
-                debug=args.debug,
-                page_text_dirs=page_text_dirs,
-                workspace=ws,
-                dgml_header=build_header(ws.organization, ds.name),
-                converters=load_conversion_config(ws),
-                roster_seed=roster_seed,
-                schema_seed=schema_seed,
-                parent_map=parent_map_seed or None,
-                progress=_diag,
-            )
-            convert_batch(
-                pdf_paths,
-                options=options,
-                on_output=_on_output,
-                on_error=_on_error,
-                on_label_error=_on_label_error,
-                prior_docs=prior_docs,
-                prior_outputs=prior_outputs,
-            )
-        # convert_batch silently drops documents whose transcription failed, so
-        # `_on_output` never fires for them. Reconcile: any queued file with no
-        # output is a per-file failure, not a vanished row (keeps counts summing
-        # to `total`).
-        produced = {entry["source"] for entry in written}
-        for name, fid in filename_to_fid.items():
-            if name not in produced:
-                message = gen_errors.get(
-                    name, "the generation pipeline produced no output for this file"
+        # The cache is a store-backed working directory: its blobs are pulled in
+        # before the run and pushed back after (LocalStore works in place, no
+        # copy). A --cache-dir override stays a plain local directory (explicit
+        # scratch, not store-backed). schema.json — written by labeling next to
+        # the cache — rides along, persisted as the docset's generation-schema
+        # blob (exact bytes, so no reserialization drift).
+        with contextlib.ExitStack() as _cache_stack:
+            if args.cache_dir:
+                cache_dir = Path(args.cache_dir)
+            else:
+                cache_dir = _cache_stack.enter_context(
+                    ws.store.working_dir(ws.blob_key(output_dir / "cache"))
                 )
-                failed_results.append(
-                    _file_result(
-                        "failed",
-                        fid,
-                        name,
-                        error={"code": "GENERATION_FAILED", "message": message},
-                    )
+            schema_key = ws.blob_key(ws.docset_generation_schema_path(args.docset_id))
+            schema_json_local = cache_dir.parent / "schema.json"
+            if (
+                not args.cache_dir
+                and not schema_json_local.exists()
+                and ws.store.blob_exists(schema_key)
+            ):
+                ws.store.download_blob(schema_key, schema_json_local)
+            roster_path = Path(cache_dir) / "concept_roster.json"
+            schema_seed = None
+            roster_seed: dict[str, str] | None = None
+            parent_map_seed: dict[str, str] = {}
+            if args.schema_path:
+                schema_seed, parent_map_seed = _load_schema_seed(Path(args.schema_path))
+                _diag(
+                    f"Loaded schema: {len(schema_seed.tags)} concept(s), "
+                    f"{len(parent_map_seed)} container link(s) from {args.schema_path}"
                 )
-        if cov_path is not None and cov_results:
-            # Merge into any existing report so an incremental run keeps the
-            # already-generated docs' coverage instead of overwriting it.
-            existing_docs: list[dict[str, Any]] = []
-            if cov_path.exists():
-                try:
-                    existing_docs = json.loads(cov_path.read_text(encoding="utf-8")).get(
-                        "documents", []
+            elif not args.no_roster:
+                # Incremental reuse prefers the docset's own schema.json — full
+                # fidelity (role descriptions, observed examples, kind, hierarchy)
+                # — over the flat cache/concept_roster.json fallback. Unlike
+                # --schema-path, no parent_map is derived here: entity-container
+                # grouping stays an explicit opt-in.
+                from dgml_core.generation.schema import Schema
+
+                schema_json_path = Path(cache_dir).parent / "schema.json"
+                if schema_json_path.exists():
+                    try:
+                        schema_seed = Schema.load(schema_json_path)
+                        _diag(f"Reusing docset schema: {len(schema_seed.tags)} tag(s)")
+                    except (json.JSONDecodeError, TypeError, ValueError, OSError):
+                        schema_seed = None
+                if schema_seed is None and roster_path.exists():
+                    try:
+                        roster_seed = _load_schema_roster(roster_path)
+                        _diag(f"Reusing docset roster: {len(roster_seed)} concept(s)")
+                    except InvalidArgument:
+                        roster_seed = None
+
+            # Reload already-generated docs from cache so the whole docset stays
+            # consistent as its schema/roster grows; changed originals re-render
+            # (no re-LLM).
+            for stem, blocks in load_labeled_docs_from_cache(cache_dir, list(prior_stems)).items():
+                nm = prior_stems[stem]
+                prior_docs[nm] = blocks
+                prior_outputs[nm] = ws.store.get_blob(ws.blob_key(prior_out_paths[nm])).decode(
+                    "utf-8"
+                )
+                dgml_xml_paths[nm] = prior_out_paths[nm]
+
+            # Materialize each file's page_text/ into a local dir the pipeline
+            # (transcribe gate + coverage) reads. LocalStore yields the real dir
+            # zero-copy; a remote store downloads it to a temp dir held open for
+            # the whole batch. Populate the same dict `_on_output` closes over.
+            with contextlib.ExitStack() as pt_stack:
+                for nm, pref in page_text_prefixes.items():
+                    page_text_dirs[nm] = pt_stack.enter_context(ws.store.materialize_dir(pref))
+                options = ConvertOptions(
+                    model=gen_model,
+                    label_model=label_model,
+                    api_key=gen_api_key,
+                    api_base=gen_api_base,
+                    window_size=args.window_size,
+                    temperature=args.temperature,
+                    max_tokens=args.max_tokens,
+                    max_parallel_docs=args.max_parallel_calls,
+                    cache_dir=cache_dir,
+                    debug=args.debug,
+                    page_text_dirs=page_text_dirs,
+                    workspace=ws,
+                    dgml_header=build_header(ws.organization, ds.name),
+                    converters=load_conversion_config(ws),
+                    roster_seed=roster_seed,
+                    schema_seed=schema_seed,
+                    parent_map=parent_map_seed or None,
+                    progress=_diag,
+                )
+                convert_batch(
+                    pdf_paths,
+                    options=options,
+                    on_output=_on_output,
+                    on_error=_on_error,
+                    on_label_error=_on_label_error,
+                    prior_docs=prior_docs,
+                    prior_outputs=prior_outputs,
+                )
+            # convert_batch silently drops documents whose transcription failed, so
+            # `_on_output` never fires for them. Reconcile: any queued file with no
+            # output is a per-file failure, not a vanished row (keeps counts summing
+            # to `total`).
+            produced = {entry["source"] for entry in written}
+            for name, fid in filename_to_fid.items():
+                if name not in produced:
+                    message = gen_errors.get(
+                        name, "the generation pipeline produced no output for this file"
                     )
-                except (OSError, json.JSONDecodeError):
-                    existing_docs = []
-            cov_mod.save_coverage_report(
-                cov_mod.merge_coverage_documents(existing_docs, cov_results), cov_path
-            )
+                    failed_results.append(
+                        _file_result(
+                            "failed",
+                            fid,
+                            name,
+                            error={"code": "GENERATION_FAILED", "message": message},
+                        )
+                    )
+            if cov_path is not None and cov_results:
+                # Merge into any existing report so an incremental run keeps the
+                # already-generated docs' coverage instead of overwriting it.
+                existing_docs: list[dict[str, Any]] = []
+                if cov_path.exists():
+                    try:
+                        existing_docs = json.loads(cov_path.read_text(encoding="utf-8")).get(
+                            "documents", []
+                        )
+                    except (OSError, json.JSONDecodeError):
+                        existing_docs = []
+                cov_mod.save_coverage_report(
+                    cov_mod.merge_coverage_documents(existing_docs, cov_results), cov_path
+                )
+            # Persist schema.json (labeling wrote it next to the cache) as the
+            # docset's generation-schema blob — exact bytes, before write_docset_rnc
+            # reads it back — then flush the cache working dir to the store.
+            if not args.cache_dir and schema_json_local.exists():
+                ws.store.put_blob(schema_key, schema_json_local.read_bytes())
     else:
         _diag("Nothing to convert — every file is already converted, missing, or a duplicate name.")
 

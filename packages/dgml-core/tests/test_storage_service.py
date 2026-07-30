@@ -330,6 +330,7 @@ class _DefaultBridgeStore(LocalStore):
     materialize = StorageService.materialize
     staged_write = StorageService.staged_write
     materialize_dir = StorageService.materialize_dir
+    working_dir = StorageService.working_dir
 
 
 def default_bridge_store(root: Path) -> _DefaultBridgeStore:
@@ -411,3 +412,30 @@ def test_materialize_dir_default_downloads_and_cleans_up(tmp_path: Path) -> None
         assert (d / "page_2.png").read_bytes() == b"img2"
         held = d
     assert not held.exists()  # cleaned up on exit
+
+
+def test_working_dir_local_is_in_place_zero_copy(tmp_path: Path) -> None:
+    store = local_store(tmp_path)
+    store.put_blob("docsets/d1/cache/existing.json", b"old")
+    with store.working_dir("docsets/d1/cache") as work:
+        assert work == tmp_path / "docsets" / "d1" / "cache"  # real dir, in place
+        assert (work / "existing.json").read_bytes() == b"old"
+        (work / "new.json").write_bytes(b"new")
+    # writes land in the store directly, no sync step needed
+    assert store.get_blob("docsets/d1/cache/new.json") == b"new"
+
+
+def test_working_dir_default_syncs_down_and_up(tmp_path: Path) -> None:
+    store = default_bridge_store(tmp_path)
+    store.put_blob("docsets/d1/cache/existing.json", b"old")
+    with store.working_dir("docsets/d1/cache") as work:
+        # a temp working copy whose parent is stable scratch (siblings can live there)
+        assert work != tmp_path / "docsets" / "d1" / "cache"
+        assert work.name == "cache"
+        assert (work / "existing.json").read_bytes() == b"old"  # downloaded in
+        (work / "new.json").write_bytes(b"new")
+        (work.parent / "schema.json").write_bytes(b"{}")  # a sibling, not synced
+        held = work
+    assert not held.exists()  # temp cleaned up
+    assert store.get_blob("docsets/d1/cache/new.json") == b"new"  # uploaded out
+    assert not store.blob_exists("docsets/d1/schema.json")  # sibling not uploaded

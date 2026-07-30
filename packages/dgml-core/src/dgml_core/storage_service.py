@@ -211,6 +211,31 @@ class StorageService(ABC):
                 self.download_blob(key, out / key[len(base) :])
             yield out
 
+    @contextmanager
+    def working_dir(self, prefix: str) -> Iterator[Path]:
+        """Yield a local, read-write working directory synced with ``prefix``:
+        download its blobs in on entry, upload the directory's files back out on
+        exit. For a read-modify-write working area the pipeline reloads across
+        runs (the generation ``cache/``).
+
+        The yielded directory is named after the last segment of ``prefix`` and
+        lives inside a fresh temp dir, so its *parent* is a stable per-call
+        scratch location — a sibling artifact written next to it (generation's
+        ``schema.json``) has somewhere to go. Default: temp dir, downloaded in
+        and uploaded out. ``LocalStore`` yields the real directory (no copy, no
+        sync — writes already land in the store)."""
+        base = prefix.rstrip("/") + "/"
+        segment = prefix.rstrip("/").rsplit("/", 1)[-1] or "data"
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / segment
+            work.mkdir(parents=True, exist_ok=True)
+            for key in self.list_blobs(base):
+                self.download_blob(key, work / key[len(base) :])
+            yield work
+            for path in sorted(work.rglob("*")):
+                if path.is_file():
+                    self.upload_blob(base + path.relative_to(work).as_posix(), path)
+
     # ---- JSON documents — modeled on the MongoDB collection API ----
 
     @abstractmethod
