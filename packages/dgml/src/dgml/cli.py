@@ -1667,9 +1667,15 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         from dgml_core.extraction_xml import has_extraction
 
         # Extracted values live as a dg:extraction element inside the file's
-        # core <stem>.dgml.xml — the single *.dgml.xml in the marker dir.
-        candidates = sorted(ws.docset_file_dir(args.docset_id, args.file_id).glob("*.dgml.xml"))
-        xml = candidates[0].read_text(encoding="utf-8") if candidates else ""
+        # core <stem>.dgml.xml — the single *.dgml.xml blob in the pair's prefix.
+        dgml_keys = sorted(
+            k
+            for k in ws.store.list_blobs(
+                ws.blob_key(ws.docset_file_dir(args.docset_id, args.file_id))
+            )
+            if k.endswith(".dgml.xml")
+        )
+        xml = ws.store.get_blob(dgml_keys[0]).decode("utf-8") if dgml_keys else ""
         if not xml or not has_extraction(xml):
             return _emit_error(
                 "VALUES_NOT_FOUND",

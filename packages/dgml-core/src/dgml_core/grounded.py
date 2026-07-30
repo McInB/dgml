@@ -79,7 +79,7 @@ from .matching import (
     walk_computed_leaves,
 )
 from .prompts import get as prompt
-from .storage import Workspace, read_config, write_json_atomic, write_text_atomic
+from .storage import Workspace, read_config
 from .usage import (
     OPERATION_EXTRACT_VALUES,
     OPERATION_SCHEMA_GENERATE,
@@ -632,7 +632,12 @@ def extract_values(
         # tree exists yet (extraction).
         stem = Path(FileStore(workspace).get(file_id).original_filename).stem
         xml_path = workspace.file_dgml_xml_path(docset_id, file_id, stem)
-        existing = xml_path.read_text(encoding="utf-8") if xml_path.exists() else None
+        xml_key = workspace.blob_key(xml_path)
+        existing = (
+            workspace.store.get_blob(xml_key).decode("utf-8")
+            if workspace.store.blob_exists(xml_key)
+            else None
+        )
         if existing is not None and has_document_tree(existing):
             # A generated document tree is present — add extraction alongside it.
             mode = "full-extraction"
@@ -641,7 +646,7 @@ def extract_values(
             # No tree (fresh, or a prior extraction-only file) — (re)write standalone.
             mode = "extraction"
             doc = standalone_extraction_doc(final_values, vocab=vocab)
-        write_text_atomic(xml_path, doc)
+        workspace.store.put_blob(xml_key, doc.encode("utf-8"))
         outcome = OUTCOME_OK
         return ExtractionResult(
             values=final_values, tool_calls=tool_calls_total, xml_path=xml_path, mode=mode
@@ -792,7 +797,7 @@ def _write_extraction_stats(
         # array (some models drop optional tool-call parameters).
         "phase1_layout": phase1_layout,
     }
-    write_json_atomic(workspace.docset_file_extraction_stats_path(docset_id, file_id), stats)
+    workspace.store.put_doc("extraction_stats", f"{docset_id}/{file_id}", stats)
 
 
 # ---- Phase 3: per-page LLM for unmatched items ----------------------------
