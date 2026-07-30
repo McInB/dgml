@@ -45,10 +45,4 @@ PROVIDER_MODELS: dict[str, dict[str, str]] = {
         "advanced": "gemini/gemini-2.5-pro",
         "expert": "gemini/gemini-2.5-pro",
     },
-    "openai": {
-        "light": "openai/gpt-5-nano",
-        "standard": "openai/gpt-5-mini",
-        "advanced": "openai/gpt-5",
-        "expert": "openai/gpt-5-pro",
-    },
 }

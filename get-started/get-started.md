@@ -115,7 +115,7 @@ didn't set up. Configure it now so the later phases run through cleanly.
 
 Run `dgml init` once to write the user-level `~/.config/dgml/config.toml` with a
 `[models]` block — it auto-detects your provider from the API-key env vars that
-are set (or pass `--provider <anthropic|google|openai|mixed>`):
+are set (or pass `--provider <anthropic|google|mixed>`):
 
 ```bash
 uv run dgml init

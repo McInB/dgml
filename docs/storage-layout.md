@@ -177,9 +177,9 @@ per task on the task's own section (e.g. `generation.api_key_env`,
 credentials, or falls back to litellm's per-provider env var when the section
 sets none.
 
-`dgml init --provider {anthropic,google,openai,mixed}` writes a ready-made
+`dgml init --provider {anthropic,google,mixed}` writes a ready-made
 `[models]` table; omit `--provider` to auto-detect from the API-key env vars
-that are set.
+that are set (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`).
 
 **Secrets policy.** By default config references API keys via `*_api_key_env`
 env-var-name fields (which store the env var name, not the secret). Every

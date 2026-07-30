@@ -123,10 +123,10 @@ def test_detect_provider() -> None:
     assert detect_provider({"ANTHROPIC_API_KEY": "x", "GEMINI_API_KEY": "y"}) == "mixed"
     assert detect_provider({"ANTHROPIC_API_KEY": "x"}) == "anthropic"
     assert detect_provider({"GEMINI_API_KEY": "y"}) == "google"
-    assert detect_provider({"OPENAI_API_KEY": "z"}) == "openai"
-    assert detect_provider({"AZURE_OPENAI_API_KEY": "z"}) == "openai"
     assert detect_provider({}) is None
-    # Anthropic/Gemini win over OpenAI when both present.
+    # OpenAI is not an auto-detected provider — its key alone yields no provider.
+    assert detect_provider({"OPENAI_API_KEY": "z"}) is None
+    # A recognized key wins even when an unrelated OpenAI key is also present.
     assert detect_provider({"ANTHROPIC_API_KEY": "x", "OPENAI_API_KEY": "z"}) == "anthropic"
     # Blank values do not count as set.
     assert detect_provider({"ANTHROPIC_API_KEY": "   "}) is None

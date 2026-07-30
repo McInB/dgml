@@ -279,8 +279,6 @@ def user_config_path() -> Path:
 API_KEY_ENV_VARS: tuple[str, ...] = (
     "ANTHROPIC_API_KEY",
     "GEMINI_API_KEY",
-    "OPENAI_API_KEY",
-    "AZURE_OPENAI_API_KEY",
 )
 
 _OCR_GUIDANCE = """\
@@ -311,8 +309,7 @@ def detect_provider(environ: dict[str, str]) -> str | None:
     """Auto-detect a provider from non-empty API-key env vars (no live check).
 
     Both Anthropic + Gemini → ``mixed``; Anthropic only → ``anthropic``; Gemini
-    only → ``google``; neither but an OpenAI/Azure key → ``openai``; none →
-    ``None``."""
+    only → ``google``; none → ``None``."""
 
     def has(name: str) -> bool:
         return bool(environ.get(name, "").strip())
@@ -324,8 +321,6 @@ def detect_provider(environ: dict[str, str]) -> str | None:
         return "anthropic"
     if gemini:
         return "google"
-    if has("OPENAI_API_KEY") or has("AZURE_OPENAI_API_KEY"):
-        return "openai"
     return None
 
 
@@ -347,7 +342,7 @@ def render_config_toml(provider: str | None) -> str:
         return (
             f"# No API key detected (checked {checked}).\n"
             "# Set at least one key, then rerun:\n"
-            "#   dgml init --provider <anthropic|google|openai|mixed>\n"
+            "#   dgml init --provider <anthropic|google|mixed>\n"
             "#\n"
             "# [models]\n"
             '# light    = "..."\n'

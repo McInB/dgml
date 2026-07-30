@@ -224,8 +224,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Force a provider's default [models] block. Omit to auto-detect from the "
-            "API-key env vars that are set (ANTHROPIC_API_KEY, GEMINI_API_KEY, "
-            "OPENAI_API_KEY, AZURE_OPENAI_API_KEY)."
+            "API-key env vars that are set (ANTHROPIC_API_KEY, GEMINI_API_KEY)."
         ),
     )
     init_p.add_argument(
@@ -1000,7 +999,6 @@ _TIER_CAPABILITIES = {
 _PROVIDER_KEYS = {
     "anthropic": "ANTHROPIC_API_KEY",
     "google": "GEMINI_API_KEY",
-    "openai": "OPENAI_API_KEY (or AZURE_OPENAI_API_KEY)",
     "mixed": "ANTHROPIC_API_KEY and GEMINI_API_KEY",
 }
 
@@ -1062,11 +1060,9 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         _diag(f"[dgml init] previous config backed up to {backup}.\n")
 
     if canonical is None:
-        checked = ", ".join(
-            ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY")
-        )
+        checked = ", ".join(("ANTHROPIC_API_KEY", "GEMINI_API_KEY"))
         payload["next_action"] = (
-            "set an API key, then rerun: dgml init --provider <anthropic|google|openai|mixed>"
+            "set an API key, then rerun: dgml init --provider <anthropic|google|mixed>"
         )
         _diag(
             f"[dgml init] no API keys detected (checked {checked}).\n"
@@ -1091,7 +1087,7 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             f"{_init_models_report(canonical)}\n"
             "[dgml init] override any task with its own field (e.g. [generation] "
             'label_model = "..."); switch providers with '
-            "dgml init --provider <anthropic|google|openai|mixed>.\n"
+            "dgml init --provider <anthropic|google|mixed>.\n"
         )
     _emit(payload, fmt)
     return 0
@@ -1129,13 +1125,11 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         if not config_present:
             # Succeed but warn — LLM-backed commands will fail until the user
             # configures credentials. Always on stderr (no --verbose needed).
-            payload["next_action"] = (
-                "run `dgml init` and set ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY"
-            )
+            payload["next_action"] = "run `dgml init` and set ANTHROPIC_API_KEY / GEMINI_API_KEY"
             sys.stderr.write(
                 "Warning: no user-level config found.\n\n"
                 "Some commands will fail until credentials are configured.\n\n"
-                "Run `dgml init` and set ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY.\n"
+                "Run `dgml init` and set ANTHROPIC_API_KEY / GEMINI_API_KEY.\n"
             )
         _emit(payload, fmt)
         return 0
