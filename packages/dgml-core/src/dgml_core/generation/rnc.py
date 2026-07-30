@@ -39,8 +39,11 @@ import re
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from xml.etree import ElementTree as ET
+
+if TYPE_CHECKING:
+    from dgml_core.storage import Workspace
 
 DG_NS = "http://dgml.io/ns/dg#"
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
@@ -289,27 +292,25 @@ def rnc_to_schema_dict(text: str) -> dict[str, Any]:
     return {"tags": tags, "notes": notes}
 
 
-def write_docset_rnc(docset_dir: Path) -> Path | None:
-    """Write ``<docset_dir>/full-schema.rnc`` from its schema.json + generated XML.
+def write_docset_rnc(ws: Workspace, docset_id: str) -> str | None:
+    """Write the docset's ``full-schema.rnc`` from its schema.json + generated XML.
 
-    Returns the written path, or ``None`` when the docset has no schema.json
-    yet (nothing to render). Called at the end of ``docset generate`` so the
-    RNC always reflects the final grounded, linked XML. The filename matches
-    :meth:`dgml_core.storage.Workspace.docset_full_schema_path` — this is the
-    artifact DGMLX bundles ship and attest (superseding schema.json there).
+    Returns the written blob key, or ``None`` when the docset has no schema.json
+    yet (nothing to render). Called at the end of ``docset generate`` so the RNC
+    always reflects the final grounded, linked XML. Routed through the store: the
+    generation ``schema.json`` and ``docset.json`` are read as documents, the
+    generated ``*.dgml.xml`` are materialized (``build_rnc`` needs real paths for
+    lxml), and the rendered RNC is written back as a blob. This is the artifact
+    DGMLX bundles ship and attest (superseding schema.json there).
     """
-    schema_path = docset_dir / "schema.json"
-    if not schema_path.exists():
+    schema_data = ws.store.get_doc("schemas", docset_id)
+    if schema_data is None:
         return None
-    schema_data = json.loads(schema_path.read_text(encoding="utf-8"))
-    xml_paths = sorted(docset_dir.glob("files/*/*.dgml.xml"))
-    docset_json = docset_dir / "docset.json"
-    label = (
-        str(json.loads(docset_json.read_text(encoding="utf-8")).get("name", docset_dir.name))
-        if docset_json.exists()
-        else docset_dir.name
-    )
-    out = docset_dir / "full-schema.rnc"
-    rendered = build_rnc(schema_data, xml_paths, label=label)
-    out.write_text(rendered, encoding="utf-8")
-    return out
+    docset_data = ws.store.get_doc("docsets", docset_id)
+    label = str(docset_data.get("name", docset_id)) if docset_data else docset_id
+    with ws.store.materialize_dir(ws.blob_key(ws.docset_files_dir(docset_id))) as files_dir:
+        xml_paths = sorted(files_dir.glob("*/*.dgml.xml"))
+        rendered = build_rnc(schema_data, xml_paths, label=label)
+    full_key = ws.blob_key(ws.docset_full_schema_path(docset_id))
+    ws.store.put_blob(full_key, rendered.encode("utf-8"))
+    return full_key

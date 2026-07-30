@@ -2366,9 +2366,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     # Compact, with data types observed in the final XML). Best-effort — a
     # schema render failure must not fail the generate.
     try:
-        rnc_path = write_docset_rnc(output_dir)
-        if rnc_path is not None:
-            _diag(f"[schema] wrote {rnc_path.name}")
+        rnc_key = write_docset_rnc(ws, args.docset_id)
+        if rnc_key is not None:
+            _diag(f"[schema] wrote {rnc_key.rsplit('/', 1)[-1]}")
     except Exception as exc:
         _diag(f"[schema] full-schema.rnc skipped ({exc})")
 
