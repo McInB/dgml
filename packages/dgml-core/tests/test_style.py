@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from dgml_core.style import (
@@ -706,3 +707,262 @@ def test_style_credential_failure_preserves_grounding(tmp_path: Path, monkeypatc
     assert res.stats["elements_annotated"] >= 1
     # Deterministic style survives; the LLM-only pass simply didn't run.
     assert "text-transform: uppercase" in content
+
+
+# ---- Parallel per-page style annotation (issue #75) -------------------------
+
+
+def _multipage_style_tree(
+    tmp_path: Path, n_pages: int, *, images_for: list[int] | None = None
+) -> tuple[Any, str, Any]:
+    """A workspace with `n_pages` page images and one `<Heading>` per page.
+
+    Returns ``(ws, file_id, root)``. ``images_for`` limits which pages actually
+    get a rendered PNG on disk (default: all of them).
+    """
+    from dgml_core.storage import Workspace
+    from lxml import etree
+
+    ws = Workspace(root=tmp_path / "ws")
+    ws.init()
+    file_id = "multipagestyl"
+    pages_dir = ws.file_pages_dir(file_id)
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    pages = range(1, n_pages + 1)
+    for page in images_for if images_for is not None else pages:
+        (pages_dir / f"page_{page}.png").write_bytes(b"\x89PNG\r\n\x1a\n fake")
+
+    headings = "".join(f'<Heading dg:origin="{p} 10 20 30 40">TITLE {p}</Heading>' for p in pages)
+    root = etree.fromstring(f'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#">{headings}</dg:chunk>')
+    return ws, file_id, root
+
+
+def _annotate(ws: Any, file_id: str, root: Any, **kwargs: Any) -> int:
+    """Call the style pass with the dg: attribute names spelled out."""
+    from dgml_core import style_llm
+    from dgml_core.llm import LLMConfig
+
+    dg = "http://dgml.io/ns/dg#"
+    return style_llm.annotate_style_from_image(
+        ws,
+        file_id,
+        root,
+        config=LLMConfig(model="anthropic/claude-haiku-4-5", api_key=None, max_tokens=None),
+        style_attr=f"{{{dg}}}style",
+        origin_attr=f"{{{dg}}}origin",
+        **kwargs,
+    )
+
+
+def test_annotate_style_dispatches_pages_in_parallel(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Page vision calls really are dispatched concurrently.
+
+    Each call holds a barrier until all four pages arrive. A serial loop never
+    completes the barrier, so a regression fails at the 5s timeout rather than
+    hanging CI.
+    """
+    import threading
+
+    from dgml_core import style_llm
+
+    ws, file_id, root = _multipage_style_tree(tmp_path, 4)
+    barrier = threading.Barrier(4, timeout=5.0)
+
+    def fake_request(config, image_bytes, snippets):  # type: ignore[no-untyped-def]
+        barrier.wait()
+        return {0: "font-weight: bold"}
+
+    monkeypatch.setattr(style_llm, "_request_styles", fake_request)
+
+    assert _annotate(ws, file_id, root) == 4
+
+
+def test_annotate_style_isolates_per_page_failure(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """One page's failure must not touch any other page — the requirement
+    issue #75 calls out. Nothing is cancelled: every page is still called."""
+    import threading
+
+    from dgml_core import style_llm
+
+    ws, file_id, root = _multipage_style_tree(tmp_path, 4)
+    called: list[int] = []
+    lock = threading.Lock()
+
+    def fake_request(config, image_bytes, snippets):  # type: ignore[no-untyped-def]
+        page = config.context["page"]
+        with lock:
+            called.append(page)
+        if page == 2:
+            raise RuntimeError("page 2 is cursed")
+        return {0: "font-weight: bold"}
+
+    monkeypatch.setattr(style_llm, "_request_styles", fake_request)
+
+    styled = _annotate(ws, file_id, root)
+
+    assert styled == 3
+    assert sorted(called) == [1, 2, 3, 4]  # the failure cancelled nothing
+    dg = "http://dgml.io/ns/dg#"
+    styles = [el.get(f"{{{dg}}}style") for el in root.iter("Heading")]
+    assert styles == ["font-weight: bold", None, "font-weight: bold", "font-weight: bold"]
+
+
+def test_annotate_style_reports_failures_under_debug(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    """Failed pages are named on stderr under debug, and an unreachable model
+    is summarized once rather than once per page."""
+    import litellm
+    from dgml_core import style_llm
+
+    ws, file_id, root = _multipage_style_tree(tmp_path, 3)
+
+    def fake_request(config, image_bytes, snippets):  # type: ignore[no-untyped-def]
+        page = config.context["page"]
+        if page == 1:
+            raise RuntimeError("boom on one")
+        # Two pages hit the same credential problem; it must be reported once.
+        raise litellm.exceptions.AuthenticationError(
+            message="bad key", llm_provider="anthropic", model=config.model
+        )
+
+    monkeypatch.setattr(style_llm, "_request_styles", fake_request)
+
+    assert _annotate(ws, file_id, root, debug=True) == 0
+
+    err = capsys.readouterr().err
+    assert "style: page 1: RuntimeError: boom on one" in err
+    assert "style: page 2: AuthenticationError" in err
+    assert err.count("model unreachable") == 1
+    assert "3/3 pages failed" in err
+
+
+def test_annotate_style_reports_nothing_without_debug(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    """Failure reporting is debug-gated — the default path stays silent."""
+    from dgml_core import style_llm
+
+    ws, file_id, root = _multipage_style_tree(tmp_path, 2)
+
+    def fake_request(config, image_bytes, snippets):  # type: ignore[no-untyped-def]
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(style_llm, "_request_styles", fake_request)
+
+    assert _annotate(ws, file_id, root) == 0
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("workers", [1, 2, 3, 8])
+def test_annotate_style_output_is_deterministic_across_worker_counts(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch, workers
+) -> None:
+    """Serialized output is byte-identical whatever the worker count.
+
+    Calls complete out of order (per-page latency varies) and return their
+    snippet indices out of order, so this catches any apply-phase dependence
+    on completion order.
+    """
+    import time
+
+    from dgml_core import style_llm
+    from lxml import etree
+
+    def run(n_workers: int) -> Any:
+        ws, file_id, root = _multipage_style_tree(tmp_path / f"w{n_workers}", 5)
+
+        def fake_request(config, image_bytes, snippets):  # type: ignore[no-untyped-def]
+            page = config.context["page"]
+            time.sleep((6 - page) * 0.01)  # later pages finish first
+            return {0: "font-style: italic" if page % 2 else "font-weight: bold"}
+
+        monkeypatch.setattr(style_llm, "_request_styles", fake_request)
+        assert _annotate(ws, file_id, root, max_concurrency=n_workers) == 5
+        return etree.tostring(root)
+
+    assert run(workers) == run(1)
+
+
+def test_annotate_style_skips_pages_without_images(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Pages with no rendered PNG drop out during prep and are never called."""
+    import threading
+
+    from dgml_core import style_llm
+
+    ws, file_id, root = _multipage_style_tree(tmp_path, 3, images_for=[1, 3])
+    called: list[int] = []
+    lock = threading.Lock()
+
+    def fake_request(config, image_bytes, snippets):  # type: ignore[no-untyped-def]
+        with lock:
+            called.append(config.context["page"])
+        return {0: "font-weight: bold"}
+
+    monkeypatch.setattr(style_llm, "_request_styles", fake_request)
+
+    assert _annotate(ws, file_id, root) == 2
+    assert sorted(called) == [1, 3]
+
+
+def test_ground_records_one_style_usage_row_per_page(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """End-to-end through grounding: one `style_annotate` usage row per page,
+    still, now that the pages run concurrently.
+
+    Rows are asserted as a sorted set, never by index — with a thread pool the
+    append order in usage.jsonl is completion order, not page order.
+    """
+    from dgml_core.models import FileRecord
+    from dgml_core.storage import Workspace, write_json_atomic
+    from dgml_core.usage import read_events
+    from dgml_core.xml_grounding import ground_dgml_xml
+
+    ws = Workspace(root=tmp_path / "ws")
+    ws.init()
+    fid = "ocrmultipage1"
+    n_pages = 3
+    ws.file_dir(fid).mkdir(parents=True, exist_ok=True)
+    write_json_atomic(
+        ws.file_json_path(fid),
+        FileRecord(
+            id=fid,
+            original_path="/f.pdf",
+            original_filename="f.pdf",
+            sha256="0" * 64,
+            added_at="2026-01-01T00:00:00Z",
+            page_count=n_pages,
+            text_mode="ocr",
+        ).to_json(),
+    )
+    ws.file_text_dir(fid).mkdir(parents=True, exist_ok=True)
+    pages_dir = ws.file_pages_dir(fid)
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    for page in range(1, n_pages + 1):
+        write_json_atomic(
+            ws.file_text_dir(fid) / f"page_{page}.json",
+            {
+                "file_id": fid,
+                "page": page,
+                "width": 1000,
+                "height": 1000,
+                "words": [{"t": f"TITLE{page}", "l": [100, 100 * page, 200, 120 * page]}],
+            },
+        )
+        (pages_dir / f"page_{page}.png").write_bytes(b"\x89PNG\r\n\x1a\n fake")
+    ws.config_path.write_text(
+        dump_toml({"style": {"model": "anthropic/claude-haiku-4-5"}}), encoding="utf-8"
+    )
+
+    headings = "".join(f"<Heading>TITLE{p}</Heading>" for p in range(1, n_pages + 1))
+    src = tmp_path / "doc.dgml.xml"
+    src.write_text(
+        f'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#">{headings}</dg:chunk>', encoding="utf-8"
+    )
+
+    monkeypatch.setattr(
+        "litellm.completion",
+        lambda **k: _PricedResp('{"styles": [{"index": 0, "style": "font-weight: bold"}]}'),
+    )
+
+    ground_dgml_xml(ws, fid, src, output_path=src, force=True, write_stats=False, debug=True)
+
+    events = read_events(ws)
+    assert len(events) == n_pages
+    assert {e["operation"] for e in events} == {"style_annotate"}
+    assert sorted(e["context"]["page"] for e in events) == [1, 2, 3]
