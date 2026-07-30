@@ -41,8 +41,17 @@ DocumentDataset
 ```
 
 - **Encoders** (`clustering.encoders`) — text: `st_minilm`, `e5`, `bge`,
-  `gte`, `stella`, `jina`; image: `dit`, `vit`, `donut`;
+  `gte`, `stella`, `jina`, `gemini`; image: `dit`, `vit`, `donut`;
   multimodal: `qwen_vl`, `qwen3_vl_embedding`; plus `dummy` for tests.
+  All but `gemini` run locally. `gemini` calls a hosted embedding API, so it
+  needs a key (`GEMINI_API_KEY`), bills per token, and puts a network
+  round-trip on the critical path — one request per `extra.batch_size`
+  documents, retried with backoff on 429s and 5xx. It also cuts each document
+  to roughly `4 × max_length` characters: the model documents a 2048-token
+  limit but accepts more, so choosing the window here is what makes a run
+  reproducible and its cost predictable. Budget for it before pointing it at a
+  corpus, and leave the embedding cache on (`Config.cache_dir`) so a re-run
+  doesn't pay twice.
 - **Fusion** (`clustering.fusion`) — `none`, `concat_norm`, `late_concat`,
   `cross_attention`, `gated`.
 - **Manifolds** (`clustering.manifolds`) — `euclidean`, `spherical`,
