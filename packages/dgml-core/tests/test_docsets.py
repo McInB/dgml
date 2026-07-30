@@ -137,7 +137,7 @@ def test_add_remove_file_reference(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "abcdefghijkl"
-    workspace.file_dir(fid).mkdir(parents=True)
+    workspace.store.put_doc("files", fid, {"id": fid})
     store.add_file(ds.id, fid)
     assert store.list_files(ds.id) == [fid]
     store.remove_file(ds.id, fid)

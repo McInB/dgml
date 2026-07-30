@@ -32,6 +32,15 @@ class DocSetStore:
     def __init__(self, workspace: Workspace) -> None:
         self.ws = workspace
 
+    def _require_docset(self, docset_id: str) -> None:
+        """Raise :class:`DocSetNotFound` unless the docset's manifest exists.
+
+        Existence is defined by the ``docset.json`` document, not a directory —
+        so the check works on any store (a remote backend has no ``docsets/<id>/``
+        directory to stat)."""
+        if self.ws.store.get_doc("docsets", docset_id) is None:
+            raise DocSetNotFound(f"docset '{docset_id}' not found")
+
     def list_all(self) -> list[DocSet]:
         # find_docs enumerates docsets/*/docset.json (sorted, skipping corrupt),
         # matching the historical directory scan.
@@ -61,8 +70,8 @@ class DocSetStore:
             description=description,
             key_questions=list(key_questions or []),
         )
-        self.ws.docset_dir(docset_id).mkdir(parents=True, exist_ok=False)
-        self.ws.docset_files_dir(docset_id).mkdir(parents=True, exist_ok=True)
+        # No directory is created up front — the store owns container creation
+        # (put_doc writes the manifest). A fresh new_id never collides.
         self.ws.store.put_doc("docsets", docset_id, ds.to_json())
         return ds
 
@@ -89,8 +98,7 @@ class DocSetStore:
     def delete(self, docset_id: str) -> None:
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
-        if not self.ws.docset_dir(docset_id).exists():
-            raise DocSetNotFound(f"docset '{docset_id}' not found")
+        self._require_docset(docset_id)
         # Unassign every file (removing each pair's outputs), then the docset's own
         # documents and blobs; delete_blobs runs last so it prunes the empty subtree.
         # The underlying files under files/ are left untouched.
@@ -103,8 +111,7 @@ class DocSetStore:
     def list_files(self, docset_id: str) -> list[str]:
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
-        if not self.ws.docset_dir(docset_id).exists():
-            raise DocSetNotFound(f"docset '{docset_id}' not found")
+        self._require_docset(docset_id)
         assignments = self.ws.store.find_docs("assignments", {"docset_id": docset_id})
         return sorted(str(a["file_id"]) for a in assignments)
 
@@ -113,9 +120,8 @@ class DocSetStore:
             raise InvalidArgument("docset id must not be empty")
         if not file_id.strip():
             raise InvalidArgument("file id must not be empty")
-        if not self.ws.docset_dir(docset_id).exists():
-            raise DocSetNotFound(f"docset '{docset_id}' not found")
-        if not self.ws.file_dir(file_id).exists():
+        self._require_docset(docset_id)
+        if self.ws.store.get_doc("files", file_id) is None:
             raise FileNotFound(f"file '{file_id}' not found")
         # An assignment is a document keyed by the (docset, file) pair. Re-adding
         # is idempotent (overwrites the same marker), matching the old mkdir.
@@ -129,8 +135,7 @@ class DocSetStore:
             raise InvalidArgument("docset id must not be empty")
         if not file_id.strip():
             raise InvalidArgument("file id must not be empty")
-        if not self.ws.docset_dir(docset_id).exists():
-            raise DocSetNotFound(f"docset '{docset_id}' not found")
+        self._require_docset(docset_id)
         if self.ws.store.get_doc("assignments", f"{docset_id}/{file_id}") is None:
             raise FileNotFound(f"file '{file_id}' is not assigned to docset '{docset_id}'")
         self.ws.unassign(docset_id, file_id)
@@ -146,8 +151,7 @@ class DocSetStore:
         """
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
-        if not self.ws.docset_dir(docset_id).exists():
-            raise DocSetNotFound(f"docset '{docset_id}' not found")
+        self._require_docset(docset_id)
         key = self.ws.blob_key(self.ws.docset_schema_path(docset_id))
         try:
             return self.ws.store.get_blob(key).decode("utf-8")
@@ -171,8 +175,7 @@ class DocSetStore:
 
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
-        if not self.ws.docset_dir(docset_id).exists():
-            raise DocSetNotFound(f"docset '{docset_id}' not found")
+        self._require_docset(docset_id)
         if not isinstance(schema, str):
             raise SchemaInvalid("schema must be RNC text")
         validate_rnc(schema)  # raises SchemaInvalid on anything outside the subset
@@ -187,8 +190,7 @@ class DocSetStore:
         False if there was none to remove."""
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
-        if not self.ws.docset_dir(docset_id).exists():
-            raise DocSetNotFound(f"docset '{docset_id}' not found")
+        self._require_docset(docset_id)
         key = self.ws.blob_key(self.ws.docset_schema_path(docset_id))
         if not self.ws.store.blob_exists(key):
             return False

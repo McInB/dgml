@@ -222,8 +222,8 @@ def test_delete_rejects_empty_file_id_preserves_other_files(
     """
     keep_a = "aaaaaaaaaaaa"
     keep_b = "bbbbbbbbbbbb"
-    workspace.file_dir(keep_a).mkdir(parents=True)
-    workspace.file_dir(keep_b).mkdir(parents=True)
+    workspace.store.put_doc("files", keep_a, {"id": keep_a})
+    workspace.store.put_doc("files", keep_b, {"id": keep_b})
     docsets = DocSetStore(workspace)
     ds = docsets.create(name="X")
     docsets.add_file(ds.id, keep_a)

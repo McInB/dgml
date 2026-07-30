@@ -156,7 +156,11 @@ def test_retry_errors_clears_and_retries(workspace: Workspace, sample_pdf: Path)
 def test_dangling_docset_reference(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
-    (workspace.docset_files_dir(ds.id) / "missingfileid").mkdir()
+    # An assignment to a file that has no manifest — the dangling reference.
+    workspace.store.insert_doc(
+        "assignments",
+        {"_id": f"{ds.id}/missingfileid", "docset_id": ds.id, "file_id": "missingfileid"},
+    )
     report = check_workspace(workspace)
     assert any(i.kind == "dangling_file_reference" for i in report.issues)
 

@@ -252,7 +252,8 @@ class FileStore:
     ) -> AddFileResult:
         file_id = new_id()
         file_dir = self.ws.file_dir(file_id)
-        file_dir.mkdir(parents=True, exist_ok=False)
+        # The store owns container creation (upload_blob writes the source blob);
+        # a fresh new_id never collides, so no directory is created up front.
         # The original source is stored under its own name (a blob). A convertible
         # source is converted to a PDF here (persisted alongside it as
         # `<stem>.pdf` by _ensure_pdf) to drive page rendering / count / text
@@ -577,7 +578,7 @@ class FileStore:
     def delete(self, file_id: str) -> None:
         if not file_id.strip():
             raise InvalidArgument("file id must not be empty")
-        if not self.ws.file_dir(file_id).exists():
+        if self.ws.store.get_doc("files", file_id) is None:
             raise FileNotFound(f"file '{file_id}' not found")
         # Unassign from every docset (removing each pair's marker + generated
         # outputs), then delete the file's own documents and blobs. delete_blobs
