@@ -664,6 +664,7 @@ def test_convert_batch_skips_failed_document(
         ["good.pdf", "bad.pdf"],
         options=pl.ConvertOptions(
             model="anthropic/claude-haiku-4-5",
+            label_model="anthropic/claude-sonnet-4-6",
             dgml_header="<dg:chunk>",
             max_parallel_docs=max_parallel_docs,
         ),
@@ -693,7 +694,11 @@ def test_convert_batch_streams_to_sink_without_accumulating(
     seen: list[str] = []
     out = pl.convert_batch(
         ["a.pdf", "b.pdf"],
-        options=pl.ConvertOptions(model="anthropic/claude-haiku-4-5", dgml_header="<dg:chunk>"),
+        options=pl.ConvertOptions(
+            model="anthropic/claude-haiku-4-5",
+            label_model="anthropic/claude-sonnet-4-6",
+            dgml_header="<dg:chunk>",
+        ),
         on_output=lambda name, xml: seen.append(name),
     )
     assert out == {}  # nothing accumulated when a sink is provided
@@ -782,7 +787,11 @@ def test_convert_batch_concepts_always_docset_namespaced(
     seen: dict[str, str] = {}
     pl.convert_batch(
         ["new.pdf"],
-        options=pl.ConvertOptions(model="anthropic/claude-haiku-4-5", dgml_header="<dg:chunk>"),
+        options=pl.ConvertOptions(
+            model="anthropic/claude-haiku-4-5",
+            label_model="anthropic/claude-sonnet-4-6",
+            dgml_header="<dg:chunk>",
+        ),
         on_output=lambda name, xml: seen.__setitem__(name, xml),
         prior_docs={"old.pdf": prior},
         prior_outputs=prior_outputs,

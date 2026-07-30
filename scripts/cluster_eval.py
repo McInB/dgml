@@ -33,7 +33,7 @@ Usage:
 
     SPEC is one of:
         llm                 the LLM method (same as the headline run)
-        embed               embedding pipeline, workspace config.json defaults
+        embed               embedding pipeline, workspace config.toml defaults
         embed:light         embedding pipeline, bundled 'light' preset
         embed:heavy         ... 'heavy' preset (also: medium)
         embed:/path.json    embedding pipeline, standalone config JSON
@@ -344,7 +344,7 @@ def build_runs(
                 if llm_config is None:
                     raise DgmlError(
                         "no classification config; pass --model or add a "
-                        "'classification' section to the workspace config.json"
+                        "'classification' section to the workspace config.toml"
                     )
                 run = run_llm(ws, file_ids, llm_config, max_files)
             else:

@@ -130,7 +130,7 @@ def _azure_credential(config: OcrConfig) -> AzureKeyCredential | TokenCredential
         if not key:
             raise AuthError(
                 f"environment variable ${config.api_key_env} is not set "
-                "(referenced by ocr.api_key_env in config.json)"
+                "(referenced by ocr.api_key_env in config.toml)"
             )
     if key is not None:
         try:

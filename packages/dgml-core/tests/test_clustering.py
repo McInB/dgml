@@ -267,17 +267,14 @@ def test_clustering_internal_all_unusable_skips_clusterer(workspace: Workspace) 
 
 
 def test_clustering_internal_forwards_workspace_overrides(workspace: Workspace) -> None:
-    """The ``clustering`` section of ``<workspace>/config.json`` is loaded
+    """The ``clustering`` section of ``<workspace>/config.toml`` is loaded
     and forwarded to ``run_clustering`` as ``overrides=`` so users can
     override individual settings (encoder, training, …) without copying
     the whole bundled default. ``corpus_dir`` is additionally injected into
     ``encoder_text.extra`` so corpus-fitted text encoders can fit."""
     _seed_file(workspace, "f1")
     _seed_page_image(workspace, "f1")
-    workspace.config_path.write_text(
-        json.dumps({"clustering": {"training": {"epochs": 7}}}),
-        encoding="utf-8",
-    )
+    _write_config(workspace, {"clustering": {"training": {"epochs": 7}}})
 
     with patch(
         "dgml_core.clustering.run_clustering_detailed",
@@ -291,7 +288,7 @@ def test_clustering_internal_forwards_workspace_overrides(workspace: Workspace) 
 
 
 def test_clustering_internal_passes_empty_overrides_when_no_config(workspace: Workspace) -> None:
-    """No config.json ⇒ only the injected ``corpus_dir`` is forwarded
+    """No config.toml ⇒ only the injected ``corpus_dir`` is forwarded
     (bundled defaults otherwise stand), not a different keyword shape that
     would skip the path."""
     _seed_file(workspace, "f1")
@@ -383,14 +380,11 @@ def test_clustering_internal_fresh_does_not_inject_novelty_default(workspace: Wo
 
 
 def test_clustering_internal_incremental_respects_user_gate(workspace: Workspace) -> None:
-    """A user-set gate in config.json wins over the injected default."""
+    """A user-set gate in config.toml wins over the injected default."""
     DocSetStore(workspace).create(name="Contracts")
     _seed_file(workspace, "u1")
     _seed_page_image(workspace, "u1")
-    workspace.config_path.write_text(
-        json.dumps({"clustering": {"scenario": {"threshold_confidence": 0.5}}}),
-        encoding="utf-8",
-    )
+    _write_config(workspace, {"clustering": {"scenario": {"threshold_confidence": 0.5}}})
 
     with patch(
         "dgml_core.clustering.run_clustering_detailed",
@@ -404,23 +398,25 @@ def test_clustering_internal_incremental_respects_user_gate(workspace: Workspace
 
 
 # ---------------------------------------------------------------------------
-# load_clustering_overrides — reading the workspace config.json
+# load_clustering_overrides — reading the workspace config.toml
 # ---------------------------------------------------------------------------
 
 
 def _write_config(workspace: Workspace, payload: dict[str, Any]) -> None:
-    workspace.config_path.write_text(json.dumps(payload), encoding="utf-8")
+    from .conftest import write_config
+
+    write_config(workspace, payload)
 
 
 def test_load_clustering_overrides_returns_empty_when_no_config(workspace: Workspace) -> None:
-    """No config.json at all ⇒ the bundled defaults stand."""
+    """No config.toml at all ⇒ the bundled defaults stand."""
     assert load_clustering_overrides(workspace) == {}
 
 
 def test_load_clustering_overrides_returns_empty_when_no_section(workspace: Workspace) -> None:
-    """A config.json without a ``clustering`` section is treated the same
+    """A config.toml without a ``clustering`` section is treated the same
     as a missing file — bundled defaults stand."""
-    _write_config(workspace, {"classification": {"model": "gemini/gemini-3.1-flash-lite"}})
+    _write_config(workspace, {"classification": {"model": "gemini/gemini-2.5-flash-lite"}})
     assert load_clustering_overrides(workspace) == {}
 
 
@@ -428,7 +424,7 @@ def test_load_clustering_overrides_reads_section(workspace: Workspace) -> None:
     _write_config(
         workspace,
         {
-            "classification": {"model": "gemini/gemini-3.1-flash-lite"},
+            "classification": {"model": "gemini/gemini-2.5-flash-lite"},
             "clustering": {"training": {"epochs": 42}},
         },
     )
@@ -436,20 +432,18 @@ def test_load_clustering_overrides_reads_section(workspace: Workspace) -> None:
 
 
 def test_load_clustering_overrides_section_not_object_raises(workspace: Workspace) -> None:
-    _write_config(workspace, {"clustering": "oops"})
-    with pytest.raises(ClusteringConfigInvalid, match="must be a JSON object"):
+    from dgml_core.errors import CorruptMetadata
+
+    workspace.config_path.write_text('clustering = "oops"\n', encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_clustering_overrides(workspace)
 
 
-def test_load_clustering_overrides_corrupt_json_raises(workspace: Workspace) -> None:
-    workspace.config_path.write_text("{this is not valid json", encoding="utf-8")
-    with pytest.raises(ClusteringConfigInvalid, match="is not valid JSON"):
-        load_clustering_overrides(workspace)
+def test_load_clustering_overrides_corrupt_toml_raises(workspace: Workspace) -> None:
+    from dgml_core.errors import CorruptMetadata
 
-
-def test_load_clustering_overrides_top_level_not_object_raises(workspace: Workspace) -> None:
-    workspace.config_path.write_text("[]", encoding="utf-8")
-    with pytest.raises(ClusteringConfigInvalid, match="must contain a JSON object"):
+    workspace.config_path.write_text("{this is not valid toml", encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_clustering_overrides(workspace)
 
 

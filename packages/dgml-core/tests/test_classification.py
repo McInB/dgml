@@ -39,7 +39,7 @@ from dgml_core.utils import gather_file_pages
 
 from .conftest import write_classification_config
 
-DEFAULT_TEST_MODEL = "gemini/gemini-3.1-flash-lite"
+DEFAULT_TEST_MODEL = "gemini/gemini-2.5-flash-lite"
 
 
 # ---------------------------------------------------------------------------
@@ -98,29 +98,34 @@ def test_load_config_missing_when_no_config_file(workspace: Workspace) -> None:
 
 
 def test_load_config_missing_when_no_classification_section(workspace: Workspace) -> None:
-    workspace.config_path.write_text(json.dumps({"ocr": {}}), encoding="utf-8")
+    # No [classification] section and no [models].light tier → no model resolves.
+    workspace.config_path.write_text("[ocr]\n", encoding="utf-8")
     with pytest.raises(ClassificationConfigMissing):
         load_classification_config(workspace)
 
 
-def test_load_config_invalid_json(workspace: Workspace) -> None:
-    workspace.config_path.write_text("{ not valid json", encoding="utf-8")
-    with pytest.raises(ClassificationConfigInvalid):
-        load_classification_config(workspace)
+def test_load_config_corrupt_toml(workspace: Workspace) -> None:
+    from dgml_core.errors import CorruptMetadata
 
-
-def test_load_config_root_not_object(workspace: Workspace) -> None:
-    workspace.config_path.write_text("[]", encoding="utf-8")
-    with pytest.raises(ClassificationConfigInvalid):
+    workspace.config_path.write_text("{ not valid toml", encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_classification_config(workspace)
 
 
 def test_load_config_section_not_object(workspace: Workspace) -> None:
-    workspace.config_path.write_text(
-        json.dumps({"classification": "gemini/gemini-3.1-flash-lite"}), encoding="utf-8"
-    )
-    with pytest.raises(ClassificationConfigInvalid):
+    from dgml_core.errors import CorruptMetadata
+
+    workspace.config_path.write_text('classification = "gemini/flash-lite"\n', encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_classification_config(workspace)
+
+
+def test_load_config_model_from_light_tier(workspace: Workspace) -> None:
+    from .conftest import write_config
+
+    write_config(workspace, {"models": {"light": "gemini/gemini-2.5-flash-lite"}})
+    cfg = load_classification_config(workspace)
+    assert cfg.model == "gemini/gemini-2.5-flash-lite"
 
 
 def test_load_config_happy_minimal(workspace: Workspace) -> None:
@@ -177,8 +182,9 @@ def test_load_config_happy_full(workspace: Workspace) -> None:
 
 
 def test_load_config_missing_model(workspace: Workspace) -> None:
+    # No model on the section and no light tier → missing, not invalid.
     write_classification_config(workspace, {"max_pages": 2})
-    with pytest.raises(ClassificationConfigInvalid, match="model"):
+    with pytest.raises(ClassificationConfigMissing, match="model"):
         load_classification_config(workspace)
 
 

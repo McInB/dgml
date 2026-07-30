@@ -171,6 +171,7 @@ def llm_cluster_files(
     llm_config = LLMConfig(
         model=config.model,
         api_key=api_key,
+        api_base=config.api_base,
         max_tokens=None,
         # Greedy decoding: clustering should be as reproducible as possible, so
         # the same corpus yields the same partition run-to-run. Without this the

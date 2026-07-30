@@ -12,141 +12,135 @@
 
 """The ``generation`` section of the workspace config.
 
-The PDF→DGML pipeline's models are configured here, not defaulted in code, so
-*which* model runs is a visible choice in ``<workspace>/config.json`` — never a
-silent default. Like the other model-consuming stages (grounded, classification)
-there is no CLI flag: ``docset generate`` reads its model solely from this
-section. Mirrors :func:`dgml_core.grounded.load_grounded_config`.
+The PDF→DGML pipeline uses two models — ``model`` (per-page transcription) and
+``label_model`` (the batch-wide semantic-labeling call). Each is optional here:
+when unset it falls back to a tier from the ``[models]`` block (transcription →
+``standard``, labeling → ``advanced``). Setting the per-task field overrides the
+tier. There is no CLI flag: ``docset generate`` reads its models solely from the
+merged config. Mirrors :func:`dgml_core.grounded.load_grounded_config`.
+
+The two models can name different providers (e.g. the default ``mixed`` config
+uses Anthropic for transcription and Gemini for labeling), so each carries its
+own credentials: ``api_key`` / ``api_key_env`` / ``api_base`` for transcription
+and ``label_api_key`` / ``label_api_key_env`` / ``label_api_base`` for labeling.
+These apply whether the models are set here or come from their tiers; the tiers
+themselves carry no credentials.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any
 
+from dgml_core.config import load_merged_config
 from dgml_core.errors import (
     AuthError,
-    CorruptMetadata,
     GenerationConfigInvalid,
     GenerationConfigMissing,
     short_error_message,
 )
-from dgml_core.storage import Workspace, read_config
+from dgml_core.models_config import ConfigSection, Tier, resolve_tiered_model
+from dgml_core.storage import Workspace
 
 
 @dataclass(frozen=True)
 class GenerationConfig:
-    """Parsed ``generation`` section of the workspace config.
+    """Parsed ``generation`` models, with each model's resolved credentials.
 
-    ``model`` (per-page transcription) and ``label_model`` (the
-    single batch-wide semantic-labeling call) are **both required** and
-    configured separately: transcription is the bulk of the calls and runs well
-    on a cheap tier, while labeling is a handful of small-output calls per batch
-    that can benefit from a stronger model. Each is an explicit, visible choice,
-    so no model runs that the config didn't name.
+    ``model`` (per-page transcription) and ``label_model`` (the single
+    batch-wide semantic-labeling call) each resolve from the per-task field or
+    its ``[models]`` tier (``standard`` / ``advanced``). Transcription is the
+    bulk of the calls and runs well on a cheaper tier; labeling is a handful of
+    small-output calls per batch that benefit from a stronger model.
 
-    API key resolution, in order of precedence:
-    1. ``api_key``      — literal key in the config file. Allowed but only
-                          safe in workspaces that aren't shared or checked in.
-    2. ``api_key_env``  — name of an env var holding the key.
-    3. Neither          — litellm falls back to its per-provider env-var
-                          conventions (``ANTHROPIC_API_KEY``, etc.).
-
-    Setting both ``api_key`` and ``api_key_env`` is a config error.
+    Each model has independent credentials so the two may name different
+    providers. For either, API-key resolution precedence is: literal
+    ``*_api_key`` > ``*_api_key_env`` var lookup > ``None`` (litellm's
+    per-provider env-var conventions). Setting both the literal and the env-name
+    for one model is a config error.
     """
 
     model: str
     label_model: str
+    # transcription (``model``) credentials
     api_key: str | None = None
     api_key_env: str | None = None
     api_base: str | None = None
-
-
-def _validate_optional_str(value: Any, field_name: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise GenerationConfigInvalid(f"'{field_name}' must be a non-empty string if set")
-    return value
+    # labeling (``label_model``) credentials
+    label_api_key: str | None = None
+    label_api_key_env: str | None = None
+    label_api_base: str | None = None
 
 
 def load_generation_config(workspace: Workspace) -> GenerationConfig:
-    """Read and validate the ``generation`` section of ``<workspace>/config.json``."""
-    if not workspace.config_path.exists():
-        raise GenerationConfigMissing(
-            f"no config.json at {workspace.config_path}; generation requires a workspace "
-            "config with a 'generation' section naming both models — e.g. "
-            '{"generation": {"model": "anthropic/claude-haiku-4-5", '
-            '"label_model": "anthropic/claude-sonnet-4-6"}}'
-        )
-    try:
-        data = read_config(workspace.config_path)
-    except CorruptMetadata as exc:
-        raise GenerationConfigInvalid(f"{workspace.config_path} is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise GenerationConfigInvalid(f"{workspace.config_path} must contain a JSON object")
-    section = data.get("generation")
-    if section is None:
-        raise GenerationConfigMissing(
-            f"{workspace.config_path} has no 'generation' section "
-            "(add one naming both 'model' and 'label_model')"
-        )
-    if not isinstance(section, dict):
-        raise GenerationConfigInvalid("'generation' must be a JSON object")
-
-    model = section.get("model")
-    if not isinstance(model, str) or not model.strip():
-        raise GenerationConfigInvalid(
-            "'generation.model' must be a non-empty string (e.g. 'anthropic/claude-haiku-4-5')"
-        )
-    label_model = section.get("label_model")
-    if not isinstance(label_model, str) or not label_model.strip():
-        raise GenerationConfigInvalid(
-            "'generation.label_model' must be a non-empty string "
-            "(e.g. 'anthropic/claude-sonnet-4-6'); it is required"
-        )
-    api_key = _validate_optional_str(section.get("api_key"), "generation.api_key")
-    api_key_env = _validate_optional_str(section.get("api_key_env"), "generation.api_key_env")
-    api_base = _validate_optional_str(section.get("api_base"), "generation.api_base")
-    if api_key is not None and api_key_env is not None:
-        raise GenerationConfigInvalid(
-            "set at most one of 'generation.api_key' / 'generation.api_key_env', not both"
-        )
-
+    """Resolve the two generation models (transcription, labeling) and their
+    credentials from the merged config's ``[generation]`` section and ``[models]``
+    tiers (``standard`` for transcription, ``advanced`` for labeling)."""
+    merged = load_merged_config(workspace)
+    transcribe = resolve_tiered_model(
+        merged,
+        section_name=ConfigSection.GENERATION,
+        tier=Tier.STANDARD,
+        invalid=GenerationConfigInvalid,
+        missing=GenerationConfigMissing,
+        model_field="model",
+        key_field="api_key",
+        env_field="api_key_env",
+        base_field="api_base",
+    )
+    label = resolve_tiered_model(
+        merged,
+        section_name=ConfigSection.GENERATION,
+        tier=Tier.ADVANCED,
+        invalid=GenerationConfigInvalid,
+        missing=GenerationConfigMissing,
+        model_field="label_model",
+        key_field="label_api_key",
+        env_field="label_api_key_env",
+        base_field="label_api_base",
+    )
     return GenerationConfig(
-        model=model,
-        label_model=label_model,
-        api_key=api_key,
-        api_key_env=api_key_env,
-        api_base=api_base,
+        model=transcribe.model,
+        label_model=label.model,
+        api_key=transcribe.api_key,
+        api_key_env=transcribe.api_key_env,
+        api_base=transcribe.api_base,
+        label_api_key=label.api_key,
+        label_api_key_env=label.api_key_env,
+        label_api_base=label.api_base,
     )
 
 
-def resolve_generation_api_key(config: GenerationConfig) -> str | None:
-    """Resolve the generation API key.
-
-    Precedence: literal ``api_key`` > ``api_key_env`` var lookup > ``None``
-    (let litellm fall back to its per-provider env-var conventions:
-    ``ANTHROPIC_API_KEY``, ``GEMINI_API_KEY``, ...).
-
-    Mutual exclusion of ``api_key`` and ``api_key_env`` is enforced in
-    :func:`load_generation_config`.
-    """
-    if config.api_key is not None:
-        return config.api_key
-    if config.api_key_env is None:
+def _resolve_key(literal: str | None, env_name: str | None, ref: str) -> str | None:
+    """Precedence: literal key > env-var lookup > ``None`` (litellm's per-provider
+    env-var conventions). ``ref`` names the config field for the error message."""
+    if literal is not None:
+        return literal
+    if env_name is None:
         return None
-    key = os.environ.get(config.api_key_env)
+    key = os.environ.get(env_name)
     if not key:
-        raise AuthError(
-            f"environment variable ${config.api_key_env} is not set "
-            "(referenced by 'generation.api_key_env' in config.json)"
-        )
+        raise AuthError(f"environment variable ${env_name} is not set (referenced by '{ref}')")
     return key
 
 
-def validate_generation_models(config: GenerationConfig, resolved_key: str | None) -> None:
+def resolve_generation_api_key(config: GenerationConfig) -> str | None:
+    """Resolve the transcription (``model``) API key."""
+    return _resolve_key(config.api_key, config.api_key_env, "generation.api_key_env")
+
+
+def resolve_generation_label_api_key(config: GenerationConfig) -> str | None:
+    """Resolve the labeling (``label_model``) API key."""
+    return _resolve_key(
+        config.label_api_key, config.label_api_key_env, "generation.label_api_key_env"
+    )
+
+
+def validate_generation_models(
+    config: GenerationConfig,
+    transcribe_key: str | None,
+    label_key: str | None,
+) -> None:
     """Pre-flight the generation models, before any transcription spend.
 
     Fails fast on the two misconfigurations detectable offline, so a run whose
@@ -161,20 +155,23 @@ def validate_generation_models(config: GenerationConfig, resolved_key: str | Non
     rejected only when the model is actually called. Those surface per file as a
     ``label_error`` during ``docset generate`` rather than here.
 
-    *resolved_key* is the key from :func:`resolve_generation_api_key` (already
-    authoritative for ``api_key`` / ``api_key_env``); passing it to litellm means
-    an explicitly-configured key satisfies the presence check. The key check is
-    SKIPPED entirely when ``api_base`` is set — a custom endpoint (proxy /
-    gateway / self-hosted) may authenticate differently, and litellm would
-    otherwise report the provider's conventional env var as missing (a false
-    abort). Both ``model`` and ``label_model`` are checked (they may name
-    different providers).
+    ``transcribe_key`` / ``label_key`` come from :func:`resolve_generation_api_key`
+    / :func:`resolve_generation_label_api_key` — each model is checked against its
+    own key and its own ``api_base``, since the two may name different providers.
+    The key check is SKIPPED for a model whose ``api_base`` is set — a custom
+    endpoint (proxy / gateway / self-hosted) may authenticate differently, and
+    litellm would otherwise report the provider's conventional env var as missing
+    (a false abort).
     """
     import litellm
 
-    # dict.fromkeys dedupes while preserving order — the two models are often
-    # the same provider, and frequently the same string.
-    for model in dict.fromkeys((config.model, config.label_model)):
+    checks = (
+        (config.model, transcribe_key, config.api_base),
+        (config.label_model, label_key, config.label_api_base),
+    )
+    # Dedupe identical (model, key, base) triples — the two models are often the
+    # same provider and frequently the same string.
+    for model, key, api_base in dict.fromkeys(checks):
         try:
             litellm.get_llm_provider(model)
         except Exception as exc:
@@ -186,13 +183,13 @@ def validate_generation_models(config: GenerationConfig, resolved_key: str | Non
                 "(expected e.g. 'anthropic/claude-sonnet-4-6'): "
                 f"{short_error_message(exc)}"
             ) from exc
-        if config.api_base is not None:
+        if api_base is not None:
             continue
-        env = litellm.validate_environment(model=model, api_key=resolved_key)
+        env = litellm.validate_environment(model=model, api_key=key)
         if not env.get("keys_in_environment", False):
             missing = ", ".join(env.get("missing_keys") or []) or "the provider API key"
             raise AuthError(
                 f"no API key for model '{model}': {missing} not set. Set it in the "
-                "environment, or configure 'generation.api_key' / "
-                "'generation.api_key_env' in config.json."
+                "environment, or configure the matching 'generation.*api_key' / "
+                "'generation.*api_key_env' in the config."
             )

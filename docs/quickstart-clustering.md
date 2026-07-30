@@ -45,8 +45,8 @@ the CLI writes goes there.
 
 ```bash
 export DGML_HOME=./dgml-workspace
-dgml init              # seed the shared local_config.json
-dgml workspace create  # create the workspace from it
+dgml init --provider anthropic             # write ~/.config/dgml/config.toml
+dgml workspace create --organization Acme  # create the workspace
 ```
 
 `DGML_HOME` is optional — without it, pass `--workspace ./dgml-workspace`
@@ -96,7 +96,7 @@ failures (failed renders, failed text extraction).
 
 If your folder is image-only scans with no embedded text, swap the
 text-mode. Each provider needs an extra; the cloud ones (Azure, AWS)
-are also configured in `<workspace>/config.json` (see
+are also configured in `<workspace>/config.toml` (see
 [`docs/cli-reference.md`](cli-reference.md#ocr-configuration) for the
 schema), while macOS Apple Vision runs on-device with no config:
 
@@ -104,7 +104,7 @@ schema), while macOS Apple Vision runs on-device with no config:
 # `uv sync` makes the venv match exactly what you list, so keep the
 # clustering extra from step 1 and add the OCR provider you need:
 uv sync --extra clustering --extra macos   # Apple Vision — on-device, macOS only, zero-config
-# or, for cloud OCR (add an `ocr` section to config.json first):
+# or, for cloud OCR (add an `ocr` section to config.toml first):
 uv sync --extra clustering --extra azure   # Azure Document Intelligence
 uv sync --extra clustering --extra aws     # AWS Textract
 
@@ -114,7 +114,7 @@ dgml file add /path/to/pdfs --recursive --on-conflict skip --text-mode hybrid
 (Once DGML is on PyPI these become `pip install "dgml[macos]"` etc.)
 
 On macOS, Apple Vision is the default OCR engine even with no `ocr`
-section in `config.json` — just install the extra. `hybrid` runs
+section in `config.toml` — just install the extra. `hybrid` runs
 digital extraction first, then OCR, and merges the two — the right
 default when a folder mixes born-digital and scanned PDFs.
 
@@ -148,7 +148,7 @@ The command:
 4. for unmatched clusters, calls the configured vision LLM to propose
    `(name, description)`, creates the DocSet, and assigns the files.
 
-Step 4 needs the `classification` section in `<workspace>/config.json`
+Step 4 needs the `classification` section in `<workspace>/config.toml`
 (LLM model id + API key env var) — same config used by
 `dgml file add --auto-classify`. Without it, matched clusters still get
 assigned and unmatched ones land in `failed_file_ids`; re-run after
@@ -184,7 +184,7 @@ dgml cluster --method llm
 `--method llm` sends every document's rendered first pages to the LLM in a
 single call and asks it to group them by document type, then names each
 emergent group — the same vision machinery `dgml file add --auto-classify`
-uses, so it needs the same `classification` section in `<workspace>/config.json`
+uses, so it needs the same `classification` section in `<workspace>/config.toml`
 (without it, every file lands in `failed_file_ids`). It partitions *and* names
 in one round-trip, and a single call covers up to 24 files.
 
@@ -208,22 +208,25 @@ optional. There are two ways to override them, both using the same field
 schema:
 
 - **Per workspace** — add a `clustering` section to
-  `<workspace>/config.json`. It's a *partial overlay*, deep-merged over
+  `<workspace>/config.toml`. It's a *partial overlay*, deep-merged over
   the bundled defaults, so you only spell out what you change.
 - **Per run** — `dgml cluster --config PATH` points at a standalone JSON
   with the same fields (drop the `clustering` wrapper); it *replaces* the
   section for that run. `--config` also accepts a bundled preset **name**
   (`small` / `light` / `medium` / `heavy`).
 
-```jsonc
-// <workspace>/config.json — change only what you need
-{
-  "clustering": {
-    "encoder_text": {"name": "bge", "model_id": "BAAI/bge-small-en-v1.5", "embedding_dim": 384},
-    "manifold": {"name": "euclidean", "dim": 384},
-    "scenario": {"leiden_resolution": 0.7, "leiden_k_neighbors": 20}
-  }
-}
+```toml
+# <workspace>/config.toml — change only what you need
+[clustering.encoder_text]
+name = "bge"
+model_id = "BAAI/bge-small-en-v1.5"
+embedding_dim = 384
+[clustering.manifold]
+name = "euclidean"
+dim = 384
+[clustering.scenario]
+leiden_resolution = 0.7
+leiden_k_neighbors = 20
 ```
 
 Field names and value enums come from the `Config` schema

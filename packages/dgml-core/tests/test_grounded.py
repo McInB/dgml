@@ -67,10 +67,9 @@ title =
 
 
 def _write_grounded_config(workspace: Workspace, section: dict[str, object]) -> None:
-    workspace.config_path.write_text(
-        json.dumps({"grounded": section}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    from .conftest import write_config
+
+    write_config(workspace, {"grounded": section})
 
 
 def _seed_file(
@@ -187,31 +186,65 @@ def test_load_config_missing_when_no_config_file(workspace: Workspace) -> None:
 
 
 def test_load_config_missing_when_no_grounded_section(workspace: Workspace) -> None:
-    workspace.config_path.write_text(json.dumps({"ocr": {}}), encoding="utf-8")
+    # No [grounded] section and no [models] tiers → nothing resolves the models.
+    workspace.config_path.write_text("[ocr]\n", encoding="utf-8")
     with pytest.raises(GroundedConfigMissing):
         load_grounded_config(workspace)
 
 
-def test_load_config_invalid_when_not_object(workspace: Workspace) -> None:
-    workspace.config_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
-    with pytest.raises(GroundedConfigInvalid):
+def test_load_config_invalid_when_malformed_toml(workspace: Workspace) -> None:
+    from dgml_core.errors import CorruptMetadata
+
+    workspace.config_path.write_text("this is = not = valid toml", encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_grounded_config(workspace)
 
 
 def test_load_config_invalid_when_grounded_not_object(workspace: Workspace) -> None:
-    workspace.config_path.write_text(json.dumps({"grounded": "azure"}), encoding="utf-8")
-    with pytest.raises(GroundedConfigInvalid):
+    from dgml_core.errors import CorruptMetadata
+
+    workspace.config_path.write_text('grounded = "azure"\n', encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_grounded_config(workspace)
 
 
-def test_load_config_rejects_missing_models(workspace: Workspace) -> None:
+def test_load_config_missing_model_without_tier(workspace: Workspace) -> None:
+    # One model set on the section, the other neither overridden nor tiered.
     _write_grounded_config(workspace, {"values_model": DEFAULT_VALUES_MODEL})
-    with pytest.raises(GroundedConfigInvalid):
+    with pytest.raises(GroundedConfigMissing):
         load_grounded_config(workspace)
 
     _write_grounded_config(workspace, {"schema_model": DEFAULT_SCHEMA_MODEL})
-    with pytest.raises(GroundedConfigInvalid):
+    with pytest.raises(GroundedConfigMissing):
         load_grounded_config(workspace)
+
+
+def test_load_config_models_from_tiers(workspace: Workspace) -> None:
+    # No [grounded] section: schema ← expert tier, values ← advanced tier.
+    from .conftest import write_config
+
+    write_config(
+        workspace,
+        {"models": {"advanced": "gemini/gemini-2.5-pro", "expert": "anthropic/claude-opus-4-8"}},
+    )
+    config = load_grounded_config(workspace)
+    assert config.schema_model == "anthropic/claude-opus-4-8"
+    assert config.values_model == "gemini/gemini-2.5-pro"
+
+
+def test_load_config_section_overrides_tier(workspace: Workspace) -> None:
+    from .conftest import write_config
+
+    write_config(
+        workspace,
+        {
+            "models": {"advanced": "gemini/gemini-2.5-pro", "expert": "anthropic/claude-opus-4-8"},
+            "grounded": {"values_model": "openai/gpt-5"},
+        },
+    )
+    config = load_grounded_config(workspace)
+    assert config.schema_model == "anthropic/claude-opus-4-8"  # tier
+    assert config.values_model == "openai/gpt-5"  # override wins
 
 
 def test_load_config_rejects_non_positive_max_iters(workspace: Workspace) -> None:

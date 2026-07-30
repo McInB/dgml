@@ -17,6 +17,9 @@ dependencies = [
     "dateparser>=1.2",
     # LLM client used by classification, grounded extraction, and generation
     "litellm>=1.51.0",
+    # Layered config assembly (user/workspace TOML + env vars) — MIT.
+    # `pydantic` itself already resolves transitively via litellm.
+    "pydantic-settings>=2.4",
 ]
 
 [tool.uv.sources]

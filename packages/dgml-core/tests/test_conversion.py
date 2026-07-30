@@ -32,7 +32,7 @@ from dgml_core.conversion import (
 )
 from dgml_core.errors import ConversionConfigInvalid, UnsupportedFileType
 from dgml_core.generation import document
-from dgml_core.storage import Workspace, write_json_atomic
+from dgml_core.storage import Workspace
 
 
 class StubConverter(DocConverter):
@@ -101,7 +101,9 @@ def test_family_for_suffix() -> None:
 
 
 def _write_config(ws: Workspace, conversion: dict[str, Any]) -> None:
-    write_json_atomic(ws.config_path, {"conversion": conversion})
+    from .conftest import write_config
+
+    write_config(ws, {"conversion": conversion})
 
 
 def test_load_conversion_config_absent_returns_empty(tmp_path: Path) -> None:

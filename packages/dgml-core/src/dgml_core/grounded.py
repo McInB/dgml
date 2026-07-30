@@ -51,10 +51,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .config import load_merged_config
 from .docsets import DocSetStore
 from .errors import (
     AuthError,
-    CorruptMetadata,
     FileNotFound,
     GroundedConfigInvalid,
     GroundedConfigMissing,
@@ -78,8 +78,9 @@ from .matching import (
     run_phase2_matching,
     walk_computed_leaves,
 )
+from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .prompts import get as prompt
-from .storage import Workspace, read_config, read_json, write_json_atomic, write_text_atomic
+from .storage import Workspace, read_json, write_json_atomic, write_text_atomic
 from .usage import (
     OPERATION_EXTRACT_VALUES,
     OPERATION_SCHEMA_GENERATE,
@@ -173,61 +174,43 @@ class GroundedConfig:
     values_api_key: str | None = None
     schema_api_key_env: str | None = None
     values_api_key_env: str | None = None
+    schema_api_base: str | None = None
+    values_api_base: str | None = None
     max_tool_iters: int = DEFAULT_MAX_TOOL_ITERS
 
 
 def load_grounded_config(workspace: Workspace) -> GroundedConfig:
-    """Read and validate the ``grounded`` section of ``<workspace>/config.json``."""
-    if not workspace.config_path.exists():
-        raise GroundedConfigMissing(
-            f"no config.json at {workspace.config_path}; "
-            "schema-gen and value extraction require a workspace config with a 'grounded' section"
-        )
-    try:
-        data = read_config(workspace.config_path)
-    except CorruptMetadata as exc:
-        raise GroundedConfigInvalid(f"{workspace.config_path} is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise GroundedConfigInvalid(f"{workspace.config_path} must contain a JSON object")
-    section = data.get("grounded")
-    if section is None:
-        raise GroundedConfigMissing(f"{workspace.config_path} has no 'grounded' section")
-    if not isinstance(section, dict):
-        raise GroundedConfigInvalid("'grounded' must be a JSON object")
+    """Resolve the two grounded models (schema generation → ``expert`` tier,
+    value extraction → ``advanced`` tier) and their credentials from the merged
+    config's ``[grounded]`` section and ``[models]`` tiers. A model set on the
+    section overrides its tier."""
+    merged = load_merged_config(workspace)
+    schema = resolve_tiered_model(
+        merged,
+        section_name=ConfigSection.GROUNDED,
+        tier=Tier.EXPERT,
+        invalid=GroundedConfigInvalid,
+        missing=GroundedConfigMissing,
+        model_field="schema_model",
+        key_field="schema_api_key",
+        env_field="schema_api_key_env",
+        base_field="schema_api_base",
+    )
+    values = resolve_tiered_model(
+        merged,
+        section_name=ConfigSection.GROUNDED,
+        tier=Tier.ADVANCED,
+        invalid=GroundedConfigInvalid,
+        missing=GroundedConfigMissing,
+        model_field="values_model",
+        key_field="values_api_key",
+        env_field="values_api_key_env",
+        base_field="values_api_base",
+    )
 
-    schema_model = section.get("schema_model")
-    if not isinstance(schema_model, str) or not schema_model.strip():
-        raise GroundedConfigInvalid(
-            "'grounded.schema_model' must be a non-empty string (e.g. 'anthropic/claude-opus-4-7')"
-        )
-    values_model = section.get("values_model")
-    if not isinstance(values_model, str) or not values_model.strip():
-        raise GroundedConfigInvalid(
-            "'grounded.values_model' must be a non-empty string (e.g. 'gemini/gemini-2.5-pro')"
-        )
-
-    schema_api_key = _validate_optional_str(
-        section.get("schema_api_key"), "grounded.schema_api_key"
-    )
-    values_api_key = _validate_optional_str(
-        section.get("values_api_key"), "grounded.values_api_key"
-    )
-    schema_api_key_env = _validate_optional_str(
-        section.get("schema_api_key_env"), "grounded.schema_api_key_env"
-    )
-    values_api_key_env = _validate_optional_str(
-        section.get("values_api_key_env"), "grounded.values_api_key_env"
-    )
-    if schema_api_key is not None and schema_api_key_env is not None:
-        raise GroundedConfigInvalid(
-            "set at most one of 'grounded.schema_api_key' / 'grounded.schema_api_key_env', not both"
-        )
-    if values_api_key is not None and values_api_key_env is not None:
-        raise GroundedConfigInvalid(
-            "set at most one of 'grounded.values_api_key' / 'grounded.values_api_key_env', not both"
-        )
-
-    max_tool_iters_raw = section.get("max_tool_iters", DEFAULT_MAX_TOOL_ITERS)
+    section = merged.get(ConfigSection.GROUNDED)
+    sec: dict[str, Any] = section if isinstance(section, dict) else {}
+    max_tool_iters_raw = sec.get("max_tool_iters", DEFAULT_MAX_TOOL_ITERS)
     if (
         not isinstance(max_tool_iters_raw, int)
         or isinstance(max_tool_iters_raw, bool)
@@ -236,22 +219,16 @@ def load_grounded_config(workspace: Workspace) -> GroundedConfig:
         raise GroundedConfigInvalid("'grounded.max_tool_iters' must be a positive integer if set")
 
     return GroundedConfig(
-        schema_model=schema_model,
-        values_model=values_model,
-        schema_api_key=schema_api_key,
-        values_api_key=values_api_key,
-        schema_api_key_env=schema_api_key_env,
-        values_api_key_env=values_api_key_env,
+        schema_model=schema.model,
+        values_model=values.model,
+        schema_api_key=schema.api_key,
+        values_api_key=values.api_key,
+        schema_api_key_env=schema.api_key_env,
+        values_api_key_env=values.api_key_env,
+        schema_api_base=schema.api_base,
+        values_api_base=values.api_base,
         max_tool_iters=max_tool_iters_raw,
     )
-
-
-def _validate_optional_str(value: Any, field_name: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise GroundedConfigInvalid(f"'{field_name}' must be a non-empty string if set")
-    return value
 
 
 # ---- Tool: get_page_words --------------------------------------------------
@@ -396,6 +373,7 @@ def generate_schema(
     llm_config = LLMConfig(
         model=config.schema_model,
         api_key=api_key,
+        api_base=config.schema_api_base,
         max_tokens=None,
         max_completion_tokens=_DEFAULT_MAX_COMPLETION_TOKENS,
         timeout=_DEFAULT_TIMEOUT_SECONDS,
@@ -543,6 +521,7 @@ def extract_values(
     schema = rnc_to_json_schema(rnc_schema)
     pdf_bytes = _pdf_path(workspace, file_id).read_bytes()
     api_key = _resolve_api_key(config.values_api_key, config.values_api_key_env)
+    api_base = config.values_api_base
 
     phase1_totals: dict[str, Any] = _empty_totals()
     phase3_totals: dict[str, Any] = _empty_totals()
@@ -587,6 +566,7 @@ def extract_values(
             tools=[_submit_values_tool(phase1_values_schema, with_layout=True)],
             model=config.values_model,
             api_key=api_key,
+            api_base=api_base,
             max_tool_iters=config.max_tool_iters,
             totals=phase1_totals,
         )
@@ -621,6 +601,7 @@ def extract_values(
                 unmatched=phase2_result.unmatched,
                 model=config.values_model,
                 api_key=api_key,
+                api_base=api_base,
                 max_tool_iters=config.max_tool_iters,
                 totals=phase3_totals,
             )
@@ -810,6 +791,7 @@ def _run_phase3(
     unmatched: list[UnmatchedItem],
     model: str,
     api_key: str | None,
+    api_base: str | None,
     max_tool_iters: int,
     totals: dict[str, Any],
 ) -> tuple[dict[str, Any], int, int]:
@@ -850,6 +832,7 @@ def _run_phase3(
             values=values,
             model=model,
             api_key=api_key,
+            api_base=api_base,
             max_tool_iters=max_tool_iters,
             totals=local_totals,
         )
@@ -882,6 +865,7 @@ def _phase3_call_for_page(
     values: dict[str, Any],
     model: str,
     api_key: str | None,
+    api_base: str | None,
     max_tool_iters: int,
     totals: dict[str, Any],
 ) -> dict[str, list[dict[str, Any]]]:
@@ -923,6 +907,7 @@ def _phase3_call_for_page(
     llm_config = LLMConfig(
         model=model,
         api_key=api_key,
+        api_base=api_base,
         max_tokens=None,
         max_completion_tokens=_DEFAULT_MAX_COMPLETION_TOKENS,
         temperature=_DEFAULT_VALUES_TEMPERATURE,
@@ -1171,6 +1156,7 @@ def _run_extract_loop(
     tools: list[dict[str, Any]],
     model: str,
     api_key: str | None,
+    api_base: str | None,
     max_tool_iters: int,
     totals: dict[str, Any],
 ) -> tuple[dict[str, Any], int]:
@@ -1190,6 +1176,7 @@ def _run_extract_loop(
     llm_config = LLMConfig(
         model=model,
         api_key=api_key,
+        api_base=api_base,
         max_tokens=None,
         max_completion_tokens=_DEFAULT_MAX_COMPLETION_TOKENS,
         temperature=_DEFAULT_VALUES_TEMPERATURE,
@@ -1514,7 +1501,7 @@ def _resolve_api_key(literal: str | None, env_name: str | None) -> str | None:
     if not key:
         raise AuthError(
             f"environment variable ${env_name} is not set "
-            "(referenced by a *_api_key_env field in config.json[grounded])"
+            "(referenced by a *_api_key_env field in config.toml[grounded])"
         )
     return key
 

@@ -16,7 +16,7 @@ For ``--text-mode digital``/``hybrid`` files, ``dg:style`` is derived
 deterministically from the PDF glyphs during grounding (see
 :mod:`dgml.style` / :mod:`dgml.xml_grounding`). OCR files carry no font
 facts, so their ``dg:style`` is empty — unless a workspace opts in via a
-``style`` section in ``config.json``, which lets a vision model read each
+``style`` section in ``config.toml``, which lets a vision model read each
 page image and report the observed formatting (see :mod:`dgml.style_llm`).
 
 This is off by default: **the section's presence is the
@@ -45,9 +45,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 
-from .errors import AuthError, CorruptMetadata, StyleConfigInvalid
-from .storage import Workspace, read_config
+from .config import load_merged_config
+from .errors import AuthError, StyleConfigInvalid
+from .models_config import ConfigSection, Tier, resolve_tiered_model
+from .storage import Workspace
 
 DEFAULT_MAX_TOKENS = 4000
 
@@ -70,64 +73,41 @@ class StyleConfig:
 
 
 def load_style_config(workspace: Workspace) -> StyleConfig | None:
-    """Read and validate the ``style`` section of ``config.json``.
+    """Read and validate the ``style`` section of the merged config.
 
-    Returns ``None`` when no config file exists or no ``style`` section is
-    present. Raises :class:`StyleConfigInvalid` when the section exists but
-    is malformed.
+    Returns ``None`` when no ``style`` section is present (the section's presence
+    is the on switch). When present, ``model`` may be omitted to fall back to the
+    ``[models].light`` tier. Raises :class:`StyleConfigInvalid` when malformed.
     """
-    if not workspace.config_path.exists():
-        return None
-
-    try:
-        data = read_config(workspace.config_path)
-    except CorruptMetadata as exc:
-        raise StyleConfigInvalid(f"{workspace.config_path} is not valid JSON: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise StyleConfigInvalid(f"{workspace.config_path} must contain a JSON object")
-
-    section = data.get("style")
+    merged = load_merged_config(workspace)
+    section = merged.get(ConfigSection.STYLE)
     if section is None:
-        return None
+        return None  # the section's presence is the on switch
     if not isinstance(section, dict):
-        raise StyleConfigInvalid("'style' must be a JSON object")
+        raise StyleConfigInvalid("'style' must be a table")
+    sec: dict[str, Any] = section
 
-    model = section.get("model")
-    if not isinstance(model, str) or not model.strip():
-        raise StyleConfigInvalid(
-            "'style.model' must be a non-empty string (the vision model that reads "
-            "page images, e.g. 'anthropic/claude-haiku-4-5')"
-        )
+    # Section present but no model → StyleConfigInvalid (the tier only supplies a
+    # model when the feature is on; it does not turn the feature on).
+    rm = resolve_tiered_model(
+        merged,
+        section_name=ConfigSection.STYLE,
+        tier=Tier.LIGHT,
+        invalid=StyleConfigInvalid,
+        missing=StyleConfigInvalid,
+    )
 
-    api_base = section.get("api_base")
-    if api_base is not None and (not isinstance(api_base, str) or not api_base):
-        raise StyleConfigInvalid("'style.api_base' must be a non-empty string if set")
-
-    api_key = section.get("api_key")
-    if api_key is not None and (not isinstance(api_key, str) or not api_key):
-        raise StyleConfigInvalid("'style.api_key' must be a non-empty string if set")
-
-    api_key_env = section.get("api_key_env")
-    if api_key_env is not None and (not isinstance(api_key_env, str) or not api_key_env):
-        raise StyleConfigInvalid("'style.api_key_env' must be a non-empty env var name if set")
-
-    if api_key is not None and api_key_env is not None:
-        raise StyleConfigInvalid(
-            "set at most one of 'style.api_key' / 'style.api_key_env', not both"
-        )
-
-    max_tokens = section.get("max_tokens", DEFAULT_MAX_TOKENS)
+    max_tokens = sec.get("max_tokens", DEFAULT_MAX_TOKENS)
     if max_tokens is not None and (
         not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1
     ):
         raise StyleConfigInvalid("'style.max_tokens' must be a positive integer if set")
 
     return StyleConfig(
-        model=model,
-        api_base=api_base,
-        api_key=api_key,
-        api_key_env=api_key_env,
+        model=rm.model,
+        api_base=rm.api_base,
+        api_key=rm.api_key,
+        api_key_env=rm.api_key_env,
         max_tokens=max_tokens,
     )
 
@@ -149,7 +129,7 @@ def resolve_api_key(config: StyleConfig) -> str | None:
     if not key:
         raise AuthError(
             f"environment variable ${config.api_key_env} is not set "
-            "(referenced by style.api_key_env in config.json)"
+            "(referenced by style.api_key_env in the config)"
         )
     return key
 

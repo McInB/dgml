@@ -52,6 +52,7 @@ from .classification import (
     load_classification_config,
     propose_new_docset_for_files,
 )
+from .config import load_merged_config
 from .dataset import WorkspaceFileDataset
 from .docsets import DocSetStore
 from .errors import (
@@ -62,9 +63,10 @@ from .errors import (
     IncrementalWithoutClusters,
 )
 from .llm_clustering import llm_cluster_files
+from .models_config import ConfigSection
 from .pages import PAGE_GLOB
 from .run_clustering import resolve_text_settings, run_clustering_detailed
-from .storage import Workspace, read_config, read_json
+from .storage import Workspace, read_json
 from .utils import unassigned_file_ids
 
 # Cap on how many files from a single cluster get sent to the LLM when
@@ -173,7 +175,7 @@ def load_clustering_preset(name: str) -> dict[str, Any]:
     """Load a bundled config preset (``small`` / ``light`` / ``medium`` / ``heavy``).
 
     Returns the preset's overrides dict (same shape as the ``clustering``
-    section of ``<workspace>/config.json``). Raises
+    section of ``<workspace>/config.toml``). Raises
     :class:`ClusteringConfigInvalid` for an unknown preset name.
     """
     if name not in CONFIG_PRESETS:
@@ -197,7 +199,7 @@ def resolve_clustering_overrides(
 
     ``config`` is the raw value of the CLI ``--config`` flag:
 
-    - ``None`` → the ``clustering`` section of ``<workspace>/config.json``
+    - ``None`` → the ``clustering`` section of ``<workspace>/config.toml``
       (:func:`load_clustering_overrides`), or ``{}`` when absent.
     - a preset name (``small`` / ``light`` / ``medium`` / ``heavy``) →
       :func:`load_clustering_preset`.
@@ -229,29 +231,19 @@ class _InternalResult:
 
 
 def load_clustering_overrides(workspace: Workspace) -> dict[str, Any]:
-    """Read the ``clustering`` section of ``<workspace>/config.json``.
+    """Read the ``clustering`` section of the merged config.
 
-    Returns ``{}`` when the file doesn't exist or has no ``clustering``
-    section — the bundled defaults in
-    :data:`dgml_core.run_clustering._CONFIG_RESOURCE` stand on their own.
-    Raises :class:`ClusteringConfigInvalid` when the file exists but is
-    malformed (not valid JSON, not a JSON object) or the ``clustering``
-    section itself isn't a JSON object. Field-level validation happens
-    later in :func:`dgml.run_clustering._build_config` after the merge.
+    Returns ``{}`` when no ``clustering`` section is present — the bundled
+    defaults in :data:`dgml_core.run_clustering._CONFIG_RESOURCE` stand on their
+    own. Raises :class:`ClusteringConfigInvalid` when the ``clustering`` section
+    isn't a table. Field-level validation happens later in
+    :func:`dgml.run_clustering._build_config` after the merge.
     """
-    if not workspace.config_path.exists():
-        return {}
-    try:
-        data = read_config(workspace.config_path)
-    except CorruptMetadata as exc:
-        raise ClusteringConfigInvalid(f"{workspace.config_path} is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ClusteringConfigInvalid(f"{workspace.config_path} must contain a JSON object")
-    section = data.get("clustering")
+    section = load_merged_config(workspace).get(ConfigSection.CLUSTERING)
     if section is None:
         return {}
     if not isinstance(section, dict):
-        raise ClusteringConfigInvalid("'clustering' section in config.json must be a JSON object")
+        raise ClusteringConfigInvalid("'clustering' section in the config must be a table")
     return section
 
 
@@ -259,7 +251,7 @@ def load_clustering_config_file(path: Path) -> dict[str, Any]:
     """Read a standalone clustering config JSON file (the CLI ``--config`` flag).
 
     The file is a JSON object holding the same fields the ``clustering``
-    section of ``<workspace>/config.json`` would (e.g. ``encoder_text``,
+    section of ``<workspace>/config.toml`` would (e.g. ``encoder_text``,
     ``scenario``); its contents are used directly as the overrides
     deep-merged over the bundled defaults in
     :data:`dgml_core.run_clustering._CONFIG_RESOURCE`. When supplied it
@@ -351,7 +343,7 @@ def clustering(
     empty maps) when every file is already assigned — cheap to use on resume.
 
     ``config`` selects the clustering configuration: ``None`` uses the
-    workspace ``config.json`` ``clustering`` section (bundled defaults when
+    workspace ``config.toml`` ``clustering`` section (bundled defaults when
     absent); a preset name (``small`` / ``light`` / ``medium`` / ``heavy``)
     loads a bundled preset; anything else is treated as a path to a standalone
     config JSON. See :func:`resolve_clustering_overrides`.
@@ -581,7 +573,7 @@ def clustering_internal(
         )
 
     # Clustering overrides. ``config`` may be a preset name, a path, or None
-    # (workspace config.json section). Missing config/section → empty dict
+    # (workspace config.toml section). Missing config/section → empty dict
     # and the bundled defaults stand. A malformed file/section/preset raises
     # ClusteringConfigInvalid, which the CLI surfaces as an error envelope.
     overrides = resolve_clustering_overrides(workspace, config=config)

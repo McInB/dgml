@@ -81,17 +81,24 @@ class ConvertOptions:
 
     # Transcription model — REQUIRED, no default. Which model runs is a
     # user-visible choice; the CLI sources it from the workspace's
-    # `generation.model` (config.json), never a silent code
+    # `generation.model` (config.toml), never a silent code
     # default. See dgml_core.generation.config.load_generation_config.
     model: str
-    # The labeling pass benefits most from a strong model; it is a handful of
-    # small-output calls per batch, so escalating it is cheap. None = reuse
-    # `model` (no second, separately-billed model introduced implicitly).
-    label_model: str | None = None
-    # API credentials for the transcription/labeling calls. None lets litellm
-    # fall back to its per-provider env-var conventions (ANTHROPIC_API_KEY, …).
+    # Labeling model for the single batch-wide semantic-labeling call —
+    # REQUIRED, no default. Named explicitly and never implicitly reused from
+    # `model`, so a second (separately-billed) model is always a deliberate
+    # choice; pass the same string as `model` if you want one model for both.
+    label_model: str
+    # Transcription-model credentials. None lets litellm fall back to its
+    # per-provider env-var conventions (ANTHROPIC_API_KEY, …).
     api_key: str | None = None
     api_base: str | None = None
+    # Labeling-model credentials, resolved independently of the transcription
+    # ones (the labeling model may name a different provider). They are NOT
+    # inherited from `api_key`/`api_base`; None lets litellm fall back to the
+    # provider's conventional env var.
+    label_api_key: str | None = None
+    label_api_base: str | None = None
     window_size: int = 10
     temperature: float = 0.0
     max_tokens: int = 32000
@@ -249,8 +256,19 @@ def convert_batch(
 
     # One aggregated usage row for the whole labeling pass: label_documents
     # threads this single config through every call, so a scope on it folds
-    # them into one row (gated on --debug via the config).
-    label_config = _config(opts, opts.label_model, operation=OPERATION_LABEL)
+    # them into one row (gated on --debug via the config). The labeling model is
+    # always configured independently of transcription (it may name a different
+    # provider), so it gets its own LLMConfig with its own credentials.
+    label_config = llm.LLMConfig(
+        model=opts.label_model,
+        api_key=opts.label_api_key,
+        api_base=opts.label_api_base,
+        temperature=opts.temperature,
+        max_tokens=opts.max_tokens,
+        workspace=opts.workspace,
+        debug=opts.debug,
+        operation=OPERATION_LABEL,
+    )
     label_config.context = {"doc_count": len(docs)}
     with llm.record_usage_for(label_config):
         label_documents(

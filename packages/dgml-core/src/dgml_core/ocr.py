@@ -12,7 +12,7 @@
 
 """OCR text extraction — abstract provider interface, config loader, dispatcher.
 
-Loads OCR config from ``<workspace>/config.json``, dispatches to the
+Loads OCR config from ``<workspace>/config.toml``, dispatches to the
 configured provider, and writes the same per-page JSON shape as
 :func:`dgml.text_extraction.extract_text_digital` so downstream code
 (``dgml check``, consumers) doesn't care which mode produced the text.
@@ -55,9 +55,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar
 
-from .errors import CorruptMetadata, OcrConfigInvalid, OcrConfigMissing, OcrFailed
+from .config import load_merged_config
+from .errors import OcrConfigInvalid, OcrConfigMissing, OcrFailed
+from .models_config import ConfigSection
 from .pages import PAGE_GLOB
-from .storage import Workspace, read_config
+from .storage import Workspace
 from .text_extraction import (
     PAGE_TEXT_FILENAME,
     PAGE_TEXT_GLOB,
@@ -100,33 +102,22 @@ class OcrConfig:
 
 
 def load_ocr_config(workspace: Workspace) -> OcrConfig:
-    """Read and validate the ``ocr`` section of ``<workspace>/config.json``.
+    """Read and validate the ``ocr`` section of ``<workspace>/config.toml``.
 
     Validation of provider-specific fields is delegated to each provider
     class (:meth:`OcrProvider.parse_config`) so this loader stays generic.
 
-    When no config file or no ``ocr`` section is present: on macOS, defaults
+    When no ``ocr`` section is present in the merged config: on macOS, defaults
     to the on-device provider (:data:`DEFAULT_OCR_PROVIDER`) and emits a
     warning; on other platforms (no built-in OCR engine) raises
     :class:`OcrConfigMissing`. Raises :class:`OcrConfigInvalid` when a
     config exists but is malformed.
     """
-    if not workspace.config_path.exists():
-        return _default_ocr_config()
-
-    try:
-        data = read_config(workspace.config_path)
-    except CorruptMetadata as exc:
-        raise OcrConfigInvalid(f"{workspace.config_path} is not valid JSON: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise OcrConfigInvalid(f"{workspace.config_path} must contain a JSON object")
-
-    ocr = data.get("ocr")
+    ocr = load_merged_config(workspace).get(ConfigSection.OCR)
     if ocr is None:
         return _default_ocr_config()
     if not isinstance(ocr, dict):
-        raise OcrConfigInvalid("'ocr' must be a JSON object")
+        raise OcrConfigInvalid("'ocr' must be a table")
 
     provider_str = ocr.get("provider")
     valid_providers = [p.value for p in OcrProviderName]
@@ -152,13 +143,13 @@ def _default_ocr_config() -> OcrConfig:
     """
     if sys.platform != "darwin":
         raise OcrConfigMissing(
-            "no OCR provider configured: add an 'ocr' section to config.json "
+            "no OCR provider configured: add an 'ocr' section to config.toml "
             "with provider 'aws' or 'azure' (on-device OCR is only available "
             "on macOS)"
         )
     warnings.warn(
         "no OCR provider configured; defaulting to the on-device macOS provider "
-        "(Apple Vision). Set ocr.provider in config.json to silence this warning.",
+        "(Apple Vision). Set ocr.provider in config.toml to silence this warning.",
         stacklevel=2,
     )
     return _PROVIDERS[DEFAULT_OCR_PROVIDER].parse_config({"provider": DEFAULT_OCR_PROVIDER.value})

@@ -293,7 +293,7 @@ def test_overrides_scenario_algorithm_knobs_apply() -> None:
     """Scenario clustering-algorithm knobs (``cluster_algorithm``,
     ``leiden_*``, ``reduce_*``) ARE overridable — they layer under the
     dynamic regime, so the leiden/UMAP bundled defaults take effect and
-    operators can retune them via config.json / --config."""
+    operators can retune them via config.toml / --config."""
     dataset = _FakeDataset(["a"])
     fake = _result(["a"], ["Foo"])
 

@@ -191,20 +191,29 @@ def _broadcast(event: dict[str, Any]) -> None:
             _pipeline_clients.remove(q)
 
 
-def _load_config_json(path: Path) -> dict[str, Any]:
-    """Parse a workspace ``config.json`` that may carry full-line ``//`` comments
-    (it is seeded verbatim from ``local_config.json``). Returns ``{}`` on any
-    read/parse error so a fresh classification section can still be written."""
-    try:
-        raw = path.read_text("utf-8")
-    except OSError:
-        return {}
-    raw = "\n".join("" if ln.lstrip().startswith("//") else ln for ln in raw.split("\n"))
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+def _write_workspace_config_toml(path: Path, model: str, api_key: str) -> None:
+    """Write a per-workspace ``config.toml`` that overrides the classification
+    and generation models with the operator's chosen ``model`` + ``api_key``.
+
+    This is resolution layer 3 (workspace), overriding the user-level
+    ``~/.config/dgml/config.toml`` written by ``dgml init``. The single model
+    input doubles as the labeling model; its key is set for both the
+    transcription and labeling calls."""
+
+    def esc(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    text = (
+        "[classification]\n"
+        f'model = "{esc(model)}"\n'
+        f'api_key = "{esc(api_key)}"\n\n'
+        "[generation]\n"
+        f'model = "{esc(model)}"\n'
+        f'label_model = "{esc(model)}"\n'
+        f'api_key = "{esc(api_key)}"\n'
+        f'label_api_key = "{esc(api_key)}"\n'
+    )
+    path.write_text(text, encoding="utf-8")
 
 
 def _api_key_env(model: str, api_key: str) -> dict[str, str]:
@@ -332,8 +341,8 @@ def _run_pipeline(body: dict[str, Any]) -> None:
 
     try:
         _broadcast({"type": "step", "name": "init", "status": "running"})
-        # `dgml init` seeds the shared local_config.json (idempotent); `workspace
-        # create` builds the workspace and copies that config into it. The
+        # `dgml init` writes the user-level ~/.config/dgml/config.toml (idempotent,
+        # provider auto-detected); `workspace create` builds the workspace. The
         # required --organization is embedded in docset namespace URIs.
         _run_dgml([*ws, "init"], env)
         _run_dgml([*ws, "workspace", "create", "--organization", "dgml-app-sample"], env)
@@ -344,19 +353,7 @@ def _run_pipeline(body: dict[str, Any]) -> None:
         _broadcast({"type": "step", "name": "add", "status": "done"})
 
         if model and api_key:
-            cfg_path = Path(abs_workspace) / "config.json"
-            existing = _load_config_json(cfg_path)
-            existing["classification"] = {"model": model, "api_key": api_key}
-            # `docset generate` reads its models from the 'generation' section
-            # (there are no --model flags); both model and label_model are
-            # required, so name both. The sample has one model input, so it
-            # doubles as the labeling model.
-            existing["generation"] = {
-                "model": model,
-                "label_model": model,
-                "api_key": api_key,
-            }
-            cfg_path.write_text(json.dumps(existing, indent=2), "utf-8")
+            _write_workspace_config_toml(Path(abs_workspace) / "config.toml", model, api_key)
 
         _broadcast({"type": "step", "name": "cluster", "status": "running"})
         try:
@@ -402,19 +399,7 @@ def _run_resume(body: dict[str, Any]) -> None:
 
     try:
         if model and api_key:
-            cfg_path = Path(abs_workspace) / "config.json"
-            existing = _load_config_json(cfg_path)
-            existing["classification"] = {"model": model, "api_key": api_key}
-            # `docset generate` reads its models from the 'generation' section
-            # (there are no --model flags); both model and label_model are
-            # required, so name both. The sample has one model input, so it
-            # doubles as the labeling model.
-            existing["generation"] = {
-                "model": model,
-                "label_model": model,
-                "api_key": api_key,
-            }
-            cfg_path.write_text(json.dumps(existing, indent=2), "utf-8")
+            _write_workspace_config_toml(Path(abs_workspace) / "config.toml", model, api_key)
 
         _broadcast({"type": "step", "name": "cluster", "status": "running"})
         try:

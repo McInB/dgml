@@ -85,7 +85,7 @@ class TextMode(StrEnum):
     """How text should be extracted at file-add time.
 
     ``DIGITAL`` uses pdfminer.six on the PDF. ``OCR`` runs the cloud
-    provider configured in ``<workspace>/config.json``. ``HYBRID`` runs
+    provider configured in ``<workspace>/config.toml``. ``HYBRID`` runs
     both and merges them by bounding-box overlap (OCR wins on conflict);
     see :mod:`dgml.hybrid`.
     """
