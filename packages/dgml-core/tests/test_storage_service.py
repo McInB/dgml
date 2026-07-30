@@ -14,7 +14,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -29,12 +31,9 @@ from dgml_core import (
     storage_fingerprint,
 )
 from dgml_core.errors import StorageConfigInvalid, StorageProviderUnresolvable
+from dgml_core.hashing import CHUNK_SIZE
 
-
-def local_store(root: Path) -> LocalStore:
-    cfg = StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=root)
-    return LocalStore(LocalStore.parse_config(cfg))
-
+from .conftest import DefaultBridgeStore, default_bridge_store, local_store
 
 # --------------------------------------------------------------------------- blobs
 
@@ -128,6 +127,27 @@ def test_upload_download_blob(tmp_path: Path) -> None:
     dest = tmp_path / "out" / "dl.bin"
     store.download_blob("files/d/e.bin", dest)
     assert dest.read_bytes() == b"payload"
+
+
+def test_download_blob_missing_key_raises(tmp_path: Path) -> None:
+    """DGMLX export stages every leaf through ``download_blob``, so a blob that
+    vanished between listing and export must surface as ``FileNotFoundError``
+    — the same contract ``get_blob`` gave that code before."""
+    store = local_store(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        store.download_blob("files/d/gone.bin", tmp_path / "out" / "dl.bin")
+
+
+def test_download_blob_overwrites_existing_dest(tmp_path: Path) -> None:
+    """Re-exporting an unpacked bundle over an older one must replace it, not
+    append or fail — ``write_bytes`` used to guarantee this."""
+    store = local_store(tmp_path)
+    store.put_blob("files/d/e.bin", b"new")
+    dest = tmp_path / "out" / "dl.bin"
+    dest.parent.mkdir()
+    dest.write_bytes(b"stale-and-longer")
+    store.download_blob("files/d/e.bin", dest)
+    assert dest.read_bytes() == b"new"
 
 
 def test_blob_key_traversal_rejected(tmp_path: Path) -> None:
@@ -322,22 +342,6 @@ def test_third_party_plugin_resolves_by_dotted_path() -> None:
 # --------------------------------------------------------------------------- path bridge
 
 
-class _DefaultBridgeStore(LocalStore):
-    """A store with LocalStore's blob primitives but the *base* path bridge —
-    exercises the default download-to-temp / upload-on-exit implementations that
-    every third-party store inherits (LocalStore itself overrides them)."""
-
-    materialize = StorageService.materialize
-    staged_write = StorageService.staged_write
-    materialize_dir = StorageService.materialize_dir
-    working_dir = StorageService.working_dir
-
-
-def default_bridge_store(root: Path) -> _DefaultBridgeStore:
-    cfg = LocalStore.parse_config(StorageConfig(DEFAULT_STORAGE_PROVIDER, root))
-    return _DefaultBridgeStore(cfg)
-
-
 def test_materialize_local_yields_real_path_zero_copy(tmp_path: Path) -> None:
     store = local_store(tmp_path)
     store.put_blob("files/a/report.pdf", b"%PDF-1.7")
@@ -439,3 +443,70 @@ def test_working_dir_default_syncs_down_and_up(tmp_path: Path) -> None:
     assert not held.exists()  # temp cleaned up
     assert store.get_blob("docsets/d1/cache/new.json") == b"new"  # uploaded out
     assert not store.blob_exists("docsets/d1/schema.json")  # sibling not uploaded
+
+
+# --------------------------------------------------------------------------- sha256_blob
+
+# A payload spanning several CHUNK_SIZE reads, with a deliberate non-multiple
+# tail, so a store that mishandled chunk boundaries would produce a different
+# digest than the one-shot reference. Deterministic on purpose: a hash mismatch
+# has to be reproducible from the same bytes to be debuggable.
+_MULTI_CHUNK = bytes(range(256)) * ((CHUNK_SIZE * 2) // 256) + b"tail" * 4 + b"!"
+
+
+# Both path-bridge implementations: LocalStore's zero-copy override and the base
+# download-to-temp default that every third-party store inherits.
+StoreFactory = Callable[[Path], LocalStore]
+STORE_FACTORIES: list[StoreFactory] = [local_store, default_bridge_store]
+
+
+@pytest.mark.parametrize("make_store_", STORE_FACTORIES)
+def test_sha256_blob_is_plain_sha256_of_the_exact_stored_bytes(
+    tmp_path: Path, make_store_: StoreFactory
+) -> None:
+    """The conformance test for ``sha256_blob``'s documented contract.
+
+    Attestation leaves — and therefore the Merkle roots anchored on chain — are
+    built from this digest, so it must equal the plain SHA-256 of the whole byte
+    sequence and never a derived checksum (an S3 multipart ETag or composite
+    ``ChecksumSHA256`` is a checksum-of-checksums and would silently produce
+    divergent roots). Asserted for both the zero-copy ``LocalStore`` path and the
+    base download-to-temp path that every third-party store inherits.
+    """
+    store = make_store_(tmp_path)
+    key = "files/a/report.pdf"
+    store.put_blob(key, _MULTI_CHUNK)
+    expected = hashlib.sha256(_MULTI_CHUNK).hexdigest()
+    assert store.sha256_blob(key) == expected
+    # ...and equals hashing the get_blob result, the API it replaces.
+    assert store.sha256_blob(key) == hashlib.sha256(store.get_blob(key)).hexdigest()
+
+
+@pytest.mark.parametrize("make_store_", STORE_FACTORIES)
+def test_sha256_blob_handles_empty_blob(tmp_path: Path, make_store_: StoreFactory) -> None:
+    store = make_store_(tmp_path)
+    store.put_blob("files/a/empty.bin", b"")
+    assert store.sha256_blob("files/a/empty.bin") == hashlib.sha256(b"").hexdigest()
+
+
+@pytest.mark.parametrize("make_store_", STORE_FACTORIES)
+def test_sha256_blob_missing_raises(tmp_path: Path, make_store_: StoreFactory) -> None:
+    store = make_store_(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        store.sha256_blob("files/a/nope.pdf")
+
+
+@pytest.mark.parametrize("bridge", [LocalStore, DefaultBridgeStore])
+def test_sha256_blob_does_not_load_the_blob_whole(tmp_path: Path, bridge: type[LocalStore]) -> None:
+    """The point of the method: no whole-blob allocation. A store whose
+    ``get_blob`` is a landmine still hashes fine — both through ``LocalStore``'s
+    zero-copy ``materialize`` and through the inherited download-to-temp default,
+    so neither path can quietly regress to a whole read."""
+
+    class _NoGetBlob(bridge):  # type: ignore[valid-type,misc]
+        def get_blob(self, key: str) -> bytes:
+            raise AssertionError(f"get_blob called for {key!r}")
+
+    store = _NoGetBlob(LocalStore.parse_config(StorageConfig(DEFAULT_STORAGE_PROVIDER, tmp_path)))
+    store.put_blob("files/a/report.pdf", _MULTI_CHUNK)
+    assert store.sha256_blob("files/a/report.pdf") == hashlib.sha256(_MULTI_CHUNK).hexdigest()

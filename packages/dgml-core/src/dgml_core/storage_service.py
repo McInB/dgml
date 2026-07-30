@@ -38,6 +38,10 @@ Writing your own store
    and document methods.
 3. Make the class importable by the interpreter running dgml.
 4. Set ``storage.provider`` to ``"your_pkg.mod:YourStore"`` in ``config.json``.
+
+The path bridge (:meth:`~StorageService.materialize` and friends) and
+:meth:`~StorageService.sha256_blob` are concrete — you get working versions from
+the abstract methods above and only override them if your backend can do better.
 """
 
 from __future__ import annotations
@@ -54,6 +58,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from .errors import StorageConfigInvalid, StorageProviderUnresolvable
+from .hashing import sha256_file
 from .storage import Workspace, read_config
 
 # The bundled default: local disk. Used when ``config.json`` has no ``storage``
@@ -128,9 +133,11 @@ class StorageService(ABC):
 
         Returns the whole blob in memory — fine for DGML's artifact sizes (PDFs,
         page images, schemas, one dgml.xml), which is the working assumption
-        throughout. A caller that must handle very large blobs without loading
-        them should stream instead via :meth:`download_blob` / :meth:`materialize`
-        to a path, then read/hash it chunk-wise."""
+        throughout. Use this only when the bytes themselves are needed (parsing
+        XML, base64-encoding an image, ``json.loads``). A caller that only needs
+        a digest should use :meth:`sha256_blob`; one that needs a real path
+        should use :meth:`download_blob` / :meth:`materialize`. Both avoid
+        holding the blob whole."""
 
     @abstractmethod
     def delete_blob(self, key: str) -> None:
@@ -156,11 +163,16 @@ class StorageService(ABC):
     #
     # Some pipeline steps speak *paths*, not bytes: ghostscript renders page
     # images to ``-sOutputFile=<dir>/page_%d.png``, pdfminer / the PDF converter
-    # read a PDF path, ``lxml.etree.parse`` wants a path. These two concrete
-    # helpers bridge that gap on top of the blob primitives, so every store gets
-    # them for free; ``LocalStore`` overrides both for a zero-copy passthrough
-    # (the key already *is* an on-disk path), keeping local I/O byte-for-byte
-    # identical to the pre-store code.
+    # read a PDF path, ``lxml.etree.parse`` wants a path. These concrete helpers
+    # bridge that gap on top of the blob primitives, so every store gets them for
+    # free; ``LocalStore`` overrides each one for a zero-copy passthrough (the key
+    # already *is* an on-disk path), keeping local I/O byte-for-byte identical to
+    # the pre-store code.
+    #
+    # A remote store overriding these should stage under ``StorageConfig.root``
+    # rather than the default ``tempfile`` location: ``TMPDIR`` is a RAM-backed
+    # tmpfs on many container images, which would silently turn a bounded-memory
+    # read back into a whole-blob allocation plus a copy.
 
     @contextmanager
     def materialize(self, key: str) -> Iterator[Path]:
@@ -235,6 +247,30 @@ class StorageService(ABC):
             for path in sorted(work.rglob("*")):
                 if path.is_file():
                     self.upload_blob(base + path.relative_to(work).as_posix(), path)
+
+    # ---- Derived reads — composed from the primitives above ----
+
+    def sha256_blob(self, key: str) -> str:
+        """Return the lowercase hex SHA-256 digest of the blob at ``key``.
+
+        The digest of the blob's **exact stored bytes** — the same value as
+        ``hashlib.sha256(self.get_blob(key)).hexdigest()``, computed without ever
+        holding the whole blob in memory. This is what attestation leaves are
+        built from, so it is part of DGML's on-chain contract: an override MUST
+        return the plain SHA-256 of the full byte sequence and never a derived
+        checksum (S3's multipart ETag and composite ``ChecksumSHA256`` are
+        checksums-of-checksums and are **not** this value).
+
+        Default: :meth:`materialize` plus the chunked
+        :func:`dgml_core.hashing.sha256_file`. On ``LocalStore`` that is
+        zero-copy — the key already *is* an on-disk path, so the real file is
+        read in fixed-size chunks with no temp copy and no whole-blob
+        allocation. On a remote store it is a managed (ranged, retryable)
+        download to a temp file rather than one long-lived response body, which
+        is what makes hashing a large artifact reliable there. Raises
+        :class:`FileNotFoundError` if the blob is absent."""
+        with self.materialize(key) as path:
+            return sha256_file(path)
 
     # ---- JSON documents — modeled on the MongoDB collection API ----
 

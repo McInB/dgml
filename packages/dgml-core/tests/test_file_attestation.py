@@ -34,6 +34,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from dgml_core import DEFAULT_STORAGE_PROVIDER, LocalStore, StorageConfig
 from dgml_core.errors import (
     AttestationInvalid,
     CorruptMetadata,
@@ -61,6 +62,8 @@ from dgml_core.file_attestation import (
 from dgml_core.merkle import merkle_root, merkle_root_from_hashes
 from dgml_core.storage import Workspace, write_json_atomic
 from lxml import etree  # type: ignore[import-untyped]
+
+from .conftest import default_bridge_store
 
 # --- minimal on-disk fixture helpers ----------------------------------------
 
@@ -1065,3 +1068,190 @@ def test_collect_from_attestation_missing_artifact_raises(workspace: Workspace) 
     (out_dir / "page_images" / "page_1.png").unlink()
     with pytest.raises(AttestationInvalid, match="missing artifact"):
         verify_attestation_dir(out_dir)
+
+
+# --- bounded-memory reads + hash stability ----------------------------------
+#
+# Attestation hashes artifacts it never otherwise reads, so no leaf may load a
+# blob whole: the source document is the one leaf with no size bound (it is
+# whatever PDF the user added). The tests below pin both halves of that — that
+# the whole-blob API is not reached, and that avoiding it did not change a
+# single hash.
+
+# Deterministic, and larger than CHUNK_SIZE where it matters, so a chunk
+# boundary is genuinely crossed on the way to the golden root below.
+_GOLDEN_SOURCE = b"%PDF-1.4\n" + b"golden-source-bytes\n" * 10_000  # 200_009 bytes
+_GOLDEN_PAGE_1 = b"golden-png-page-1"  # single chunk
+_GOLDEN_PAGE_2 = b"golden-png-page-2\n" * 8_000  # 144_000 bytes: multi-chunk
+_GOLDEN_FULL_SCHEMA = "# Role: root\nstart = element dg:chunk { text }\n"
+_GOLDEN_EXTRACTION_SCHEMA = 'namespace docset = "http://www.dgml.io/acme/golden#"\n'
+_GOLDEN_DGML_XML = b"<dg:chunk xmlns:dg='http://dgml.io/golden'><a>x</a></dg:chunk>"
+
+# Frozen literals, deliberately not recomputed — their value is being
+# independent of whatever the hashing code currently does. These digests are
+# what `dgml stake` anchors on chain, so if this test fails, the format changed:
+# treat it as a breaking change and find out why, rather than pasting in the new
+# values.
+_GOLDEN_FILE_ONLY_ROOT = "4eaf62cb4fd851d84460302b178c8c4b3305e39ca22a89338ac78bb9153a71ee"
+_GOLDEN_DOCSET_ROOT = "cc89736b9055c57c04a6970f0637651bbcf0ff80fd43afccbc3bd41ab3f728db"
+_GOLDEN_LEAVES = {
+    "source": "fa4e141fdb9b3ded91fbe19c2fab0468108afedafdbbd2e988908086452c884d",
+    "page_image[1]": "87deef5e03609886b29e883ca1469fd843cd1eb1e29e4962ea8c385f4ab3eb5f",
+    "page_image[2]": "e2e74f0eb72ab58e7954f37fb61c3a02018ae10c459c55309f4d8840c4b59483",
+    "full_schema": "6c9e4f9b6b690dd58a551a0c6a3c078b8dd09f0931a8e53876e116cc00a56779",
+    "extraction_schema": "b93069efd02d43c5c536660c470a684321f2808fa4fa719415ff34431360259f",
+    "dgml_xml": "25f693ccc9f3fcb5445b5e5ae0c778de70bc3580fcdc950e5021d652002154a1",
+}
+
+
+def _seed_golden(ws: Workspace) -> None:
+    """Seed the fixture the golden root above was captured from."""
+    file_dir = ws.file_dir("f001")
+    file_dir.mkdir(parents=True)
+    (file_dir / "contract.pdf").write_bytes(_GOLDEN_SOURCE)
+    write_json_atomic(
+        ws.file_json_path("f001"),
+        {
+            "id": "f001",
+            "original_path": "/src/contract.pdf",
+            "original_filename": "contract.pdf",
+            "sha256": "0" * 64,
+            "added_at": "2026-06-05T00:00:00Z",
+            "page_count": 2,
+            "text_mode": "digital",
+            "page_image_dpi": 300,
+            "page_image_renderer": "ghostscript",
+            "pdf_converter": None,
+        },
+    )
+    pages_dir = ws.file_pages_dir("f001")
+    pages_dir.mkdir(parents=True)
+    (pages_dir / "page_1.png").write_bytes(_GOLDEN_PAGE_1)
+    (pages_dir / "page_2.png").write_bytes(_GOLDEN_PAGE_2)
+    _seed_docset(
+        ws, "ds01", full_schema=_GOLDEN_FULL_SCHEMA, extraction_schema=_GOLDEN_EXTRACTION_SCHEMA
+    )
+    _seed_dgml_xml(ws, "ds01", "contract", _GOLDEN_DGML_XML)
+
+
+def test_attestation_root_golden_vector(workspace: Workspace) -> None:
+    """Frozen leaf hashes and Merkle roots over multi-chunk artifacts.
+
+    Without this the suite could not tell whether a hashing refactor changed a
+    root, because every other test either recomputes the expectation the same
+    way the code does or asserts only on structure.
+    """
+    _seed_golden(workspace)
+
+    file_only = attest_file(workspace, "f001")
+    assert file_only.root == _GOLDEN_FILE_ONLY_ROOT
+
+    with_docset = attest_file(workspace, "f001", "ds01")
+    assert with_docset.root == _GOLDEN_DOCSET_ROOT
+    assert {leaf.slot_id: leaf.leaf_hash for leaf in with_docset.leaves} == _GOLDEN_LEAVES
+
+
+def test_binary_leaf_hash_is_chunked_sha256_of_stored_bytes(workspace: Workspace) -> None:
+    """A binary leaf is the plain SHA-256 of the blob, crossing chunk boundaries
+    — i.e. sha256_blob agrees with a one-shot hash of the same bytes."""
+    _seed_golden(workspace)
+    leaves = {leaf.slot_id: leaf for leaf in collect_file_version(workspace, "f001").artifacts}
+    for slot_id, payload in (
+        ("source", _GOLDEN_SOURCE),
+        ("page_image[2]", _GOLDEN_PAGE_2),
+    ):
+        assert leaves[slot_id].leaf_hash == hashlib.sha256(payload).hexdigest()
+
+
+class _NoWholeBlobStore(LocalStore):
+    """Fails if any artifact is read whole into memory.
+
+    ``allow`` names the keys for which ``get_blob`` is legitimate — only the
+    DGML XML leaf, whose hash is the merkle_root of the parsed tree rather than
+    a digest of the file, plus the JSON documents that go through get_doc.
+    """
+
+    allow_suffixes: tuple[str, ...] = (".dgml.xml",)
+
+    def get_blob(self, key: str) -> bytes:
+        if not key.endswith(self.allow_suffixes):
+            raise AssertionError(f"whole-blob read of {key!r} during attestation")
+        return super().get_blob(key)
+
+
+@pytest.fixture
+def no_whole_blob_workspace(workspace: Workspace, monkeypatch: pytest.MonkeyPatch) -> Workspace:
+    store = _NoWholeBlobStore(
+        LocalStore.parse_config(StorageConfig(DEFAULT_STORAGE_PROVIDER, workspace.root))
+    )
+    monkeypatch.setattr(Workspace, "store", property(lambda self: store))
+    return workspace
+
+
+def test_collect_never_reads_a_binary_artifact_whole(no_whole_blob_workspace: Workspace) -> None:
+    ws = no_whole_blob_workspace
+    _seed_golden(ws)
+    # Fails on the pre-change implementation at the source slot.
+    version = collect_file_version(ws, "f001", "ds01")
+    assert [a.slot_id for a in version.artifacts] == list(_GOLDEN_LEAVES)
+
+
+def test_export_never_reads_a_binary_artifact_whole(no_whole_blob_workspace: Workspace) -> None:
+    ws = no_whole_blob_workspace
+    _seed_golden(ws)
+    out_dir = ws.root.parent / "bundle"
+    attestation, _, _ = _export(ws, "f001", out_dir, "ds01")
+    assert attestation.root == _GOLDEN_DOCSET_ROOT
+    # the bundle is complete and self-verifying despite never buffering a blob
+    assert (out_dir / "source" / "contract.pdf").read_bytes() == _GOLDEN_SOURCE
+    assert verify_attestation_dir(out_dir).valid is True
+
+
+def test_verify_never_reads_a_binary_artifact_whole(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verify side holds bundle paths, not blobs, so it must hash off the
+    path — this is the side a third party runs on an untrusted bundle."""
+    _seed_golden(workspace)
+    out_dir = workspace.root.parent / "bundle"
+    _export(workspace, "f001", out_dir, "ds01")
+
+    real_read_bytes = Path.read_bytes
+
+    def guarded(self: Path) -> bytes:
+        if self.suffix not in (".xml",):
+            raise AssertionError(f"whole-file read of {self.name!r} during verify")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded)
+    assert verify_attestation_dir(out_dir).valid is True
+
+
+def test_roots_identical_across_path_bridge_implementations(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hashing now runs through the path bridge, so a store using the *base*
+    download-to-temp bridge (what every third-party store inherits) must produce
+    byte-identical leaves and roots to LocalStore's zero-copy override."""
+    _seed_golden(workspace)
+    local = attest_file(workspace, "f001", "ds01")
+
+    monkeypatch.setattr(Workspace, "store", property(lambda self: default_bridge_store(self.root)))
+    bridged = attest_file(workspace, "f001", "ds01")
+
+    assert bridged.root == local.root == _GOLDEN_DOCSET_ROOT
+    assert [(a.slot_id, a.leaf_hash) for a in bridged.leaves] == [
+        (a.slot_id, a.leaf_hash) for a in local.leaves
+    ]
+
+
+def test_export_and_verify_through_default_path_bridge(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_golden(workspace)
+    monkeypatch.setattr(Workspace, "store", property(lambda self: default_bridge_store(self.root)))
+    out_dir = workspace.root.parent / "bundle"
+    attestation, _, _ = _export(workspace, "f001", out_dir, "ds01")
+    assert attestation.root == _GOLDEN_DOCSET_ROOT
+    assert (out_dir / "source" / "contract.pdf").read_bytes() == _GOLDEN_SOURCE
+    assert verify_attestation_dir(out_dir).valid is True
