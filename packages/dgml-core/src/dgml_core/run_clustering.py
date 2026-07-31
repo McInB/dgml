@@ -111,9 +111,13 @@ class DocPrediction:
 
     ``cluster_name`` is the assigned cluster/category name (an existing
     category name, or an emergent ``"unknown_N"`` bucket). ``confidence``
-    is the assignment confidence in ``[0, 1]`` when the scenario produced
-    one (nearest-prototype scenarios S2-S5), or ``None`` for emergent
-    clusters and for scenarios that don't expose a confidence (S1).
+    is the assignment confidence in ``[0, 1]``: the nearest-prototype softmax
+    peak for S2-S5, and — since S1 exposes one too — the clustering-geometry
+    confidence for the unsupervised path (peak softmax over centroid
+    distances, ``0.0`` for documents the algorithm flagged as noise). Both are
+    ordinal signals, not calibrated probabilities: comparable *within* a run,
+    not across runs or configs. ``None`` only when the underlying scenario
+    produced no score for a document.
     """
 
     cluster_name: str

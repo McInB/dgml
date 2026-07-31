@@ -307,6 +307,17 @@ presets use Leiden, but HDBSCAN pairs well with dense (vision) encoders.
 | `cluster_algorithm` | Clustering algorithm: `leiden` (default here), `hdbscan`, `kmeans` (needs `k_clusters`), `dbscan`, `optics`, … | `leiden` | Switch to `hdbscan` for dense encoders / when you want automatic noise rejection. | — |
 | `hdbscan_min_cluster_size` | Smallest admissible cluster; the main HDBSCAN dial. | `2` | Fewer, larger clusters and more aggressive noise flagging. | More, smaller clusters (min is 2). |
 
+**Confidence — how sure the run is about each document** (`scenario.*`).
+A fresh clustering run reports a per-document confidence: the softmax peak
+over that document's distances to the discovered cluster centroids (docs the
+algorithm routed to the noise bucket get `0.0`). It's an **ordinal** signal —
+useful for ranking the least-certain documents for a spot check, *not* a
+calibrated probability, and not comparable across runs or configs.
+
+| Parameter | What it controls | Default | Raise it when… | Lower it when… |
+|---|---|---|---|---|
+| `confidence_temperature` | Softmax temperature for that confidence. `auto` scales it to the distance between clusters, so the scores spread out instead of all pinning at `1.00` when the clusters are far apart (which is the norm after a UMAP reduction). | `auto` | Pin a float `> 1` for uniformly more conservative scores. | Pin `1.0` to read the raw softmax peak with no rescaling. |
+
 **Incremental novelty gate** (`scenario.*`, `--mode incremental`). These
 decide whether a *new* document fits an existing DocSet or is "novel" and
 opens a new cluster. The `dgml cluster --mode incremental` path ships a

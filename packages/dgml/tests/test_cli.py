@@ -644,6 +644,44 @@ def test_cluster_assigns_unassigned_files_to_docsets(
 
 
 @needs_gs
+def test_cluster_reports_confidence_for_a_new_docset(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file placed in a DocSet created this run still carries the clusterer's
+    confidence. Emergent clusters used to be hardcoded to `null` here; the
+    fresh-clustering path scores documents against the cluster centroids, so
+    that score has to survive into `assignments`."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    write_classification_config(
+        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+    )
+    main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
+    fid = _read_stdout(capsys)["file"]["id"]
+
+    response = _tool_response(
+        "create_new_docset",
+        {"name": "Invoices", "description": "billing docs", "key_questions": ["Total?"]},
+    )
+    with (
+        patch("litellm.completion", return_value=response),
+        patch(
+            "dgml_core.clustering.run_clustering_detailed",
+            return_value={fid: _dp("unknown_0", 0.42)},
+        ),
+    ):
+        rc = main(_ws_args(ws) + ["cluster"])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["assignments"][fid] == {
+        "docset": "Invoices",
+        "confidence": 0.42,
+        "is_new": True,
+    }
+
+
+@needs_gs
 def test_cluster_skip_existing_is_noop_when_all_assigned(
     tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

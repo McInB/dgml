@@ -334,15 +334,18 @@ def clustering(
       already existed before this run (only meaningful for incremental).
     - ``n_new_clusters``: number of *new* DocSets created this run.
     - ``assignments``: ``{file_id: {"docset", "confidence", "is_new"}}``
-      for every successfully-assigned file — ``confidence`` is in ``[0, 1]``,
+      for every successfully-assigned file — ``confidence`` is in ``[0, 1]``
       and ``is_new`` flags files that landed in a DocSet created this run.
-      What ``confidence`` *means* depends on ``method``: for ``embedding``
-      it is the nearest-prototype confidence (``null`` for emergent
-      clusters, which have no prototype to be near); for ``llm`` it is the
+      What ``confidence`` *means* depends on ``method``. For ``embedding``
+      it is the nearest-prototype confidence for files matched against
+      existing DocSets, and the clustering-geometry confidence (peak softmax
+      over centroid distances) for files placed by a fresh clustering run;
+      ``null`` when the clusterer produced no score. For ``llm`` it is the
       model's self-reported confidence in the group the file was put in,
       shared by every member of that group, and ``null`` when the model
-      declined to report one. Neither is a calibrated probability — treat
-      both as a ranking over which assignments to review first.
+      declined to report one. Neither is a calibrated probability — both are
+      an ordinal ranking over which assignments to review first, comparable
+      within one run only.
 
     ``skip_existing`` makes the whole call a no-op (returns ``skipped: True``,
     empty maps) when every file is already assigned — cheap to use on resume.
@@ -471,12 +474,15 @@ def clustering(
                 clusters[file_id] = new_name
                 assignments[file_id] = {
                     "docset": new_name,
-                    # Read from the clusterer rather than hardcoded null. For
-                    # the embedding method this is null anyway (an emergent
-                    # cluster has no prototype to measure distance to), but the
-                    # llm method's confidence is a judgement about the *group*,
-                    # which is exactly what an emergent cluster is — so it is
-                    # every bit as meaningful here as on a matched DocSet.
+                    # Read from the clusterer rather than hardcoded null. An
+                    # emergent cluster has no prototype to measure a distance
+                    # to, but both methods now have something real to say
+                    # here: the fresh-clustering path reports a confidence
+                    # from the clustering geometry itself (peak softmax over
+                    # centroid distances), and the llm method's confidence is
+                    # a judgement about the *group*, which is exactly what an
+                    # emergent cluster is. Files nothing scored still come
+                    # back as ``None``.
                     "confidence": internal.confidences.get(file_id),
                     "is_new": True,
                 }

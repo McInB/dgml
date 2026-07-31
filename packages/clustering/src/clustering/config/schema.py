@@ -345,6 +345,26 @@ class ScenarioConfig(_StrictModel):
     ] = "none"
     reduce_dim: int = 0
 
+    # ── Ordinal confidence temperature (S1) ───────────────────────────────
+    confidence_temperature: float | Literal["auto"] = "auto"
+    """Softmax temperature for the S1 unsupervised ordinal confidence signal.
+
+    ``"auto"`` (default) scales it to the median inter-centroid distance so
+    confidences spread across ``[1/C, 1]`` instead of saturating at ``1.0``
+    when clusters are well separated (e.g. after a UMAP reduction) — which is
+    what makes the column rankable instead of a column of ties. A positive
+    float pins an explicit temperature (``1.0`` = the raw softmax-peak,
+    pre-rescaling behavior)."""
+
+    @model_validator(mode="after")
+    def _check_confidence_temperature(self) -> ScenarioConfig:
+        t = self.confidence_temperature
+        # Caught here rather than in ``cluster_confidence`` so a bad value is a
+        # config error up front, not a failure partway through a long run.
+        if not isinstance(t, str) and t <= 0.0:
+            raise ValueError(f"confidence_temperature must be > 0 or 'auto'; got {t}.")
+        return self
+
     @model_validator(mode="after")
     def _check_name_prototype_blend(self) -> ScenarioConfig:
         a = self.name_prototype_blend
