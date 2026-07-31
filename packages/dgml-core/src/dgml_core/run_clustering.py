@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -69,6 +69,7 @@ from clustering.scenarios.s3_partial_few_shot import S3PartialFewShot
 from clustering.scenarios.s4_zero_shot import S4ZeroShot
 from clustering.scenarios.s5_full_supervised import S5FullSupervised
 
+from .classification import ClassificationConfig
 from .errors import ClusteringConfigInvalid
 
 _CONFIG_RESOURCE = "clustering_config.json"
@@ -111,13 +112,26 @@ class DocPrediction:
 
     ``cluster_name`` is the assigned cluster/category name (an existing
     category name, or an emergent ``"unknown_N"`` bucket). ``confidence``
-    is the assignment confidence in ``[0, 1]`` when the scenario produced
-    one (nearest-prototype scenarios S2-S5), or ``None`` for emergent
-    clusters and for scenarios that don't expose a confidence (S1).
+    is the assignment confidence in ``[0, 1]``: the nearest-prototype softmax
+    peak for S2-S5, and — since S1 exposes one too — the clustering-geometry
+    confidence for the unsupervised path (peak softmax over centroid
+    distances, ``0.0`` for documents the algorithm flagged as noise). Both are
+    ordinal signals, not calibrated probabilities: comparable *within* a run,
+    not across runs or configs — unless ``scenario.calibration`` is configured,
+    in which case the number is the calibrated one and comparable across runs.
+    ``None`` only when the underlying scenario produced no score for a document.
+
+    ``review`` flags a document whose assignment the run is not confident
+    enough about to apply unattended, and which should be routed to a human.
+    It is *orthogonal* to ``cluster_name``: a flagged document still carries
+    the assignment it would have got anyway, so a caller that ignores the flag
+    behaves exactly as before. Always ``False`` unless
+    ``scenario.calibration`` sets a coverage target or an abstain floor.
     """
 
     cluster_name: str
     confidence: float | None
+    review: bool = False
 
 
 def run_clustering(
@@ -159,6 +173,8 @@ def run_clustering_detailed(
     support_dataset: DocumentDataset | None = None,
     overrides: dict[str, Any] | None = None,
     cache_dir: Path | None = None,
+    classification_config: ClassificationConfig | None = None,
+    debug: bool = False,
 ) -> dict[str, DocPrediction]:
     """Cluster ``dataset`` and return ``{doc_id: DocPrediction}``.
 
@@ -182,6 +198,13 @@ def run_clustering_detailed(
     a partial ``{"encoder_text": {"name": "e5"}}`` leaves every other
     section (fusion, manifold, training, …) at its bundled default.
     Unrecognized fields surface as a :class:`ClusteringConfigInvalid`.
+
+    ``classification_config`` enables the optional LLM consolidation pass
+    over the low-confidence tail (see :mod:`dgml_core.consolidation`). It is
+    only consulted when the resolved config also sets
+    ``scenario.consolidation.enabled``; without it — or without a usable model
+    / API key — the run stays purely embedding-based. ``debug`` is forwarded to
+    that pass's LLM calls and is otherwise unused.
     """
     if n_samples_per_category < 0:
         raise ValueError(f"n_samples_per_category must be >= 0; got {n_samples_per_category}.")
@@ -206,6 +229,25 @@ def run_clustering_detailed(
     )
     result = scenario.fit_predict(dataset, support_dataset)
 
+    # Optional LLM consolidation of the low-confidence tail. Gated by
+    # ``scenario.consolidation.enabled`` and only when a classification config
+    # (⇒ a usable model + api key) is available; the adjudicator is built here
+    # in the orchestrator so the framework package stays LLM-free. It soft-fails
+    # inside :meth:`Scenario.consolidate`, so a missing key or provider error
+    # degrades to the embedding result rather than raising.
+    consolidation = config.scenario.consolidation
+    if consolidation.enabled and classification_config is not None:
+        from .consolidation import LLMAdjudicator
+
+        adjudicator = LLMAdjudicator(
+            replace(
+                classification_config,
+                model=consolidation.model or classification_config.model,
+            ),
+            debug=debug,
+        )
+        result = scenario.consolidate(result, dataset, adjudicator)
+
     # S1's raw labels are "cluster_N"; rewrite to "unknown_N" so the
     # caller's contract ("emergent cluster ⇒ 'unknown_N'") is the same
     # across scenarios. Every other scenario already either produces
@@ -213,10 +255,19 @@ def run_clustering_detailed(
     # (S4 / S5), so this is a no-op for them.
     rewrite = _cluster_to_unknown if not known_categories else _identity
 
+    # ``review`` is empty on any scenario that never populated it, which is not
+    # the same as "reviewed nothing" — pad to length rather than zip strictly, so
+    # an unconfigured run (and any run that populated it only partially) reports
+    # False for the tail instead of raising. A list *longer* than the documents
+    # is a real invariant violation and is left to trip the strict zip below.
+    review = list(result.review or [])
+    if len(review) < len(result.doc_ids):
+        review += [False] * (len(result.doc_ids) - len(review))
+
     return {
-        doc_id: DocPrediction(cluster_name=rewrite(pred), confidence=conf)
-        for doc_id, pred, conf in zip(
-            result.doc_ids, result.predictions, result.confidence, strict=True
+        doc_id: DocPrediction(cluster_name=rewrite(pred), confidence=conf, review=bool(flag))
+        for doc_id, pred, conf, flag in zip(
+            result.doc_ids, result.predictions, result.confidence, review, strict=True
         )
         if pred is not None
     }

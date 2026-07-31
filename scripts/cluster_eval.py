@@ -18,8 +18,9 @@ Ground truth is a ``{file_id: label}`` (or ``{label: [file_id, ...]}``) JSON
 passed via ``--labels``; without it, the current DocSet membership of the
 workspace is used as the gold labeling.
 
-Metrics (via scikit-learn, plus purity):
-  ARI, NMI, V-measure, homogeneity, completeness, purity.
+Metrics (:mod:`clustering.metrics`, shared with
+``scripts/clustering_metrics.py`` and the evaluation harness):
+  ARI, NMI, AMI, V-measure, homogeneity, completeness, purity, mapped accuracy.
 
 It is intentionally NOT part of the public ``dgml`` CLI surface; it is an
 evaluation/debug tool.
@@ -55,6 +56,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from clustering.metrics import external_metrics
 from dgml_core.classification import ClassificationConfig, load_classification_config
 from dgml_core.clustering import resolve_clustering_overrides
 from dgml_core.dataset import WorkspaceFileDataset
@@ -199,67 +201,46 @@ def parse_spec(spec: str) -> tuple[str, str, str | None]:
 # ---------------------------------------------------------------------------
 
 
-def _purity(labels_true: list[int], labels_pred: list[int]) -> float:
-    """Fraction of items in the majority true-class of their predicted cluster."""
-    from collections import Counter, defaultdict
-
-    by_cluster: dict[int, Counter[int]] = defaultdict(Counter)
-    for t, p in zip(labels_true, labels_pred, strict=True):
-        by_cluster[p][t] += 1
-    correct = sum(counter.most_common(1)[0][1] for counter in by_cluster.values())
-    return correct / len(labels_true) if labels_true else 0.0
-
-
 def evaluate(gt: dict[str, str], run: Run) -> dict[str, Any]:
     """Score one run against ground truth on the files it actually placed."""
-    from sklearn import metrics
-
     ids = [fid for fid in gt if fid in run.clusters]
-    true_labels = [gt[fid] for fid in ids]
-    pred_labels = [run.clusters[fid] for fid in ids]
-
-    true_codes = _codes(true_labels)
-    pred_codes = _codes(pred_labels)
-
-    n = len(ids)
-    row: dict[str, Any] = {
+    metrics = external_metrics([gt[fid] for fid in ids], [run.clusters[fid] for fid in ids])
+    return {
         "run": run.name,
-        "n_eval": n,
+        "n_eval": metrics.n_scored,
         "n_failed": len(run.failed),
-        "n_true_clusters": len(set(true_labels)),
-        "n_pred_clusters": len(set(pred_labels)),
+        "n_true_clusters": metrics.n_true_classes,
+        "n_pred_clusters": metrics.n_pred_clusters,
         "error": run.error,
+        # Distinct from `error`: the run itself was fine, but the ground truth it
+        # was scored against cannot yield meaningful external scores. Keeping the
+        # two apart matters for `--json` consumers that treat `error` as failure.
+        "note": metrics.note,
+        "ari": metrics.ari,
+        "nmi": metrics.nmi,
+        "ami": metrics.ami,
+        "v_measure": metrics.v_measure,
+        "homogeneity": metrics.homogeneity,
+        "completeness": metrics.completeness,
+        "purity": metrics.purity,
+        "mapped_acc": metrics.mapped_accuracy,
     }
-    if n == 0:
-        row.update(
-            {k: None for k in ("ari", "nmi", "v_measure", "homogeneity", "completeness", "purity")}
-        )
-        return row
-    hom, com, vme = metrics.homogeneity_completeness_v_measure(true_codes, pred_codes)
-    row.update(
-        {
-            "ari": metrics.adjusted_rand_score(true_codes, pred_codes),
-            "nmi": metrics.normalized_mutual_info_score(true_codes, pred_codes),
-            "v_measure": vme,
-            "homogeneity": hom,
-            "completeness": com,
-            "purity": _purity(true_codes, pred_codes),
-        }
-    )
-    return row
-
-
-def _codes(labels: list[str]) -> list[int]:
-    """Map string labels to stable integer codes (sorted for determinism)."""
-    index = {label: i for i, label in enumerate(sorted(set(labels)))}
-    return [index[label] for label in labels]
 
 
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
-_METRIC_COLS = ("ari", "nmi", "v_measure", "homogeneity", "completeness", "purity")
+_METRIC_COLS = (
+    "ari",
+    "nmi",
+    "ami",
+    "v_measure",
+    "homogeneity",
+    "completeness",
+    "purity",
+    "mapped_acc",
+)
 
 
 def print_table(rows: list[dict[str, Any]]) -> None:
@@ -291,6 +272,12 @@ def print_table(rows: list[dict[str, Any]]) -> None:
         print("\nerrors:")
         for r in errored:
             print(f"  {r['run']}: {r['error']}")
+
+    noted = [r for r in rows if r.get("note")]
+    if noted:
+        print("\nnot scored:")
+        for r in noted:
+            print(f"  {r['run']}: {r['note']}")
 
     scored = [r for r in rows if r.get("ari") is not None]
     if scored:

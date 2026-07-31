@@ -49,9 +49,9 @@ def _init_ws(ws: Path) -> None:
     Workspace(root=ws.resolve()).init()
 
 
-def _dp(cluster_name: str, confidence: float | None = None) -> DocPrediction:
+def _dp(cluster_name: str, confidence: float | None = None, review: bool = False) -> DocPrediction:
     """Shorthand for a mocked ``run_clustering_detailed`` outcome."""
-    return DocPrediction(cluster_name=cluster_name, confidence=confidence)
+    return DocPrediction(cluster_name=cluster_name, confidence=confidence, review=review)
 
 
 def _read_stdout(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
@@ -486,6 +486,36 @@ def test_file_add_text_mode_default_is_digital(
     assert summary["total_words"] >= 4
 
 
+def test_file_add_dpi_flag_is_recorded_and_used(
+    tmp_path: Path, text_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+
+    rc = main(_ws_args(ws) + ["file", "add", str(text_pdf), "--dpi", "150"])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["file"]["page_image_dpi"] == 150
+
+    # page_text/ boxes are in the render's pixel space, so the flag has to reach
+    # digital extraction too — not just the rasterizer.
+    text_dir = ws / "files" / payload["file"]["id"] / "page_text"
+    page = json.loads((text_dir / "page_1.json").read_text())
+    assert page["width"] == round(612 * 150 / 72)
+
+
+def test_file_add_rejects_nonpositive_dpi(tmp_path: Path, text_pdf: Path) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    # An argparse usage error (exit 2), raised before the workspace is touched.
+    for bad in ("0", "-150", "notanumber"):
+        with pytest.raises(SystemExit) as exc:
+            main(_ws_args(ws) + ["file", "add", str(text_pdf), "--dpi", bad])
+        assert exc.value.code == 2
+    assert not list((ws / "files").iterdir())
+
+
 @needs_gs
 def test_file_add_conflict_errors_by_default(
     tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
@@ -582,8 +612,12 @@ def test_cluster_assigns_unassigned_files_to_docsets(
     assert payload["assignments"][fid] == {
         "docset": "Sample Documents",
         "confidence": None,
+        # A single naming attempt (the default) is not an agreement measurement.
+        "naming_confidence": None,
         "is_new": True,
+        "review": False,
     }
+    assert payload["review_queue"] == []
 
     # The new DocSet has the LLM-proposed name and description, and the
     # file is assigned to it.
@@ -611,6 +645,87 @@ def test_cluster_assigns_unassigned_files_to_docsets(
         assert payload["mode"] == "incremental"
         mock_completion.assert_not_called()
         mock_cluster.assert_not_called()
+
+
+@needs_gs
+def test_cluster_reports_confidence_for_a_new_docset(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file placed in a DocSet created this run still carries the clusterer's
+    confidence. Emergent clusters used to be hardcoded to `null` here; the
+    fresh-clustering path scores documents against the cluster centroids, so
+    that score has to survive into `assignments`."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    write_classification_config(
+        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+    )
+    main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
+    fid = _read_stdout(capsys)["file"]["id"]
+
+    response = _tool_response(
+        "create_new_docset",
+        {"name": "Invoices", "description": "billing docs", "key_questions": ["Total?"]},
+    )
+    with (
+        patch("litellm.completion", return_value=response),
+        patch(
+            "dgml_core.clustering.run_clustering_detailed",
+            return_value={fid: _dp("unknown_0", 0.42)},
+        ),
+    ):
+        rc = main(_ws_args(ws) + ["cluster"])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["assignments"][fid] == {
+        "docset": "Invoices",
+        "confidence": 0.42,
+        # Grouping confidence and naming agreement are independent: the cluster
+        # scored 0.42 against its own centroid, while a single naming attempt
+        # (the default) is not an agreement measurement at all.
+        "naming_confidence": None,
+        "is_new": True,
+        "review": False,
+    }
+    # Nothing was asked to be reviewed, so the queue is present but empty —
+    # callers can read the key unconditionally.
+    assert payload["review_queue"] == []
+
+
+@needs_gs
+def test_cluster_flags_a_low_confidence_assignment_for_review(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A flagged assignment still lands in its DocSet — `review` is advisory, not
+    a veto — and the file id also shows up in the top-level `review_queue` so a
+    caller doesn't have to scan every assignment to find the ones to confirm."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    write_classification_config(
+        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+    )
+    main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
+    fid = _read_stdout(capsys)["file"]["id"]
+
+    response = _tool_response(
+        "create_new_docset",
+        {"name": "Invoices", "description": "billing docs", "key_questions": ["Total?"]},
+    )
+    with (
+        patch("litellm.completion", return_value=response),
+        patch(
+            "dgml_core.clustering.run_clustering_detailed",
+            return_value={fid: _dp("unknown_0", 0.11, review=True)},
+        ),
+    ):
+        rc = main(_ws_args(ws) + ["cluster"])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["assignments"][fid]["review"] is True
+    assert payload["assignments"][fid]["docset"] == "Invoices"
+    assert payload["review_queue"] == [fid]
 
 
 @needs_gs

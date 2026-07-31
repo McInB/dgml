@@ -68,7 +68,12 @@ import torch
 from clustering.config.schema import UNSUPERVISED_LOSSES
 from clustering.data.datasets import DocumentDataset
 from clustering.scenarios.base import Scenario, ScenarioResult
-from clustering.scenarios.clustering import cluster_embeddings, reduce_embeddings
+from clustering.scenarios.clustering import (
+    cluster_confidence,
+    cluster_embeddings,
+    cluster_scores,
+    reduce_embeddings,
+)
 
 
 class S1Unsupervised(Scenario):
@@ -332,7 +337,52 @@ class S1Unsupervised(Scenario):
         predictions: list[str | None] = [
             "cluster_noise" if li == -1 else f"cluster_{li}" for li in labels_list
         ]
-        confidence: list[float | None] = [None] * len(doc_ids)
+        # Per-document ordinal confidence from the clustering geometry. Computed
+        # in the *clustering* space (``cluster_input`` / ``cluster_manifold``) so
+        # distances line up with the ``centroids`` the algorithm returned — this
+        # is the reduced Euclidean space when a reducer is active, else the
+        # representation manifold. Noise points come back as ``0.0``; every other
+        # document gets its peak softmax over centroid distances. This replaces
+        # the column of ``None`` S1 used to emit, so the novelty gate and any
+        # downstream review step have a real signal to threshold.
+        confidence = cluster_confidence(
+            cluster_input,
+            labels_t,
+            centroids,
+            cluster_manifold,
+            temperature=sc.confidence_temperature,
+        )
+        # Soft-assignment matrix over the surviving centroids, in the same
+        # (temperature-scaled) geometry as ``confidence``. Exposed as
+        # ``ScenarioResult.scores`` so a consumer that wants the top1 - top2
+        # margin rather than the peak alone has the per-cluster scores to
+        # compute it. ``None`` when the algorithm routed everything to noise
+        # (no centroids), which is also when there is nothing to score against.
+        scores: torch.Tensor | None = None
+        cluster_class_names: list[str] | None = None
+        if int(centroids.shape[0]) > 0:
+            scores = cluster_scores(
+                cluster_input,
+                centroids,
+                cluster_manifold,
+                temperature=sc.confidence_temperature,
+            )
+            # Same naming as ``predictions`` above, so a column index into
+            # ``scores`` resolves to the label a document would be given.
+            cluster_class_names = [f"cluster_{j}" for j in range(int(centroids.shape[0]))]
+
+        # Review floor. S1 has no labeled support set, so there is nothing to
+        # calibrate against — abstention is a plain floor on the ordinal
+        # confidence. Noise points are excluded: they carry ``0.0`` and would
+        # otherwise swamp the queue, and "no cluster fit this" is a novelty
+        # finding, not a low-confidence assignment a reviewer can correct.
+        abstain_threshold = sc.calibration.abstain_threshold
+        review: list[bool] = [False] * len(doc_ids)
+        if abstain_threshold is not None:
+            review = [
+                labels_list[i] != -1 and (c is not None and c < abstain_threshold)
+                for i, c in enumerate(confidence)
+            ]
 
         n_noise = sum(1 for li in labels_list if li == -1)
         n_clusters_found = int(centroids.shape[0])
@@ -345,10 +395,14 @@ class S1Unsupervised(Scenario):
             predictions=predictions,
             confidence=confidence,
             true_labels=true_labels,
+            scores=scores,
+            class_names=cluster_class_names,
+            review=review,
             metadata={
                 "k_clusters": k,
                 "n_clusters_found": n_clusters_found,
                 "n_noise": n_noise,
+                "n_review": int(sum(review)),
                 "centroids_shape": tuple(centroids.shape),
                 "algorithm": algorithm,
                 "reduce_method": sc.reduce_method,

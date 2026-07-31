@@ -58,7 +58,8 @@ config merges across layers.
         │                             #   not already a PDF; what pages/text and
         │                             #   generation use (see docs/conversion.md)
         ├── file.json                 # metadata (see schema below)
-        ├── page_images/              # 300 dpi PNG page renders (cacheable; see below)
+        ├── page_images/              # PNG page renders at page_image_dpi
+        │                             #   (300 by default; cacheable, see below)
         │   ├── page_1.png
         │   └── page_2.png
         ├── page_text/                # one JSON of word boxes per page
@@ -73,10 +74,10 @@ with `secrets.choice` ([packages/dgml/src/dgml/ids.py](../packages/dgml/src/dgml
 ## Page-image render cache (`$DGML_PAGE_CACHE`, optional)
 
 Rendering `page_images/` shells out to ghostscript, which dominates the cost
-of `dgml file add`. The render is a pure function of the PDF bytes (plus the
-fixed 300 dpi and renderer), so when the **`DGML_PAGE_CACHE`** environment
-variable names a directory, the renderer keys each render by a content hash
-and reuses it:
+of `dgml file add`. The render is a pure function of the PDF bytes, the
+renderer, and the dpi, so when the **`DGML_PAGE_CACHE`** environment variable
+names a directory, the renderer keys each render by a hash of all three and
+reuses it:
 
 - **Hit** — an identical PDF rendered before is copied from the cache and
   ghostscript is not invoked (it need not even be installed).
@@ -660,9 +661,13 @@ each contain one file per page.
 overlap, OCR wins on conflict).
 
 `page_image_dpi` and `page_image_renderer` record how `page_images/` were
-rendered — currently always `300` and `"ghostscript"`, but stored per file
-so a later renderer or DPI change is detectable. They are `null` if a
-non-PDF source failed to convert (no page images were produced).
+rendered — the renderer is currently always `"ghostscript"`; the dpi is `300`
+unless `dgml file add --dpi N` set otherwise. They are stored per file both so
+a later renderer change is detectable and because they are load-bearing: the
+dpi is the scale of every `page_text/` word box (see below), and `dgml check
+--retry-errors` re-renders and re-extracts at the *recorded* value so a repair
+reproduces the file's existing geometry instead of today's default. They are
+`null` if a non-PDF source failed to convert (no page images were produced).
 
 `pdf_converter` names the converter that turned a non-PDF source into the
 PDF the pipeline ran on (the converter's name with any trailing
@@ -675,8 +680,11 @@ One per page, written regardless of `text_mode` (`"digital"`, `"ocr"`,
 or `"hybrid"` all share this shape). Word locations are
 in **image-pixel space** matching the corresponding `page_images/page_N.png`
 render — i.e. ints with the top-left origin, computed as
-`round(pdf_pts * dpi / 72)` where `dpi` is the same 300 dpi used by
-`render_pages`. Files are compact (one line, no pretty-printing) so a
+`round(pdf_pts * dpi / 72)` where `dpi` is the file's `page_image_dpi` — the
+same value `render_pages` used, 300 unless `--dpi` said otherwise. Consumers
+of these coordinates should read `page_image_dpi` off `file.json` rather than
+assuming 300: the boxes in a File added with `--dpi 150` are half the size of
+the same File's at 300. Files are compact (one line, no pretty-printing) so a
 workspace with many pages doesn't bloat on disk:
 
 ```json

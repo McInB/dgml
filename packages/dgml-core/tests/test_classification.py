@@ -133,6 +133,7 @@ def test_load_config_happy_minimal(workspace: Workspace) -> None:
     cfg = load_classification_config(workspace)
     assert cfg.model == DEFAULT_TEST_MODEL
     assert cfg.max_pages == DEFAULT_MAX_PAGES  # default is 3
+    assert cfg.naming_attempts == 1  # opt-in: agreement costs tokens linearly
     assert cfg.api_key is None
     assert cfg.api_key_env is None
 
@@ -206,6 +207,19 @@ def test_load_config_max_pages_bool_rejected(workspace: Workspace) -> None:
     """
     write_classification_config(workspace, {"model": DEFAULT_TEST_MODEL, "max_pages": True})
     with pytest.raises(ClassificationConfigInvalid, match="max_pages"):
+        load_classification_config(workspace)
+
+
+def test_load_config_naming_attempts(workspace: Workspace) -> None:
+    write_classification_config(workspace, {"model": DEFAULT_TEST_MODEL, "naming_attempts": 3})
+    assert load_classification_config(workspace).naming_attempts == 3
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 2.0, "3"])
+def test_load_config_naming_attempts_invalid(workspace: Workspace, value: object) -> None:
+    """Same contract as ``max_pages``: a positive int, and ``true`` is not 1."""
+    write_classification_config(workspace, {"model": DEFAULT_TEST_MODEL, "naming_attempts": value})
+    with pytest.raises(ClassificationConfigInvalid, match="naming_attempts"):
         load_classification_config(workspace)
 
 
@@ -671,4 +685,171 @@ def test_propose_new_docset_api_key_env_unset_raises_auth_error(
     with patch("litellm.completion") as mock_completion:
         with pytest.raises(AuthError, match="MY_CUSTOM_LLM_KEY"):
             propose_new_docset_for_files(workspace, ["fid4"], config=cfg)
+    mock_completion.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# propose_new_docset_for_files — multi-attempt agreement
+# ---------------------------------------------------------------------------
+
+
+def _proposal_workspace(workspace: Workspace) -> None:
+    _seed_file(workspace, "fid1", filename="po.pdf")
+    _seed_page_image(workspace, "fid1", 1, b"\xff\xd8\xff\xe0fake")
+
+
+def _named(name: str) -> SimpleNamespace:
+    return _tool_call_response("create_new_docset", _create_new_args(name=name))
+
+
+def test_a_single_attempt_reports_no_confidence(workspace: Workspace) -> None:
+    """The default path is unchanged: one call, and no confidence to report.
+
+    One sample is not an agreement measurement, so claiming 1.0 would be a
+    fabricated number.
+    """
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    with patch("litellm.completion", return_value=_named("Purchase Orders")) as mock_completion:
+        decision = propose_new_docset_for_files(workspace, ["fid1"], config=cfg)
+
+    assert decision.new_name == "Purchase Orders"
+    assert decision.confidence is None
+    assert mock_completion.call_count == 1
+
+
+def test_unanimous_attempts_report_full_confidence(workspace: Workspace) -> None:
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    with patch("litellm.completion", return_value=_named("Purchase Orders")) as mock_completion:
+        decision = propose_new_docset_for_files(workspace, ["fid1"], config=cfg, attempts=3)
+
+    assert decision.new_name == "Purchase Orders"
+    assert decision.confidence == pytest.approx(1.0)
+    assert mock_completion.call_count == 3
+
+
+def test_a_split_decision_reports_the_share_that_agreed(workspace: Workspace) -> None:
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    responses = [_named("Purchase Orders"), _named("Invoices")]
+    with patch("litellm.completion", side_effect=responses):
+        decision = propose_new_docset_for_files(workspace, ["fid1"], config=cfg, attempts=2)
+
+    assert decision.confidence == pytest.approx(0.5)
+
+
+def test_the_returned_name_is_the_one_the_plurality_agreed_on(workspace: Workspace) -> None:
+    """The load-bearing property: confidence must describe the name returned.
+
+    Returning the *first* attempt's proposal while reporting the plurality's
+    share would ship a minority name labelled "2 of 3 attempts agreed" — a
+    number about a different answer.
+    """
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    responses = [_named("Invoices"), _named("Purchase Orders"), _named("Purchase Orders")]
+    with patch("litellm.completion", side_effect=responses):
+        decision = propose_new_docset_for_files(workspace, ["fid1"], config=cfg, attempts=3)
+
+    assert decision.new_name == "Purchase Orders"
+    assert decision.confidence == pytest.approx(2 / 3)
+
+
+def test_agreement_ignores_case_and_extra_whitespace(workspace: Workspace) -> None:
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    responses = [_named("PILOT Agreement"), _named("pilot   agreement")]
+    with patch("litellm.completion", side_effect=responses):
+        decision = propose_new_docset_for_files(workspace, ["fid1"], config=cfg, attempts=2)
+
+    # The first attempt's spelling is kept — normalization decides agreement,
+    # it does not rewrite the name the DocSet gets.
+    assert decision.new_name == "PILOT Agreement"
+    assert decision.confidence == pytest.approx(1.0)
+
+
+def test_a_tie_goes_to_the_earliest_attempt(workspace: Workspace) -> None:
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    responses = [_named("Invoices"), _named("Purchase Orders")]
+    with patch("litellm.completion", side_effect=responses):
+        decision = propose_new_docset_for_files(workspace, ["fid1"], config=cfg, attempts=2)
+
+    assert decision.new_name == "Invoices"
+
+
+def test_one_failed_attempt_degrades_instead_of_failing_the_call(workspace: Workspace) -> None:
+    """Asking for more opinions must not multiply the exposure to a hiccup.
+
+    With a strict loop, ``attempts=3`` would be three times as likely to fail
+    outright as ``attempts=1`` — the robustness feature would make the call less
+    robust. The two survivors agreed, so confidence is over them, not over 3.
+    """
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    responses = [
+        _named("Purchase Orders"),
+        RuntimeError("network boom"),
+        _named("Purchase Orders"),
+    ]
+    with patch("litellm.completion", side_effect=responses):
+        decision = propose_new_docset_for_files(workspace, ["fid1"], config=cfg, attempts=3)
+
+    assert decision.new_name == "Purchase Orders"
+    assert decision.confidence == pytest.approx(1.0)
+
+
+def test_every_attempt_failing_still_raises(workspace: Workspace) -> None:
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    with patch("litellm.completion", side_effect=RuntimeError("network boom")):
+        with pytest.raises(ClassificationFailed):
+            propose_new_docset_for_files(workspace, ["fid1"], config=cfg, attempts=3)
+
+
+def test_a_malformed_reply_among_good_ones_is_skipped(workspace: Workspace) -> None:
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    responses = [_empty_tool_calls_response(), _named("Purchase Orders")]
+    with patch("litellm.completion", side_effect=responses):
+        decision = propose_new_docset_for_files(workspace, ["fid1"], config=cfg, attempts=2)
+
+    assert decision.new_name == "Purchase Orders"
+    assert decision.confidence == pytest.approx(1.0)
+
+
+def test_the_config_drives_attempts_with_no_caller_argument(workspace: Workspace) -> None:
+    """A workspace can turn agreement on for every cluster.
+
+    The naming call site in the clustering pipeline passes no ``attempts``, so
+    the config field is the only way to enable this end-to-end.
+    """
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL, naming_attempts=3)
+    with patch("litellm.completion", return_value=_named("Purchase Orders")) as mock_completion:
+        decision = propose_new_docset_for_files(workspace, ["fid1"], config=cfg)
+
+    assert mock_completion.call_count == 3
+    assert decision.confidence == pytest.approx(1.0)
+
+
+def test_an_explicit_attempts_argument_beats_the_config(workspace: Workspace) -> None:
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL, naming_attempts=3)
+    with patch("litellm.completion", return_value=_named("Purchase Orders")) as mock_completion:
+        decision = propose_new_docset_for_files(workspace, ["fid1"], config=cfg, attempts=1)
+
+    assert mock_completion.call_count == 1
+    assert decision.confidence is None
+
+
+@pytest.mark.parametrize("attempts", [0, -1])
+def test_a_nonsensical_attempt_count_is_rejected(workspace: Workspace, attempts: int) -> None:
+    """``max(1, attempts)`` would silently paper over a caller's bug."""
+    _proposal_workspace(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    with patch("litellm.completion") as mock_completion:
+        with pytest.raises(ValueError, match="at least 1"):
+            propose_new_docset_for_files(workspace, ["fid1"], config=cfg, attempts=attempts)
     mock_completion.assert_not_called()

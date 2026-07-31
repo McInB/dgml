@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .config import load_merged_config
@@ -50,6 +50,7 @@ from .usage import OPERATION_CLASSIFY
 from .utils import gather_file_pages, image_to_data_url
 
 DEFAULT_MAX_PAGES = 3
+DEFAULT_NAMING_ATTEMPTS = 1
 
 _TOOL_ASSIGN = "assign_to_existing_docset"
 _TOOL_CREATE = "create_new_docset"
@@ -79,6 +80,11 @@ class ClassificationConfig:
     ``api_key_env`` > litellm's per-provider default env var
     (``GEMINI_API_KEY`` for ``gemini/...``, etc.). Setting both
     ``api_key`` and ``api_key_env`` is a config error.
+
+    ``naming_attempts`` is the default ``attempts`` for
+    :func:`propose_new_docset_for_files` — how many independent proposals to
+    request before returning the modal one. It costs tokens linearly, so it
+    stays at 1 unless the workspace opts in.
     """
 
     model: str
@@ -86,6 +92,7 @@ class ClassificationConfig:
     api_key: str | None = None
     api_key_env: str | None = None
     api_base: str | None = None
+    naming_attempts: int = DEFAULT_NAMING_ATTEMPTS
 
 
 @dataclass(frozen=True)
@@ -95,6 +102,12 @@ class ClassificationDecision:
     Exactly one of ``existing_docset_id`` or (``new_name``, ``new_description``,
     ``new_key_questions``) is populated. Validated at construction by
     :func:`classify_file`.
+
+    ``confidence`` is populated only by the multi-attempt path — see
+    :func:`propose_new_docset_for_files` with ``attempts >= 2``. It is the share
+    of independent attempts that landed on the *returned* name, in ``(0, 1]``:
+    an ordinal robustness signal about the naming, not a calibrated probability,
+    and unrelated to how confident the clusterer was about the grouping.
     """
 
     decision: str  # "existing" | "new"
@@ -102,6 +115,7 @@ class ClassificationDecision:
     new_name: str | None = None
     new_description: str | None = None
     new_key_questions: tuple[str, ...] = ()
+    confidence: float | None = None
 
 
 def load_classification_config(workspace: Workspace) -> ClassificationConfig:
@@ -129,12 +143,19 @@ def load_classification_config(workspace: Workspace) -> ClassificationConfig:
             "'classification.max_pages' must be a positive integer if set"
         )
 
+    attempts_raw = sec.get("naming_attempts", DEFAULT_NAMING_ATTEMPTS)
+    if not isinstance(attempts_raw, int) or isinstance(attempts_raw, bool) or attempts_raw < 1:
+        raise ClassificationConfigInvalid(
+            "'classification.naming_attempts' must be a positive integer if set"
+        )
+
     return ClassificationConfig(
         model=rm.model,
         max_pages=max_pages_raw,
         api_key=rm.api_key,
         api_key_env=rm.api_key_env,
         api_base=rm.api_base,
+        naming_attempts=attempts_raw,
     )
 
 
@@ -182,6 +203,7 @@ def propose_new_docset_for_files(
     *,
     config: ClassificationConfig,
     debug: bool = False,
+    attempts: int | None = None,
 ) -> ClassificationDecision:
     """Ask the configured vision LLM to propose a new DocSet (name,
     description, and key questions) that ``file_ids`` should anchor.
@@ -194,22 +216,83 @@ def propose_new_docset_for_files(
     whole rather than a single example. The caller is responsible for
     capping ``file_ids`` if cost/context is a concern.
 
+    ``attempts`` buys a robustness signal at a linear cost in tokens. When
+    omitted it falls back to ``config.naming_attempts``, so a workspace can turn
+    the signal on for every cluster without any caller passing it; an explicit
+    argument still wins. At ``1`` a single call is made and the decision carries
+    no ``confidence``. With ``attempts >= 2`` the proposal is requested that many
+    times independently, and the **modal** proposal is returned — the one the
+    plurality of attempts agreed on, not whichever came back first — carrying a
+    ``confidence`` equal to that plurality's share. A name three attempts out of
+    three settled on is one you can create without a human looking; a 2-1 split
+    is a coin toss worth surfacing.
+
     Same failure contract as :func:`classify_file`: raises
     :class:`ClassificationFailed` for missing SDK / no page images on
     any of the files / malformed response / provider error, and
     :class:`AuthError` when ``config.api_key_env`` is set but the env
-    var isn't.
+    var isn't. With ``attempts >= 2`` an individual attempt is allowed to fail:
+    agreement is computed over the attempts that succeeded, and the error is
+    re-raised only if *every* attempt failed. Otherwise asking for more opinions
+    would multiply the exposure to one transient provider hiccup, making the
+    robustness feature less robust than not using it.
     """
-    response = _vision_tool_call(
-        workspace,
-        file_ids,
-        config=config,
-        prompt=_build_prompt_new_only(),
-        tools=[_create_new_docset_tool()],
-        debug=debug,
-    )
-    name, args = _extract_single_tool_call(response)
-    return _parse_new_docset_args(name, args)
+    if attempts is None:
+        attempts = config.naming_attempts
+    if attempts < 1:
+        raise ValueError(f"attempts must be at least 1, got {attempts}")
+
+    decisions: list[ClassificationDecision] = []
+    first_error: Exception | None = None
+    for _ in range(attempts):
+        try:
+            response = _vision_tool_call(
+                workspace,
+                file_ids,
+                config=config,
+                prompt=_build_prompt_new_only(),
+                tools=[_create_new_docset_tool()],
+                debug=debug,
+            )
+            name, args = _extract_single_tool_call(response)
+            decisions.append(_parse_new_docset_args(name, args))
+        except (ClassificationFailed, AuthError) as exc:
+            if attempts == 1:
+                raise
+            first_error = first_error or exc
+
+    if not decisions:
+        assert first_error is not None  # attempts >= 1, so we either got one or failed
+        raise first_error
+    if attempts == 1:
+        return decisions[0]
+    return _modal_decision(decisions)
+
+
+def _modal_decision(decisions: list[ClassificationDecision]) -> ClassificationDecision:
+    """The proposal the plurality of ``decisions`` agreed on, plus its share.
+
+    Names are compared case- and whitespace-insensitively, so "PILOT Agreement"
+    and "pilot   agreement" count as agreement. Ties go to the earliest attempt.
+    The share is over the attempts that produced a name — which, since
+    :func:`_parse_new_docset_args` rejects a proposal without one, is every
+    attempt that did not fail outright.
+    """
+    counts: dict[str, int] = {}
+    for decision in decisions:
+        counts[_normalize_name(decision.new_name)] = (
+            counts.get(_normalize_name(decision.new_name), 0) + 1
+        )
+    winner = max(counts, key=lambda key: counts[key])
+    # The *returned* decision has to be one from the winning group, or the
+    # reported confidence would describe a name we didn't return.
+    modal = next(d for d in decisions if _normalize_name(d.new_name) == winner)
+    return replace(modal, confidence=counts[winner] / len(decisions))
+
+
+def _normalize_name(name: str | None) -> str:
+    """A name reduced to what matters for agreement: lowercase, single-spaced."""
+    return " ".join((name or "").lower().split())
 
 
 def _vision_tool_call(

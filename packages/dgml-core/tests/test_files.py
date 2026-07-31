@@ -109,6 +109,36 @@ def test_add_pdf(store: FileStore, sample_pdf: Path) -> None:
 
 
 @needs_gs
+def test_add_pdf_custom_dpi_is_rendered_and_recorded(store: FileStore, sample_pdf: Path) -> None:
+    result = store.add(sample_pdf, dpi=150)
+    assert result.page_render_error is None
+    assert result.record.page_image_dpi == 150
+    pages = sorted(store.ws.file_pages_dir(result.record.id).glob("page_*.png"))
+    assert len(pages) == 2
+    # The record has to describe the pixels actually on disk, since `dgml check`
+    # reproduces this geometry when it repairs the file later.
+    width, height = _png_size(pages[0])
+    at_300 = store.add(sample_pdf, on_conflict=ConflictPolicy.DUPLICATE)
+    w300, h300 = _png_size(sorted(store.ws.file_pages_dir(at_300.record.id).glob("page_*.png"))[0])
+    assert width < w300 and height < h300
+
+
+def _png_size(png: Path) -> tuple[int, int]:
+    """Width/height from a PNG's IHDR — avoids depending on an image library."""
+    header = png.read_bytes()[16:24]
+    return int.from_bytes(header[:4], "big"), int.from_bytes(header[4:], "big")
+
+
+def test_add_rejects_nonpositive_dpi(store: FileStore, sample_pdf: Path) -> None:
+    # Rejected before anything is written, so a bad flag can't leave a
+    # half-built File behind for `dgml check` to puzzle over.
+    for bad in (0, -300):
+        with pytest.raises(ValueError, match="dpi"):
+            store.add(sample_pdf, dpi=bad)
+    assert not any(store.ws.files_dir.iterdir())
+
+
+@needs_gs
 def test_original_path_stored_relative_to_workspace(store: FileStore, sample_pdf: Path) -> None:
     """original_path is recorded relative to the workspace root and still
     resolves back to the source from there — keeping the workspace portable."""

@@ -128,9 +128,50 @@ def test_partial_cache_entry_is_treated_as_miss(
 
     # A cache entry with PNGs but no `.complete` marker (e.g. an interrupted
     # writer) must not be trusted — render_pages should re-render.
-    entry = cache / pages._pdf_cache_key(pdf)
+    entry = cache / pages._pdf_cache_key(pdf, pages.DEFAULT_DPI)
     entry.mkdir(parents=True)
     (entry / "page_1.png").write_bytes(b"stale")
 
     assert render_pages(pdf, tmp_path / "out") == 2
     assert len(calls) == 1
+
+
+def test_dpi_reaches_ghostscript(
+    tmp_path: Path, pdf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(PAGE_CACHE_ENV, raising=False)
+    monkeypatch.setattr(pages, "ghostscript_path", lambda: "gs")
+    seen: list[list[str]] = []
+
+    def capture(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(cmd)
+        template = next(a.split("=", 1)[1] for a in cmd if a.startswith("-sOutputFile="))
+        Path(template.replace("%d", "1")).write_bytes(b"\x89PNG\r\n\x1a\n")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", capture)
+
+    render_pages(pdf, tmp_path / "out", dpi=150)
+    assert "-r150" in seen[0]
+
+
+def test_cache_entries_do_not_collide_across_dpi(
+    tmp_path: Path, pdf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Same bytes at two resolutions are different renders. Serving the 300-dpi
+    # entry for a 150-dpi request would hand back page images that disagree
+    # with the page_text/ boxes written alongside them.
+    cache = tmp_path / "cache"
+    monkeypatch.setenv(PAGE_CACHE_ENV, str(cache))
+    monkeypatch.setattr(pages, "ghostscript_path", lambda: "gs")
+    calls: list[int] = []
+    monkeypatch.setattr(subprocess, "run", _fake_gs_factory(2, calls))
+
+    assert render_pages(pdf, tmp_path / "a", dpi=300) == 2
+    assert render_pages(pdf, tmp_path / "b", dpi=150) == 2
+    assert len(calls) == 2, "the second dpi must miss, not reuse the first render"
+    assert pages._pdf_cache_key(pdf, 300) != pages._pdf_cache_key(pdf, 150)
+
+    # ...and each is still cached in its own right.
+    assert render_pages(pdf, tmp_path / "c", dpi=150) == 2
+    assert len(calls) == 2

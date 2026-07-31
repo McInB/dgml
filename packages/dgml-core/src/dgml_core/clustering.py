@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Literal, get_args
 
 from .classification import (
+    ClassificationConfig,
     ClassificationDecision,
     load_classification_config,
     propose_new_docset_for_files,
@@ -220,6 +221,10 @@ class _InternalResult:
     clusters: dict[str, str]
     render_skipped: list[str]
     confidences: dict[str, float | None] = field(default_factory=dict)
+    # Files whose assignment the run wants a human to confirm. Sparse: only
+    # flagged files appear, so an unconfigured run carries an empty dict rather
+    # than one ``False`` per file. Empty unless ``scenario.calibration`` is set.
+    review: dict[str, bool] = field(default_factory=dict)
     mode: str = "fresh"
     method: str = "embedding"
     known_categories: list[str] = field(default_factory=list)
@@ -333,11 +338,26 @@ def clustering(
     - ``n_assigned_existing``: number of files assigned to a DocSet that
       already existed before this run (only meaningful for incremental).
     - ``n_new_clusters``: number of *new* DocSets created this run.
-    - ``assignments``: ``{file_id: {"docset", "confidence", "is_new"}}``
-      for every successfully-assigned file — ``confidence`` is the
-      nearest-prototype confidence in ``[0, 1]`` (``null`` for emergent
-      clusters), ``is_new`` flags files that landed in a DocSet created
-      this run.
+    - ``assignments``:
+      ``{file_id: {"docset", "confidence", "is_new", "review"}}``
+      for every successfully-assigned file — ``confidence`` is in ``[0, 1]``
+      and ``is_new`` flags files that landed in a DocSet created this run.
+      What ``confidence`` *means* depends on ``method``. For ``embedding``
+      it is the nearest-prototype confidence for files matched against
+      existing DocSets, and the clustering-geometry confidence (peak softmax
+      over centroid distances) for files placed by a fresh clustering run;
+      ``null`` when the clusterer produced no score. For ``llm`` it is the
+      model's self-reported confidence in the group the file was put in,
+      shared by every member of that group, and ``null`` when the model
+      declined to report one. Neither is a calibrated probability — both are
+      an ordinal ranking over which assignments to review first, comparable
+      within one run only, unless ``clustering.scenario.calibration`` is
+      configured.
+      ``review`` flags an assignment the run wants a human to confirm. It never
+      changes where the file landed: a flagged file is assigned like any other.
+    - ``review_queue``: the ``file_id``s whose ``review`` flag is set, as a
+      list. Always present, and always empty unless the clustering config sets
+      ``scenario.calibration`` (a coverage target or an abstain floor).
 
     ``skip_existing`` makes the whole call a no-op (returns ``skipped: True``,
     empty maps) when every file is already assigned — cheap to use on resume.
@@ -369,6 +389,7 @@ def clustering(
             "n_assigned_existing": 0,
             "n_new_clusters": 0,
             "assignments": {},
+            "review_queue": [],
         }
 
     internal = clustering_internal(
@@ -406,7 +427,12 @@ def clustering(
             assignments[file_id] = {
                 "docset": cluster_name,
                 "confidence": internal.confidences.get(file_id),
+                # Naming agreement is a property of a *proposed* name, so it is
+                # always absent here; the key is still emitted so consumers can
+                # read one shape for every file.
+                "naming_confidence": None,
                 "is_new": False,
+                "review": internal.review.get(file_id, False),
             }
             if extraction_block is not None:
                 assignments[file_id]["extraction"] = extraction_block
@@ -466,13 +492,35 @@ def clustering(
                 clusters[file_id] = new_name
                 assignments[file_id] = {
                     "docset": new_name,
-                    "confidence": None,
+                    # Read from the clusterer rather than hardcoded null. An
+                    # emergent cluster has no prototype to measure a distance
+                    # to, but both methods now have something real to say
+                    # here: the fresh-clustering path reports a confidence
+                    # from the clustering geometry itself (peak softmax over
+                    # centroid distances), and the llm method's confidence is
+                    # a judgement about the *group*, which is exactly what an
+                    # emergent cluster is. Files nothing scored still come
+                    # back as ``None``.
+                    "confidence": internal.confidences.get(file_id),
+                    # Orthogonal to the above: how much the *naming* attempts
+                    # agreed on this DocSet's name, when
+                    # `classification.naming_attempts` is raised above 1. A
+                    # tightly-grouped cluster can still be badly named, so the
+                    # two numbers are never interchangeable.
+                    "naming_confidence": decision.confidence,
                     "is_new": True,
+                    "review": internal.review.get(file_id, False),
                 }
 
     n_assigned_existing = sum(
         1 for detail in assignments.values() if detail["docset"] in existing_names
     )
+    # The actionable form of the per-assignment `review` flags: the files a
+    # human should look at, in assignment order. Every one of them is *already*
+    # assigned — this is a "confirm these" list, not a queue of pending work —
+    # so a caller that ignores it loses nothing. Empty unless the workspace
+    # config sets `clustering.scenario.calibration`.
+    review_queue = [fid for fid, detail in assignments.items() if detail["review"]]
     return {
         "clusters": clusters,
         "failed_file_ids": failed_file_ids,
@@ -481,6 +529,7 @@ def clustering(
         "n_assigned_existing": n_assigned_existing,
         "n_new_clusters": n_new_clusters,
         "assignments": assignments,
+        "review_queue": review_queue,
     }
 
 
@@ -633,6 +682,8 @@ def clustering_internal(
             support_dataset=support_dataset,
             overrides=overrides,
             cache_dir=workspace.embedding_cache_dir,
+            classification_config=_adjudication_config(workspace),
+            debug=debug,
         )
     else:
         detailed = run_clustering_detailed(
@@ -640,18 +691,40 @@ def clustering_internal(
             known_categories=known_categories,
             overrides=overrides,
             cache_dir=workspace.embedding_cache_dir,
+            classification_config=_adjudication_config(workspace),
+            debug=debug,
         )
 
     clusters = {doc_id: pred.cluster_name for doc_id, pred in detailed.items()}
     confidences = {doc_id: pred.confidence for doc_id, pred in detailed.items()}
+    review = {doc_id: bool(pred.review) for doc_id, pred in detailed.items() if pred.review}
     return _InternalResult(
         clusters=clusters,
         render_skipped=skipped,
         confidences=confidences,
+        review=review,
         mode=effective_mode,
         method="embedding",
         known_categories=known_categories,
     )
+
+
+def _adjudication_config(workspace: Workspace) -> ClassificationConfig | None:
+    """The classification config the consolidation pass adjudicates with.
+
+    ``None`` when the workspace has no usable ``classification`` section, which
+    is the common case: consolidation is off by default, and
+    :func:`run_clustering_detailed` ignores this argument unless the resolved
+    clustering config also enables the pass. Resolved unconditionally (rather
+    than behind a second copy of the enabled-check) so the gate lives in exactly
+    one place; failures are swallowed to keep the never-raise clustering
+    contract — a workspace that asks for adjudication but can't reach a model
+    simply doesn't get it.
+    """
+    try:
+        return load_classification_config(workspace)
+    except DgmlError:
+        return None
 
 
 def _resolve_method(method: str, *, n_usable: int, threshold: int) -> str:
@@ -710,7 +783,10 @@ def _llm_cluster_internal(
     return _InternalResult(
         clusters=result.clusters,
         render_skipped=render_skipped,
-        confidences=dict.fromkeys(result.clusters),
+        # Keyed off ``clusters`` rather than taken wholesale, so the confidence
+        # map is guaranteed to cover exactly the assigned files; a group the
+        # model gave no confidence for stays ``None``.
+        confidences={fid: result.confidences.get(fid) for fid in result.clusters},
         mode=effective_mode,
         method="llm",
         known_categories=known_categories,

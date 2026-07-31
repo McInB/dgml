@@ -307,6 +307,17 @@ presets use Leiden, but HDBSCAN pairs well with dense (vision) encoders.
 | `cluster_algorithm` | Clustering algorithm: `leiden` (default here), `hdbscan`, `kmeans` (needs `k_clusters`), `dbscan`, `optics`, … | `leiden` | Switch to `hdbscan` for dense encoders / when you want automatic noise rejection. | — |
 | `hdbscan_min_cluster_size` | Smallest admissible cluster; the main HDBSCAN dial. | `2` | Fewer, larger clusters and more aggressive noise flagging. | More, smaller clusters (min is 2). |
 
+**Confidence — how sure the run is about each document** (`scenario.*`).
+A fresh clustering run reports a per-document confidence: the softmax peak
+over that document's distances to the discovered cluster centroids (docs the
+algorithm routed to the noise bucket get `0.0`). It's an **ordinal** signal —
+useful for ranking the least-certain documents for a spot check, *not* a
+calibrated probability, and not comparable across runs or configs.
+
+| Parameter | What it controls | Default | Raise it when… | Lower it when… |
+|---|---|---|---|---|
+| `confidence_temperature` | Softmax temperature for that confidence. `auto` scales it to the distance between clusters, so the scores spread out instead of all pinning at `1.00` when the clusters are far apart (which is the norm after a UMAP reduction). | `auto` | Pin a float `> 1` for uniformly more conservative scores. | Pin `1.0` to read the raw softmax peak with no rescaling. |
+
 **Incremental novelty gate** (`scenario.*`, `--mode incremental`). These
 decide whether a *new* document fits an existing DocSet or is "novel" and
 opens a new cluster. The `dgml cluster --mode incremental` path ships a
@@ -328,6 +339,118 @@ incremental CLI path.
 | `threshold_confidence` | Softmax-confidence floor in `[0,1]`; docs whose nearest-prototype confidence is below it become novel (new cluster). Manifold-independent — the easiest to reason about. | `None` | Genuinely new categories are being absorbed into existing DocSets — raise it (e.g. 0.4–0.5) to reject more as novel. | New clusters are opening for docs that really belong to an existing DocSet — lower it. |
 | `threshold` | Absolute manifold-distance cutoff (unit depends on `manifold`; needs re-tuning if you change it). | `None` | You want a hard distance gate and know the scale. | — |
 
+### Calibrated confidence and a review queue
+
+The novelty gates above answer "*is this a new category?*" A separate question
+is "*am I confident enough in this assignment to apply it unattended?*" That
+one is what `scenario.calibration` answers, and the two are independent: a
+novelty gate rewrites the assignment (the doc opens a new cluster), while the
+review decision **never** changes where a document landed. It only adds a flag.
+
+Flagged files come back on each assignment as `"review": true`, and collected
+into a top-level `review_queue` list, so you can confirm just those:
+
+```bash
+dgml cluster | jq -r '.review_queue[]'
+```
+
+Everything here is **off by default** — an unconfigured run flags nothing and
+`review_queue` is `[]`.
+
+| Parameter | What it controls | Default | Notes |
+|---|---|---|---|
+| `calibration.abstain_threshold` | Confidence floor in `[0,1]`. Any assignment below it is flagged for review. | `None` | The simplest knob, and the only one that works in every scenario. Start around 0.5 and adjust to the queue size you can actually work through. |
+| `calibration.method` | `temperature` (one-parameter rescaling, fit by maximum likelihood) or `platt` (logistic map fit against whether the top-1 was right). `none` keeps the raw ordinal score. | `none` | Needs labeled examples, so it only applies when the run has a support set (an incremental run over existing DocSets, or S3/S5). Name-only runs ignore it. |
+| `calibration.coverage` | Target coverage in `(0,1)` for a split-conformal gate: flag the tail so that roughly this fraction of assignments are kept unflagged. | `None` | Prefer this over a hand-picked floor when you want to size the queue rather than guess a number — it adapts to the corpus instead of assuming a scale. Read it as a **review budget**, not a probability that the assignment is right: at `coverage: 0.9` about a tenth of the batch is flagged. It runs slightly under budget in practice (measured ≈0.92 achieved against 0.90 requested, over four corpora at 8 support documents per class), because the leave-one-out calibration set is a little easier than a fresh batch. |
+
+A word on what "calibrated" buys you: with `method: none` the confidence is
+ordinal, so a 0.83 means "more certain than the 0.6 next to it in this run" and
+nothing more. Once a method is fit, the number is on a stable scale and *is*
+comparable across runs — which is what makes a fixed `abstain_threshold`
+meaningful over time rather than something you re-tune every corpus.
+
+The fit is **leave-one-out**: each labeled example is scored against a prototype
+rebuilt without it. Fitting on the ordinary prototypes would be self-flattering
+(every document helps build the prototype it's measured against) and the
+resulting thresholds would be optimistic on documents the run has not seen.
+
+### Asking an LLM about the hard cases
+
+A review queue tells you which assignments are shaky. `scenario.consolidation`
+is the option to do something about them automatically: it takes the
+least-confident tail, offers each document its nearest few clusters, and asks
+the vision model the one question it is good at — *does this belong to one of
+these, or is it genuinely something new?*
+
+The cost model is the point. The embedding pipeline handles the whole corpus
+cheaply, and the LLM only ever sees the documents the statistics were unsure
+about — so spend scales with uncertainty, not with corpus size. On a clean run
+it can be zero documents.
+
+It is **off by default**, and needs a `classification` section in your workspace
+`config.toml` (the same model and API key auto-classification uses). Enable it
+in the `scenario` section of your clustering config:
+
+```json
+{
+  "scenario": {
+    "consolidation": {
+      "enabled": true,
+      "selector": { "strategy": "quantile", "quantile": 0.1 },
+      "apply": "suggest"
+    }
+  }
+}
+```
+
+| Parameter | What it controls | Default |
+|---|---|---|
+| `consolidation.enabled` | Master switch. | `false` |
+| `consolidation.apply` | `suggest` records each verdict and flags the document for review, leaving labels alone. `auto` writes the reassignments into the result. | `suggest` |
+| `consolidation.selector.strategy` | How the tail is chosen: `quantile` (bottom fraction by confidence), `confidence` (absolute floor), `margin` (narrow top-1/top-2 gap), `noise` (only the noise bucket). | `quantile` |
+| `consolidation.selector.max_docs` | Hard ceiling on documents adjudicated — your cost cap. | `200` |
+| `consolidation.candidates_k` | How many nearby clusters each document is offered. | `3` |
+| `consolidation.mode` | `reassign` asks per document; `repartition` re-groups the whole contested subset in one call. | `reassign` |
+| `consolidation.model` | Override the adjudication model. `null` reuses the workspace classification model. | `null` |
+
+`suggest` is the default deliberately: an LLM overruling the embedding
+partition is a change worth seeing before it lands. Either way every verdict —
+old label, new label, confidence, and the model's one-line rationale — is
+recorded in the run metadata, so `auto` is auditable rather than opaque.
+
+Two behaviours worth knowing about, because both look like "nothing happened":
+
+- **A flat confidence column suppresses the tail.** If every document scored
+  about the same (an uncalibrated score can saturate near 1.0 for all of them),
+  a bottom-quantile cut would select an essentially arbitrary set and let the
+  model perturb assignments that were fine. The pass skips instead and says so
+  in its metadata. Fixing the *confidence* signal — see the section above — is
+  what makes selection meaningful; an absolute `confidence_threshold` also
+  works, since it ranks nothing.
+- **Failures are soft.** A missing API key, a provider outage, or a malformed
+  reply degrades to the plain embedding result with the reason in metadata. A
+  consolidation problem never fails your clustering run.
+
+To find out whether it actually helped, capture a run with the pass off and one
+with it on, then diff them:
+
+```bash
+dgml cluster --workspace ./ws --json > before.json
+# ... enable clustering.scenario.consolidation in the workspace config ...
+dgml cluster --workspace ./ws --json > after.json
+dgml file list --workspace ./ws --json > files.json
+
+uv run python scripts/clustering_metrics.py \
+    --before before.json --after after.json --files files.json
+```
+
+That prints both runs side by side with deltas — cluster shape, confidence, and
+(when ground truth is available) ARI, NMI, purity, and mapped accuracy — plus
+the list of documents that changed DocSet, which is the thing to actually read
+before switching `apply` to `auto`. Ground truth comes from a `--labels` map or
+from a one-folder-per-class corpus layout; with neither, the external scores are
+reported as unavailable rather than as zeros.
+
 ### Symptom → knob
 
 - **One true category split across several clusters** (high homogeneity,
@@ -345,6 +468,18 @@ incremental CLI path.
 - **Incremental run opens too many new DocSets** → raise
   `scenario.threshold_quantile` toward 0.95, or disable gating with
   `threshold_quantile: null`.
+- **Assignments are mostly right but you can't tell which ones to trust** →
+  set `scenario.calibration.abstain_threshold` and work the `review_queue`;
+  add `calibration.method: temperature` if you want the threshold to keep
+  meaning the same thing on the next corpus.
+- **A handful of documents are wrong and no config change fixes them without
+  breaking the rest** → enable `scenario.consolidation` and let the LLM
+  adjudicate just that tail. Set `selector.max_docs` to whatever you're
+  willing to spend.
+- **Consolidation is enabled but reports `n_selected: 0`** → read the `notes`
+  in its metadata. Usually the confidence column is flat, so the tail was
+  suppressed on purpose; give the score some resolution (`calibration.method`)
+  or select on an absolute `selector.confidence_threshold` instead.
 
 ## 6. Inspect what came out
 

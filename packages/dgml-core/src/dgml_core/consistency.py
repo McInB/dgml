@@ -35,7 +35,7 @@ from .errors import (
 from .hashing import sha256_file
 from .hybrid import extract_text_hybrid
 from .ocr import extract_text_ocr, load_ocr_config
-from .pages import PAGE_GLOB, render_pages
+from .pages import DEFAULT_DPI, PAGE_GLOB, render_pages
 from .storage import Workspace, read_json
 from .text_extraction import (
     PAGE_TEXT_GLOB,
@@ -165,6 +165,7 @@ def _check_file(
     sha = record_data.get("sha256")
     page_count: int | None = record_data.get("page_count")
     original_filename = record_data.get("original_filename")
+    dpi = _recorded_dpi(record_data)
 
     if not original_filename:
         report.issues.append(
@@ -242,6 +243,7 @@ def _check_file(
                 errors_path=errors_path,
                 permanent_ops=permanent_ops,
                 file_id=file_id,
+                dpi=dpi,
                 report=report,
             )
             if not recovered:
@@ -257,6 +259,7 @@ def _check_file(
         errors_path=errors_path,
         permanent_ops=permanent_ops,
         file_id=file_id,
+        dpi=dpi,
         report=report,
     )
 
@@ -276,10 +279,27 @@ def _check_file(
             permanent_ops=permanent_ops,
             file_id=file_id,
             text_mode=text_mode,
+            dpi=dpi,
             verbose=verbose,
             debug=debug,
             report=report,
         )
+
+
+def _recorded_dpi(record_data: dict[str, Any]) -> int:
+    """The DPI this file's pages were rendered at, per its own record.
+
+    Every repair below has to reproduce the file's *existing* geometry rather
+    than today's default: a re-render at a different DPI would leave the page
+    images disagreeing with the ``page_text/`` boxes already on disk, and a
+    re-extract at a different DPI would do the mirror image. ``page_image_dpi``
+    is absent on records written before it existed and ``null`` when no pages
+    were ever produced, both of which mean "the default was in force".
+    """
+    recorded = record_data.get("page_image_dpi")
+    if isinstance(recorded, int) and not isinstance(recorded, bool) and recorded > 0:
+        return recorded
+    return DEFAULT_DPI
 
 
 def _recover_missing_pages(
@@ -289,6 +309,7 @@ def _recover_missing_pages(
     errors_path: Path,
     permanent_ops: set[str],
     file_id: str,
+    dpi: int,
     report: CheckReport,
 ) -> int:
     """Recover a file whose stored page count is unknown/bogus and which has
@@ -311,7 +332,7 @@ def _recover_missing_pages(
         return 0
 
     try:
-        actual = render_pages(pdf_path, pages_dir)
+        actual = render_pages(pdf_path, pages_dir, dpi=dpi)
     except (GhostscriptNotFound, PageRenderFailed) as exc:
         append_recorded_error(
             errors_path,
@@ -364,6 +385,7 @@ def _check_page_rendering(
     errors_path: Path,
     permanent_ops: set[str],
     file_id: str,
+    dpi: int,
     report: CheckReport,
 ) -> None:
     if len(rendered_pages) == expected:
@@ -384,7 +406,7 @@ def _check_page_rendering(
         return
 
     try:
-        actual = render_pages(pdf_path, pages_dir)
+        actual = render_pages(pdf_path, pages_dir, dpi=dpi)
     except (GhostscriptNotFound, PageRenderFailed) as exc:
         append_recorded_error(
             errors_path,
@@ -445,6 +467,7 @@ def _check_text_extraction(
     permanent_ops: set[str],
     file_id: str,
     text_mode: str,
+    dpi: int,
     verbose: bool,
     debug: bool,
     report: CheckReport,
@@ -485,7 +508,7 @@ def _check_text_extraction(
 
     try:
         result = _reextract(
-            ws, pdf_path, text_dir, file_id, text_mode, verbose=verbose, debug=debug
+            ws, pdf_path, text_dir, file_id, text_mode, dpi=dpi, verbose=verbose, debug=debug
         )
     except (TextExtractionFailed, OcrFailed, AuthError, DgmlError) as exc:
         append_recorded_error(
@@ -548,10 +571,18 @@ def _reextract(
     file_id: str,
     text_mode: str,
     *,
+    dpi: int = DEFAULT_DPI,
     verbose: bool = False,
     debug: bool = False,
 ) -> ExtractDigitalResult:
-    """Re-extract text for ``file_id`` using whichever mode it was added with."""
+    """Re-extract text for ``file_id`` using whichever mode it was added with.
+
+    ``dpi`` is the file's *own* render resolution, not today's default: digital
+    word boxes are written in page-image pixel space, so re-extracting at a
+    different value would leave ``page_text/`` disagreeing with the
+    ``page_images/`` already on disk. The pure-OCR path reads those images
+    directly and so needs no dpi.
+    """
     if text_mode == TextMode.OCR.value:
         config = load_ocr_config(ws)
         return extract_text_ocr(
@@ -572,10 +603,11 @@ def _reextract(
             config=config,
             text_extraction_config=text_extraction_config,
             workspace=ws,
+            dpi=dpi,
             verbose=verbose,
             debug=debug,
         )
-    return extract_text_digital(pdf_path, text_dir, file_id=file_id)
+    return extract_text_digital(pdf_path, text_dir, file_id=file_id, dpi=dpi)
 
 
 def _is_valid_text_json(path: Path) -> bool:

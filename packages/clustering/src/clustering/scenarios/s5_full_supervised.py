@@ -19,8 +19,11 @@ then assigned to its nearest prototype.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 
+from clustering.calibration import fit_support_calibrator
 from clustering.data.datasets import DocumentDataset
 from clustering.scenarios.base import Scenario, ScenarioResult
 from clustering.scenarios.clustering import assign_to_prototypes
@@ -89,6 +92,10 @@ class S5FullSupervised(Scenario):
         # ── Optionally blend in a name prototype (few-shot prior) ────────
         blend = self.config.scenario.name_prototype_blend
         prototype_source = "support_mean"
+        # Replays the blend onto the leave-one-out prototypes below, so the
+        # calibrator is fit against the same prototype construction inference
+        # uses. ``None`` when no blend is active.
+        prototype_transform: Callable[[torch.Tensor], torch.Tensor] | None = None
         if blend:
             # The blend mixes a name prototype with the support mean in the
             # unit-direction space. That is only geometrically sound on a flat
@@ -103,19 +110,60 @@ class S5FullSupervised(Scenario):
                     f"manifold; got manifold.name={self.config.manifold.name!r}."
                 )
             name_protos = self.encode_texts(list(cats))
-            prototypes = self._blend_prototypes(prototypes, name_protos, blend)
+            alpha = blend
+
+            def prototype_transform(protos: torch.Tensor) -> torch.Tensor:
+                return self._blend_prototypes(protos, name_protos, alpha)
+
+            prototypes = prototype_transform(prototypes)
             prototype_source = f"name_support_blend(alpha={blend:g})"
 
         # ── Embed unknown set + assign to prototypes ─────────────────────
         doc_ids, fused, true_labels = self.fused_embeddings(unknown_dataset)
         embeddings = self.projector(fused)
 
-        result = assign_to_prototypes(embeddings, prototypes, self.manifold)
-        labels_t, conf_t, probs_t = result.labels, result.confidence, result.probs
+        # ── Calibrate on the labeled support set, leave-one-out ───────────
+        # S5 is the one scenario with a fully labeled support set, so it is the
+        # one that can fit a real calibrator. A ``None`` result means "not
+        # enough labels, or nothing was asked for" — keep the ordinal
+        # confidence and apply any floor directly instead.
+        cal = self.config.scenario.calibration
+        calibrator = fit_support_calibrator(
+            support_embeddings,
+            support_labels,
+            list(cats),
+            self.manifold,
+            method=cal.method,
+            coverage=cal.coverage,
+            abstain_threshold=cal.abstain_threshold,
+            n_shots=n_shots,
+            prototype_transform=prototype_transform,
+        )
+        result = assign_to_prototypes(
+            embeddings,
+            prototypes,
+            self.manifold,
+            calibrator=calibrator,
+            abstain_threshold=cal.abstain_threshold if calibrator is None else None,
+        )
+        labels_t, probs_t = result.labels, result.probs
+        # Report the calibrated confidence when there is one — that is the
+        # number a reviewer should act on. The uncalibrated signal is
+        # recoverable from ``metadata['calibration']`` plus ``scores``.
+        conf_t = (
+            result.calibrated_confidence
+            if result.calibrated_confidence is not None
+            else result.confidence
+        )
         labels_arr = labels_t.detach().numpy() if hasattr(labels_t, "numpy") else labels_t
         conf_arr = conf_t.detach().numpy() if hasattr(conf_t, "numpy") else conf_t
         predictions: list[str | None] = [cats[int(li)] for li in labels_arr.tolist()]
         confidence: list[float | None] = [float(c) for c in conf_arr.tolist()]
+        review: list[bool] = (
+            [bool(x) for x in result.abstain.tolist()]
+            if result.abstain is not None
+            else [False] * len(doc_ids)
+        )
 
         return ScenarioResult(
             run_id=self.run_id,
@@ -127,11 +175,14 @@ class S5FullSupervised(Scenario):
             true_labels=true_labels,
             scores=probs_t,
             class_names=list(cats),
+            review=review,
             metadata={
                 "prototype_source": prototype_source,
                 "n_shots": n_shots,
                 "n_support": len(support_dataset),
                 "categories": list(cats),
+                "n_review": int(sum(review)),
+                "calibration": result.calibration,
                 "projector_trained": bool(train_history),
                 "projector_loss_history": train_history,
             },

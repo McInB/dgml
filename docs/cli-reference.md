@@ -271,9 +271,16 @@ successfully named) is still assigned. The command always exits `0`.
   "n_assigned_existing": 2,
   "n_new_clusters": 1,
   "assignments": {
-    "k7q3xb91pmrf": {"docset": "Contracts", "confidence": 0.83, "is_new": false},
-    "abc123def456": {"docset": "Receipts", "confidence": 0.71, "is_new": false}
-  }
+    "k7q3xb91pmrf": {
+      "docset": "Contracts", "confidence": 0.83,
+      "naming_confidence": null, "is_new": false, "review": false
+    },
+    "abc123def456": {
+      "docset": "Receipts", "confidence": 0.71,
+      "naming_confidence": null, "is_new": false, "review": false
+    }
+  },
+  "review_queue": []
 }
 ```
 
@@ -289,7 +296,19 @@ the incremental workflow:
 | `mode` | The effective run mode after resolving `auto` — `"fresh"` or `"incremental"`. |
 | `n_assigned_existing` | Number of files assigned to a DocSet that already existed before this run (the incremental "fit an existing cluster" case). |
 | `n_new_clusters` | Number of new DocSets created this run (emergent clusters that were LLM-named). |
-| `assignments` | Per-file detail: `docset` (final DocSet name), `confidence` (nearest-prototype confidence in `[0, 1]`, or `null` for emergent clusters), and `is_new` (whether the DocSet was created this run). |
+| `assignments` | Per-file detail: `docset` (final DocSet name), `confidence` (in `[0, 1]`, or `null`), `naming_confidence` (see below), `is_new` (whether the DocSet was created this run), and `review`. `confidence` means different things per `method`. Under `embedding` it is the nearest-prototype softmax peak when the file was matched against an existing DocSet, and the clustering-geometry peak (`0.0` for files the algorithm called noise) for files placed by a fresh clustering run. Under `llm` it is the model's self-reported confidence in the group the file was placed in — shared by every file in that group, `null` when the model declined to report one. Neither is a calibrated probability: both are *ordinal* scores, comparable within one run and not across runs, so use them to rank which assignments to review first rather than as a threshold. `review` is `true` when the run wants a human to confirm that assignment; the file is assigned either way, so `review` never changes `docset`. |
+| `review_queue` | The file ids whose `review` flag is set, as a list — the assignments to confirm, without scanning `assignments`. Always present, and always empty unless the clustering config enables calibration (see below). |
+
+`confidence` and `naming_confidence` answer different questions and are
+never interchangeable. `confidence` asks *did this file land in the right
+group*. `naming_confidence` asks *is that group's name right* — it is the
+share of independent naming attempts that agreed on the name a new DocSet was
+created with, in `(0, 1]`. It is `null` for files matched to a DocSet that
+already existed (nothing was named), and `null` on new DocSets too unless
+[`classification.naming_attempts`](#auto-classification) is raised above 1.
+A tightly-grouped cluster can still be badly named, so sort new DocSets by
+`naming_confidence` to see which names were near-unanimous and which were coin
+tosses worth a human look.
 
 LLM naming requires the same workspace setup as `--auto-classify`:
 
@@ -784,11 +803,11 @@ Errors across the group: `DOCSET_NOT_FOUND`, `FILE_NOT_FOUND`,
 
 ## File commands
 
-### `dgml file add <path> [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--auto-classify]`
+### `dgml file add <path> [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--dpi N] [--auto-classify]`
 
 Add a File. The source is copied into the workspace, hashed, its pages
-are rendered to 300 dpi PNGs via `gs`, and per-page word boxes are
-written to `page_text/` according to `--text-mode`.
+are rendered to PNGs via `gs` (300 dpi by default — see `--dpi`), and
+per-page word boxes are written to `page_text/` according to `--text-mode`.
 
 `<path>` is a `.pdf`, or a convertible source (`.docx`/`.doc`/`.xlsx`/`.xls`)
 when a converter is configured for its format family in the workspace
@@ -817,6 +836,22 @@ ignored when `<path>` is a single file.
 | `digital` (default) | Extract digital text from the PDF with `pdfminer.six`. A permanent text-extraction error is recorded for files with no digital text — the File record is still created (soft fail). |
 | `ocr` | Send each rendered page image to the cloud provider configured in `<workspace>/config.toml`. Requires the `azure` or `aws` extra (`uv sync --extra azure` / `uv sync --extra aws` from a repo checkout; `pip install dgml[azure]`/`dgml[aws]` once DGML is published to PyPI). See "OCR configuration" below. |
 | `hybrid` | Run `digital` then `ocr` and merge the two per-page results by grouping words covering the same area into overlap regions (boxes overlap on IoU > 0.5 *or* one mostly contained in the other, so split/merge tokenization is resolved as a unit). Each region is resolved as a whole: OCR-only regions are kept; digital-only regions (no overlapping OCR) are assumed invisible to the human eye and dropped; mixed regions compare both sides' concatenated text by dash-normalized Levenshtein distance — if they agree (distance ≤ 2) digital wins (its characters come straight from the PDF font, more reliable than OCR even when OCR's tokenization is finer), and if they disagree OCR wins. A page whose digital text is mostly unresolved glyphs (pdfminer `(cid:N)` sentinels) falls back to OCR entirely. Default is silent — pass the global `--verbose` flag to surface per-page warnings and the merge summary on stderr. Requires the same `ocr` workspace config as `--text-mode ocr`. Optionally, an LLM can make the per-region decision instead of this heuristic — declare a `text_extraction` section in `config.toml` (e.g. a local Ollama model); see [storage-layout.md](storage-layout.md#text_extraction-optional). Any LLM failure falls back to the heuristic for that page. |
+
+`--dpi N` sets the resolution page images are rasterized at, in dots per
+inch (default `300`, must be a positive integer — `0` or a negative value is
+an argparse usage error, exit 2, before the workspace is touched). Lower
+values roughly linearly reduce render time and `page_images/` disk use: 150
+is usually ample for OCR and for the clustering vision encoder, which
+downscales anyway. The value is stored on the File as `page_image_dpi`, and
+`dgml check --retry-errors` re-renders and re-extracts at that recorded value
+rather than the current default, so a repair reproduces the file's existing
+geometry.
+
+Note that `--dpi` also governs `page_text/` word boxes, which are expressed
+in **page-image pixel space** (`round(pdf_pts * dpi / 72)`) rather than PDF
+points — so the coordinates in a File added with `--dpi 150` are half those
+of the same File added at 300. Anything consuming `dg:origin` boxes should
+read `page_image_dpi` off the File record rather than assuming 300.
 
 Conflict types recorded in the success payload as `conflict_kind`:
 
@@ -980,6 +1015,7 @@ section in `<workspace>/config.toml`:
 |---|---|---|
 | `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-2.5-flash-lite`, `anthropic/claude-opus-4-7`, `openai/gpt-4o`. |
 | `max_pages` | no (default `3`) | How many rendered page images (`page_images/page_1.png` …) to send to the LLM. Cap is per-classification cost: 1 is the cheap setting, 4+ is the thorough one. |
+| `naming_attempts` | no (default `1`) | How many independent proposals to request when naming a *newly clustered* DocSet (`dgml cluster`, not per-file `--auto-classify`). At `1` the single proposal is used as-is. At `2`+ the name the plurality of attempts agreed on wins, and that share is reported as the file's `naming_confidence` — a 3-of-3 agreement is safe to accept unreviewed, a 2-1 split is worth a look. Costs tokens linearly, so raise it only for runs where a wrong DocSet name is expensive to undo. |
 | `api_key` | no | Optional literal API key. Use only on per-developer workspaces (config.toml isn't checked in). Mutually exclusive with `api_key_env`. |
 | `api_key_env` | no | Optional name of the env var to read the API key from. Mutually exclusive with `api_key`. When neither is set, litellm uses its built-in per-provider lookup (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …). When `api_key_env` references an unset env var, `AUTH_ERROR` is raised. |
 
