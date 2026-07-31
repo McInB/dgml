@@ -53,6 +53,10 @@ class S2PartialLabels(Scenario):
         # ── Embed corpus + initial assignment with composable gates ──────
         doc_ids, embeddings, true_labels = self.embed(unknown_dataset)
         sc = self.config.scenario
+        # No calibrator here: S2's prototypes come from category *names*, so
+        # there is no labeled support set to fit temperature/Platt/conformal
+        # against. The confidence stays ordinal and the review decision is a
+        # plain floor on it — which is honest about what the number is.
         result = assign_to_prototypes(
             embeddings,
             known_protos,
@@ -60,15 +64,23 @@ class S2PartialLabels(Scenario):
             threshold=sc.threshold,
             threshold_confidence=sc.threshold_confidence,
             threshold_quantile=sc.threshold_quantile,
+            abstain_threshold=sc.calibration.abstain_threshold,
         )
         labels_t, conf_t = result.labels, result.confidence
 
         labels_arr = labels_t.detach().numpy() if hasattr(labels_t, "numpy") else labels_t
         conf_arr = conf_t.detach().numpy() if hasattr(conf_t, "numpy") else conf_t
+        abstain_list = (
+            [bool(x) for x in result.abstain.tolist()] if result.abstain is not None else None
+        )
 
         # ── Cluster the unassigned bucket into emergent categories ───────
         predictions: list[str | None] = [None] * len(doc_ids)
         confidence: list[float | None] = [None] * len(doc_ids)
+        # Only known-category assignments can abstain: a document routed to the
+        # unknown bucket has no assignment to review yet — it is waiting on a
+        # new category, which is a different decision.
+        review: list[bool] = [False] * len(doc_ids)
         unknown_idx = [i for i, li in enumerate(labels_arr.tolist()) if int(li) == -1]
         n_unknown = len(unknown_idx)
 
@@ -131,6 +143,8 @@ class S2PartialLabels(Scenario):
             if int(li) != -1:
                 predictions[i] = cats[int(li)]
                 confidence[i] = float(conf_arr[i])
+                if abstain_list is not None:
+                    review[i] = abstain_list[i]
 
         return ScenarioResult(
             run_id=self.run_id,
@@ -140,8 +154,10 @@ class S2PartialLabels(Scenario):
             predictions=predictions,
             confidence=confidence,
             true_labels=true_labels,
+            review=review,
             metadata={
                 "categories": list(cats),
+                "n_review": int(sum(review)),
                 # Echo the user-supplied gate config + the effective
                 # post-calibration values, so `compare_runs` and the UI
                 # can reconstruct the operating point.

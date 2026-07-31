@@ -143,9 +143,14 @@ def test_s5_assigns_to_support_prototypes_with_scores_and_confidence() -> None:
         "n_shots": 2,
         "n_support": 4,
         "categories": ["Invoice", "Contract"],
+        # Calibration is off by default, so nothing is queued and no calibrator
+        # provenance is recorded.
+        "n_review": 0,
+        "calibration": None,
         "projector_trained": False,
         "projector_loss_history": [],
     }
+    assert result.review == [False, False]
 
 
 def test_s5_n_shots_uses_first_samples_per_category() -> None:

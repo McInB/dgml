@@ -155,6 +155,41 @@ class ManifoldConfig(_StrictModel):
         return self
 
 
+# ── Confidence calibration + abstain ──────────────────────────────────────
+class CalibrationConfig(_StrictModel):
+    """Post-hoc calibration of the reported confidence, and when to abstain.
+
+    Off by default (``method="none"``, no thresholds) so the ordinal
+    softmax-peak signal is reported unchanged and nothing is flagged.
+    ``temperature`` / ``platt`` are fit on the labeled support set by
+    leave-one-out, so only the scenarios that *have* labels can use them (S3 /
+    S5); the unlabeled scenarios stay ordinal without erroring. ``coverage``
+    adds a distribution-free split-conformal abstain gate; ``abstain_threshold``
+    is an absolute floor that works with or without a fitted calibrator.
+
+    Neither gate changes a document's predicted category — they only decide
+    whether a human should confirm it.
+    """
+
+    method: Literal["none", "temperature", "platt"] = "none"
+    coverage: float | None = None
+    """Target coverage in (0, 1) for the conformal abstain gate. ``None`` off."""
+    abstain_threshold: float | None = None
+    """Absolute calibrated-confidence floor in [0, 1]; below it ⇒ review."""
+
+    @model_validator(mode="after")
+    def _check_ranges(self) -> CalibrationConfig:
+        # Both are caught here so a typo'd operating point fails at config load
+        # rather than partway through a run (or worse, silently clamped).
+        if self.coverage is not None and not 0.0 < self.coverage < 1.0:
+            raise ValueError(f"calibration.coverage must be in (0, 1); got {self.coverage}.")
+        if self.abstain_threshold is not None and not 0.0 <= self.abstain_threshold <= 1.0:
+            raise ValueError(
+                f"calibration.abstain_threshold must be in [0, 1]; got {self.abstain_threshold}."
+            )
+        return self
+
+
 # ── Scenario ──────────────────────────────────────────────────────────────
 class ScenarioConfig(_StrictModel):
     name: ScenarioName
@@ -355,6 +390,9 @@ class ScenarioConfig(_StrictModel):
     what makes the column rankable instead of a column of ties. A positive
     float pins an explicit temperature (``1.0`` = the raw softmax-peak,
     pre-rescaling behavior)."""
+
+    # ── Confidence calibration + abstain ──────────────────────────────────
+    calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
 
     @model_validator(mode="after")
     def _check_confidence_temperature(self) -> ScenarioConfig:

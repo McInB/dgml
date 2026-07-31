@@ -51,6 +51,13 @@ class ScenarioResult:
     scores: torch.Tensor | None = None
     class_names: list[str] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # ── Abstain / review queue ────────────────────────────────────────────
+    # Per-document flag (aligned with ``doc_ids``) marking assignments the
+    # calibration / abstain gate is not confident enough to auto-accept. Empty
+    # — not all-False — when a scenario emits no abstain signal at all, so a
+    # consumer can tell "nothing flagged" from "nothing was ever asked"; treat
+    # a missing or short entry as ``False``.
+    review: list[bool] = field(default_factory=list)
 
 
 class Scenario(ABC):
@@ -452,4 +459,8 @@ class Scenario(ABC):
             scores=result.scores,
             class_names=list(result.class_names) if result.class_names else None,
             metadata={**result.metadata, "refined": True},
+            # A user correction is itself the review, so the flag is carried
+            # through rather than recomputed — a corrected document keeps its
+            # provenance of having been queued.
+            review=list(result.review),
         )

@@ -52,12 +52,24 @@ class S4ZeroShot(Scenario):
         cats, prototypes = self._build_prototypes()
         doc_ids, embeddings, true_labels = self.embed(unknown_dataset)
 
-        result = assign_to_prototypes(embeddings, prototypes, self.manifold)
+        # Zero-shot has no labeled support set, so nothing can be fit — the
+        # confidence stays ordinal and abstention is a plain floor on it.
+        result = assign_to_prototypes(
+            embeddings,
+            prototypes,
+            self.manifold,
+            abstain_threshold=self.config.scenario.calibration.abstain_threshold,
+        )
         labels_t, conf_t, probs_t = result.labels, result.confidence, result.probs
         labels_arr = labels_t.detach().numpy() if hasattr(labels_t, "numpy") else labels_t
         conf_arr = conf_t.detach().numpy() if hasattr(conf_t, "numpy") else conf_t
         predictions: list[str | None] = [cats[int(li)] for li in labels_arr.tolist()]
         confidence: list[float | None] = [float(c) for c in conf_arr.tolist()]
+        review: list[bool] = (
+            [bool(x) for x in result.abstain.tolist()]
+            if result.abstain is not None
+            else [False] * len(doc_ids)
+        )
 
         return ScenarioResult(
             run_id=self.run_id,
@@ -69,5 +81,10 @@ class S4ZeroShot(Scenario):
             true_labels=true_labels,
             scores=probs_t,
             class_names=list(cats),
-            metadata={"prototype_source": "name", "categories": list(cats)},
+            review=review,
+            metadata={
+                "prototype_source": "name",
+                "categories": list(cats),
+                "n_review": int(sum(review)),
+            },
         )

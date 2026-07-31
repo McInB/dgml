@@ -65,6 +65,7 @@ from typing import Any, Literal, cast
 import numpy as np
 import torch
 
+from clustering.calibration import Calibrator
 from clustering.manifolds.base import ManifoldHead
 
 _log = logging.getLogger(__name__)
@@ -1650,10 +1651,13 @@ def cluster_confidence(
 class AssignmentResult:
     """Output of :func:`assign_to_prototypes`.
 
-    Carries both the per-document tensors (``labels`` / ``distances`` /
-    ``confidence`` / ``probs``) and the *effective* thresholds that were
-    actually applied — distinct from the user-supplied config values
-    whenever quantile auto-calibration kicks in.
+    Carries the per-document tensors (``labels`` / ``distances`` /
+    ``confidence`` / ``probs``), the *effective* thresholds that were actually
+    applied (distinct from the user-supplied config values whenever quantile
+    auto-calibration kicks in), and — when a
+    :class:`~clustering.calibration.Calibrator` is supplied — the
+    ``calibrated_confidence`` and the per-document ``abstain`` flag that feeds
+    a human review queue.
     """
 
     labels: torch.Tensor  # [N] int (-1 = unassigned)
@@ -1662,6 +1666,15 @@ class AssignmentResult:
     probs: torch.Tensor  # [N, K] softmax over -distance
     effective_threshold: float | None = None
     effective_confidence_threshold: float | None = None
+    # ── Calibration + abstain ────────────────────────────────────────────
+    # ``calibrated_confidence`` equals ``confidence`` when no calibrator was
+    # supplied (i.e. the raw ordinal signal), so a consumer can read this field
+    # unconditionally. ``abstain`` flags documents the gate is not confident
+    # enough to auto-accept — route them to review. ``calibration`` is the
+    # fitted calibrator's provenance dict, or ``None``.
+    calibrated_confidence: torch.Tensor | None = None
+    abstain: torch.Tensor | None = None
+    calibration: dict[str, Any] | None = None
 
 
 def assign_to_prototypes(
@@ -1672,6 +1685,8 @@ def assign_to_prototypes(
     threshold: float | None = None,
     threshold_confidence: float | None = None,
     threshold_quantile: float | None = None,
+    calibrator: Calibrator | None = None,
+    abstain_threshold: float | None = None,
 ) -> AssignmentResult:
     """Nearest-prototype classification with three composable unknown-bucket gates.
 
@@ -1690,6 +1705,13 @@ def assign_to_prototypes(
       (If ``threshold`` is *also* passed, ``threshold_quantile`` overrides
       it — the quantile is treated as a higher-priority calibration.)
 
+    Orthogonal to all three is the **abstain** decision. The gates above decide
+    *novelty* — whether a document belongs to a known class at all — and change
+    its label to ``-1``. Abstention decides *review*: whether a human should
+    look at the assignment before it is trusted. It never changes the predicted
+    label, so a document can be confidently assigned and still be flagged, or
+    routed to the unknown bucket without being flagged.
+
     Args:
         embeddings: ``[N, D]`` on-manifold query points.
         prototypes: ``[K, D]`` on-manifold class prototypes.
@@ -1697,6 +1719,13 @@ def assign_to_prototypes(
         threshold: Absolute distance cutoff (see above).
         threshold_confidence: Confidence floor in ``[0, 1]``.
         threshold_quantile: Distance quantile in ``(0, 1)``.
+        calibrator: Fitted :class:`~clustering.calibration.Calibrator` used to
+            rescale the reported confidence and (if it carries a conformal
+            threshold) decide abstention. ``None`` reports the raw ordinal
+            confidence.
+        abstain_threshold: Absolute floor on the (calibrated) confidence, OR-ed
+            with any conformal gate the calibrator carries. Usable without a
+            calibrator, which is how the unlabeled scenarios abstain.
 
     Returns:
         :class:`AssignmentResult`. ``effective_threshold`` is the distance
@@ -1737,6 +1766,22 @@ def assign_to_prototypes(
     if unassigned is not None:
         labels = torch.where(unassigned, torch.full_like(labels, -1), labels)
 
+    # ── Calibrate the reported confidence, then decide abstention ─────────
+    # Deliberately after the novelty gates and deliberately not feeding back
+    # into ``labels``: this is the review decision, not the routing decision.
+    # With no calibrator the calibrated confidence is just the ordinal softmax
+    # peak, so the field is always readable, and an ``abstain_threshold`` still
+    # applies as a plain floor on it.
+    if calibrator is not None:
+        calibrated_confidence, abstain = calibrator.apply(logits)
+        calibration = calibrator.as_dict()
+    else:
+        calibrated_confidence = confidence.clone() if hasattr(confidence, "clone") else confidence
+        abstain = torch.zeros_like(labels, dtype=torch.bool)
+        calibration = None
+    if abstain_threshold is not None:
+        abstain = _bool_or(abstain, calibrated_confidence < abstain_threshold)
+
     return AssignmentResult(
         labels=labels,
         distances=distances,
@@ -1744,6 +1789,9 @@ def assign_to_prototypes(
         probs=probs,
         effective_threshold=eff_dist,
         effective_confidence_threshold=eff_conf,
+        calibrated_confidence=calibrated_confidence,
+        abstain=abstain,
+        calibration=calibration,
     )
 
 

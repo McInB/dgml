@@ -116,12 +116,21 @@ class DocPrediction:
     confidence for the unsupervised path (peak softmax over centroid
     distances, ``0.0`` for documents the algorithm flagged as noise). Both are
     ordinal signals, not calibrated probabilities: comparable *within* a run,
-    not across runs or configs. ``None`` only when the underlying scenario
-    produced no score for a document.
+    not across runs or configs — unless ``scenario.calibration`` is configured,
+    in which case the number is the calibrated one and comparable across runs.
+    ``None`` only when the underlying scenario produced no score for a document.
+
+    ``review`` flags a document whose assignment the run is not confident
+    enough about to apply unattended, and which should be routed to a human.
+    It is *orthogonal* to ``cluster_name``: a flagged document still carries
+    the assignment it would have got anyway, so a caller that ignores the flag
+    behaves exactly as before. Always ``False`` unless
+    ``scenario.calibration`` sets a coverage target or an abstain floor.
     """
 
     cluster_name: str
     confidence: float | None
+    review: bool = False
 
 
 def run_clustering(
@@ -217,10 +226,19 @@ def run_clustering_detailed(
     # (S4 / S5), so this is a no-op for them.
     rewrite = _cluster_to_unknown if not known_categories else _identity
 
+    # ``review`` is empty on any scenario that never populated it, which is not
+    # the same as "reviewed nothing" — pad to length rather than zip strictly, so
+    # an unconfigured run (and any run that populated it only partially) reports
+    # False for the tail instead of raising. A list *longer* than the documents
+    # is a real invariant violation and is left to trip the strict zip below.
+    review = list(result.review or [])
+    if len(review) < len(result.doc_ids):
+        review += [False] * (len(result.doc_ids) - len(review))
+
     return {
-        doc_id: DocPrediction(cluster_name=rewrite(pred), confidence=conf)
-        for doc_id, pred, conf in zip(
-            result.doc_ids, result.predictions, result.confidence, strict=True
+        doc_id: DocPrediction(cluster_name=rewrite(pred), confidence=conf, review=bool(flag))
+        for doc_id, pred, conf, flag in zip(
+            result.doc_ids, result.predictions, result.confidence, review, strict=True
         )
         if pred is not None
     }

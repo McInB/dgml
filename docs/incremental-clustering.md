@@ -68,7 +68,14 @@ dgml cluster --workspace ./ws --method auto
 
 See [`dgml cluster`](cli-reference.md) for the full flag reference and the
 JSON output shape (including the additive `mode`, `n_assigned_existing`,
-`n_new_clusters`, and `assignments` fields).
+`n_new_clusters`, `assignments`, and `review_queue` fields).
+
+An incremental run has labeled examples to hand — every existing DocSet's
+members — so it is the one path that can *calibrate* its confidence and hand
+back a review queue instead of a bare ordinal score. See
+[Calibrated confidence and a review queue](quickstart-clustering.md#calibrated-confidence-and-a-review-queue)
+for the knobs; they are off by default, and enabling them changes which
+assignments get flagged, never which DocSet a file lands in.
 
 ## Config presets (compute tiers)
 

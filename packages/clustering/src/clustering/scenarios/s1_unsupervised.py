@@ -371,6 +371,19 @@ class S1Unsupervised(Scenario):
             # ``scores`` resolves to the label a document would be given.
             cluster_class_names = [f"cluster_{j}" for j in range(int(centroids.shape[0]))]
 
+        # Review floor. S1 has no labeled support set, so there is nothing to
+        # calibrate against — abstention is a plain floor on the ordinal
+        # confidence. Noise points are excluded: they carry ``0.0`` and would
+        # otherwise swamp the queue, and "no cluster fit this" is a novelty
+        # finding, not a low-confidence assignment a reviewer can correct.
+        abstain_threshold = sc.calibration.abstain_threshold
+        review: list[bool] = [False] * len(doc_ids)
+        if abstain_threshold is not None:
+            review = [
+                labels_list[i] != -1 and (c is not None and c < abstain_threshold)
+                for i, c in enumerate(confidence)
+            ]
+
         n_noise = sum(1 for li in labels_list if li == -1)
         n_clusters_found = int(centroids.shape[0])
 
@@ -384,10 +397,12 @@ class S1Unsupervised(Scenario):
             true_labels=true_labels,
             scores=scores,
             class_names=cluster_class_names,
+            review=review,
             metadata={
                 "k_clusters": k,
                 "n_clusters_found": n_clusters_found,
                 "n_noise": n_noise,
+                "n_review": int(sum(review)),
                 "centroids_shape": tuple(centroids.shape),
                 "algorithm": algorithm,
                 "reduce_method": sc.reduce_method,

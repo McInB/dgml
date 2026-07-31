@@ -339,6 +339,41 @@ incremental CLI path.
 | `threshold_confidence` | Softmax-confidence floor in `[0,1]`; docs whose nearest-prototype confidence is below it become novel (new cluster). Manifold-independent — the easiest to reason about. | `None` | Genuinely new categories are being absorbed into existing DocSets — raise it (e.g. 0.4–0.5) to reject more as novel. | New clusters are opening for docs that really belong to an existing DocSet — lower it. |
 | `threshold` | Absolute manifold-distance cutoff (unit depends on `manifold`; needs re-tuning if you change it). | `None` | You want a hard distance gate and know the scale. | — |
 
+### Calibrated confidence and a review queue
+
+The novelty gates above answer "*is this a new category?*" A separate question
+is "*am I confident enough in this assignment to apply it unattended?*" That
+one is what `scenario.calibration` answers, and the two are independent: a
+novelty gate rewrites the assignment (the doc opens a new cluster), while the
+review decision **never** changes where a document landed. It only adds a flag.
+
+Flagged files come back on each assignment as `"review": true`, and collected
+into a top-level `review_queue` list, so you can confirm just those:
+
+```bash
+dgml cluster | jq -r '.review_queue[]'
+```
+
+Everything here is **off by default** — an unconfigured run flags nothing and
+`review_queue` is `[]`.
+
+| Parameter | What it controls | Default | Notes |
+|---|---|---|---|
+| `calibration.abstain_threshold` | Confidence floor in `[0,1]`. Any assignment below it is flagged for review. | `None` | The simplest knob, and the only one that works in every scenario. Start around 0.5 and adjust to the queue size you can actually work through. |
+| `calibration.method` | `temperature` (one-parameter rescaling, fit by maximum likelihood) or `platt` (logistic map fit against whether the top-1 was right). `none` keeps the raw ordinal score. | `none` | Needs labeled examples, so it only applies when the run has a support set (an incremental run over existing DocSets, or S3/S5). Name-only runs ignore it. |
+| `calibration.coverage` | Target coverage in `(0,1)` for a split-conformal gate: flag the tail so that roughly this fraction of assignments are kept unflagged. | `None` | Prefer this over a hand-picked floor when you care about a *guarantee* rather than a number — it adapts to the corpus instead of assuming a scale. |
+
+A word on what "calibrated" buys you: with `method: none` the confidence is
+ordinal, so a 0.83 means "more certain than the 0.6 next to it in this run" and
+nothing more. Once a method is fit, the number is on a stable scale and *is*
+comparable across runs — which is what makes a fixed `abstain_threshold`
+meaningful over time rather than something you re-tune every corpus.
+
+The fit is **leave-one-out**: each labeled example is scored against a prototype
+rebuilt without it. Fitting on the ordinary prototypes would be self-flattering
+(every document helps build the prototype it's measured against) and the
+resulting thresholds would be optimistic on documents the run has not seen.
+
 ### Symptom → knob
 
 - **One true category split across several clusters** (high homogeneity,
@@ -356,6 +391,10 @@ incremental CLI path.
 - **Incremental run opens too many new DocSets** → raise
   `scenario.threshold_quantile` toward 0.95, or disable gating with
   `threshold_quantile: null`.
+- **Assignments are mostly right but you can't tell which ones to trust** →
+  set `scenario.calibration.abstain_threshold` and work the `review_queue`;
+  add `calibration.method: temperature` if you want the threshold to keep
+  meaning the same thing on the next corpus.
 
 ## 6. Inspect what came out
 
