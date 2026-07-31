@@ -166,7 +166,8 @@ def test_dangling_docset_reference(workspace: Workspace) -> None:
 
 
 def test_orphan_file_dir_missing_metadata(workspace: Workspace) -> None:
-    workspace.file_dir("orphanedfile").mkdir(parents=True)
+    # A blob-orphan: artifacts present, no manifest.
+    workspace.store.put_blob("files/orphanedfile/report.pdf", b"%PDF-1.4\n")
     report = check_workspace(workspace)
     assert any(i.target_type == "file" and i.kind == "missing_metadata" for i in report.issues)
 
@@ -174,7 +175,7 @@ def test_orphan_file_dir_missing_metadata(workspace: Workspace) -> None:
 def test_corrupt_file_metadata_does_not_crash(workspace: Workspace) -> None:
     """A corrupt file.json must be reported, not crash the whole walk."""
     fid = "corruptfileid"
-    workspace.file_dir(fid).mkdir(parents=True)
+    workspace.store.put_blob(f"files/{fid}/report.pdf", b"%PDF-1.4\n")  # makes the id visible
     workspace.file_json_path(fid).write_text("{not valid json")
     report = check_workspace(workspace)
     assert any(
@@ -185,7 +186,7 @@ def test_corrupt_file_metadata_does_not_crash(workspace: Workspace) -> None:
 
 def test_corrupt_docset_metadata_does_not_crash(workspace: Workspace) -> None:
     did = "corruptdocsetid"
-    workspace.docset_dir(did).mkdir(parents=True)
+    workspace.store.put_blob(f"docsets/{did}/extraction-schema.rnc", b"start = text\n")
     workspace.docset_json_path(did).write_text("{not valid json")
     report = check_workspace(workspace)
     assert any(
@@ -201,9 +202,9 @@ def test_corrupt_metadata_alongside_clean_continues_walk(
     files/docsets from being checked."""
     bad = "aaaaaaaaaaaa"
     good = "zzzzzzzzzzzz"
-    workspace.file_dir(bad).mkdir(parents=True)
+    workspace.store.put_blob(f"files/{bad}/report.pdf", b"%PDF-1.4\n")
     workspace.file_json_path(bad).write_text("{not json")
-    workspace.file_dir(good).mkdir(parents=True)  # missing metadata, but cleanly missing
+    workspace.store.put_blob(f"files/{good}/report.pdf", b"%PDF-1.4\n")  # blob-orphan: no manifest
     report = check_workspace(workspace)
     issues_by_id = {i.target_id: i.kind for i in report.issues if i.target_type == "file"}
     assert issues_by_id.get(bad) == "corrupt_metadata"
@@ -284,14 +285,9 @@ def test_reextract_hybrid_threads_debug(
 
     monkeypatch.setattr(consistency, "extract_text_hybrid", fake_hybrid)
 
-    _reextract(
-        workspace,
-        Path("x.pdf"),
-        workspace.file_text_dir("fid"),
-        "fid",
-        "hybrid",
-        verbose=False,
-        debug=debug,
-    )
+    fid = "fid"
+    workspace.store.put_blob(f"files/{fid}/doc.pdf", b"%PDF-1.4\n")
+    source_key = workspace.blob_key(workspace.file_dir(fid) / "doc.pdf")
+    _reextract(workspace, source_key, fid, "hybrid", verbose=False, debug=debug)
 
     assert captured["debug"] is debug
