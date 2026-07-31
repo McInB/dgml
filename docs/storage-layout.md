@@ -159,7 +159,7 @@ back the per-task models:
 
 ```toml
 [models]
-light    = "gemini/gemini-2.5-flash-lite"  # classification, style
+light    = "gemini/gemini-flash-lite-latest"  # classification, style
 standard = "anthropic/claude-haiku-4-5"    # transcription, text extraction
 advanced = "anthropic/claude-sonnet-4-6"   # labeling, value extraction
 expert   = "anthropic/claude-opus-4-8"     # schema generation
@@ -202,7 +202,7 @@ override it or set classification-specific credentials.
 
 ```toml
 [classification]
-model = "gemini/gemini-2.5-flash-lite"
+model = "gemini/gemini-flash-lite-latest"
 ```
 
 Field rules:
