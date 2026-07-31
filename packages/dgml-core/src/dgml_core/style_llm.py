@@ -80,8 +80,8 @@ def annotate_style_from_image(
     styled = 0
     pages_dir = workspace.file_pages_dir(file_id)
     for page, elements in by_page.items():
-        image_path = pages_dir / (PAGE_FILENAME_TEMPLATE % page)
-        if not image_path.exists():
+        image_key = workspace.blob_key(pages_dir / (PAGE_FILENAME_TEMPLATE % page))
+        if not workspace.store.blob_exists(image_key):
             continue
         snippets = [" ".join("".join(el.itertext()).split()) for el in elements]
         snippets = snippets[:_MAX_SNIPPETS_PER_PAGE]
@@ -95,7 +95,7 @@ def annotate_style_from_image(
             context={"file_id": file_id, "page": page},
         )
         try:
-            result = _request_styles(page_config, image_path.read_bytes(), snippets)
+            result = _request_styles(page_config, workspace.store.get_blob(image_key), snippets)
         except Exception:
             continue
         for idx, css in result.items():

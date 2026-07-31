@@ -155,7 +155,7 @@ def test_export_missing_file_docset_or_xml(workspace: Workspace) -> None:
     with pytest.raises(DocSetNotFound):
         export_node(workspace, "f001", "nope", leaf_index=0)
     # Docset exists but the pair has no generated XML.
-    workspace.docset_dir("ds02").mkdir(parents=True)
+    workspace.store.put_doc("docsets", "ds02", {"id": "ds02"})
     with pytest.raises(NotFoundError, match="no generated DGML XML"):
         export_node(workspace, "f001", "ds02", leaf_index=0)
 

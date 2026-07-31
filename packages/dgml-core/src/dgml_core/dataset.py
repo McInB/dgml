@@ -21,10 +21,11 @@ job.
 
 from __future__ import annotations
 
+import io
+
 from clustering.data.datasets import DocumentDataset, DocumentRecord
 from PIL import Image
 
-from .pages import PAGE_GLOB
 from .storage import Workspace
 
 
@@ -73,11 +74,15 @@ class WorkspaceFileDataset(DocumentDataset):
         from clustering.example import _build_text
 
         file_id = self.file_ids[index]
-        pages = sorted(self.workspace.file_pages_dir(file_id).glob(PAGE_GLOB))
-        if not pages:
+        ws = self.workspace
+        page_keys = ws.store.list_blobs(ws.blob_key(ws.file_pages_dir(file_id)))
+        if not page_keys:
             raise FileNotFoundError(f"no rendered page images for file '{file_id}'")
-        image = Image.open(pages[0]).convert("RGB")
-        text = _build_text(self.workspace.file_dir(file_id), view=self.text_view)
+        image = Image.open(io.BytesIO(ws.store.get_blob(page_keys[0]))).convert("RGB")
+        # `_build_text` reads `<file_dir>/page_text/*.json`; hand it a materialized
+        # copy of the file's artifacts (the real dir on LocalStore, zero-copy).
+        with ws.store.materialize_dir(ws.blob_key(ws.file_dir(file_id))) as file_dir:
+            text = _build_text(file_dir, view=self.text_view)
         return DocumentRecord(
             doc_id=file_id,
             label=self.labels.get(file_id) if self.labels else None,

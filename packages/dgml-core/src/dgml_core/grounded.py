@@ -892,10 +892,10 @@ def _phase3_call_for_page(
     """One litellm call: send the page + ids that need locating, return
     ``{id: [{page_number, bounding_box}, ...]}`` parsed from the model's
     ``submit_locations`` tool call."""
-    image_path = workspace.file_dir(file_id) / "page_images" / f"page_{page_number}.png"
-    if not image_path.exists():
+    image_key = workspace.blob_key(workspace.file_pages_dir(file_id) / f"page_{page_number}.png")
+    if not workspace.store.blob_exists(image_key):
         raise ValuesExtractionFailed(
-            f"phase 3: no page image at {image_path} for page {page_number}"
+            f"phase 3: no page image for file '{file_id}' page {page_number}"
         )
 
     try:
@@ -915,7 +915,7 @@ def _phase3_call_for_page(
             "role": "user",
             "content": [
                 {"type": "text", "text": user_text},
-                _image_content_block(image_path.read_bytes()),
+                _image_content_block(workspace.store.get_blob(image_key)),
             ],
         },
     ]

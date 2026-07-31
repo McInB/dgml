@@ -62,7 +62,6 @@ from .errors import (
     IncrementalWithoutClusters,
 )
 from .llm_clustering import llm_cluster_files
-from .pages import PAGE_GLOB
 from .run_clustering import resolve_text_settings, run_clustering_detailed
 from .storage import Workspace, read_config, read_json
 from .utils import unassigned_file_ids
@@ -547,7 +546,7 @@ def clustering_internal(
     usable: list[str] = []
     skipped: list[str] = []
     for fid in file_ids:
-        if any(workspace.file_pages_dir(fid).glob(PAGE_GLOB)):
+        if workspace.store.list_blobs(workspace.blob_key(workspace.file_pages_dir(fid))):
             usable.append(fid)
         else:
             skipped.append(fid)
@@ -615,7 +614,7 @@ def clustering_internal(
         for fid in docset_store.list_files(docset.id):
             if picked >= MAX_SUPPORT_SAMPLES_PER_DOCSET:
                 break
-            if any(workspace.file_pages_dir(fid).glob(PAGE_GLOB)):
+            if workspace.store.list_blobs(workspace.blob_key(workspace.file_pages_dir(fid))):
                 support_file_ids.append(fid)
                 support_labels[fid] = docset.name
                 picked += 1
