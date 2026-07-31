@@ -294,7 +294,7 @@ Under the hood, the clusterer:
 1. Embeds each unassigned document from its first-page text (the default is a corpus-fitted TF-IDF text encoder; a file also needs a rendered first-page image to be eligible).
 2. Reduces the embeddings with UMAP and runs the **Leiden community detection algorithm** to identify distinct clusters.
 3. Assigns any cluster whose name matches an existing DocSet to that DocSet.
-4. For each remaining cluster, collects a few sample page images and sends them to the vision LLM configured in `classification` (§1.4), which proposes a cohesive **Name** (e.g., "Loan Agreements", "Valuation Memos") and **Description** for the group.
+4. For each remaining cluster, collects a few sample page images and sends them to the vision LLM configured in `classification` (§1.4), which proposes a cohesive **Name** (e.g., "Loan Agreements", "Valuation Memos") and **Description** for the group. *(A DocSet name is awkward to change once extraction schemas and generated DGML reference it. If you'd rather not take a single LLM opinion on faith, set `"naming_attempts": 3` in the `classification` section: the name the attempts agree on wins, and each file's `naming_confidence` in the `cluster` payload tells you which groups were unanimous and which were a coin toss.)*
 5. Creates the new DocSets in your workspace and assigns the respective files to them.
 
 Partial success is the contract: if the `classification` config is missing or an LLM call fails, the affected files land in `failed_file_ids` while every other cluster is still assigned — fix the config and re-run.

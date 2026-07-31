@@ -427,6 +427,10 @@ def clustering(
             assignments[file_id] = {
                 "docset": cluster_name,
                 "confidence": internal.confidences.get(file_id),
+                # Naming agreement is a property of a *proposed* name, so it is
+                # always absent here; the key is still emitted so consumers can
+                # read one shape for every file.
+                "naming_confidence": None,
                 "is_new": False,
                 "review": internal.review.get(file_id, False),
             }
@@ -498,6 +502,12 @@ def clustering(
                     # emergent cluster is. Files nothing scored still come
                     # back as ``None``.
                     "confidence": internal.confidences.get(file_id),
+                    # Orthogonal to the above: how much the *naming* attempts
+                    # agreed on this DocSet's name, when
+                    # `classification.naming_attempts` is raised above 1. A
+                    # tightly-grouped cluster can still be badly named, so the
+                    # two numbers are never interchangeable.
+                    "naming_confidence": decision.confidence,
                     "is_new": True,
                     "review": internal.review.get(file_id, False),
                 }

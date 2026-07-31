@@ -271,8 +271,14 @@ successfully named) is still assigned. The command always exits `0`.
   "n_assigned_existing": 2,
   "n_new_clusters": 1,
   "assignments": {
-    "k7q3xb91pmrf": {"docset": "Contracts", "confidence": 0.83, "is_new": false},
-    "abc123def456": {"docset": "Receipts", "confidence": 0.71, "is_new": false}
+    "k7q3xb91pmrf": {
+      "docset": "Contracts", "confidence": 0.83,
+      "naming_confidence": null, "is_new": false
+    },
+    "abc123def456": {
+      "docset": "Receipts", "confidence": 0.71,
+      "naming_confidence": null, "is_new": false
+    }
   }
 }
 ```
@@ -289,8 +295,19 @@ the incremental workflow:
 | `mode` | The effective run mode after resolving `auto` — `"fresh"` or `"incremental"`. |
 | `n_assigned_existing` | Number of files assigned to a DocSet that already existed before this run (the incremental "fit an existing cluster" case). |
 | `n_new_clusters` | Number of new DocSets created this run (emergent clusters that were LLM-named). |
-| `assignments` | Per-file detail: `docset` (final DocSet name), `confidence` (in `[0, 1]`, or `null`), `is_new` (whether the DocSet was created this run), and `review`. `confidence` means different things per `method`. Under `embedding` it is the nearest-prototype softmax peak when the file was matched against an existing DocSet, and the clustering-geometry peak (`0.0` for files the algorithm called noise) for files placed by a fresh clustering run. Under `llm` it is the model's self-reported confidence in the group the file was placed in — shared by every file in that group, `null` when the model declined to report one. Neither is a calibrated probability: both are *ordinal* scores, comparable within one run and not across runs, so use them to rank which assignments to review first rather than as a threshold. `review` is `true` when the run wants a human to confirm that assignment; the file is assigned either way, so `review` never changes `docset`. |
+| `assignments` | Per-file detail: `docset` (final DocSet name), `confidence` (in `[0, 1]`, or `null`), `naming_confidence` (see below), `is_new` (whether the DocSet was created this run), and `review`. `confidence` means different things per `method`. Under `embedding` it is the nearest-prototype softmax peak when the file was matched against an existing DocSet, and the clustering-geometry peak (`0.0` for files the algorithm called noise) for files placed by a fresh clustering run. Under `llm` it is the model's self-reported confidence in the group the file was placed in — shared by every file in that group, `null` when the model declined to report one. Neither is a calibrated probability: both are *ordinal* scores, comparable within one run and not across runs, so use them to rank which assignments to review first rather than as a threshold. `review` is `true` when the run wants a human to confirm that assignment; the file is assigned either way, so `review` never changes `docset`. |
 | `review_queue` | The file ids whose `review` flag is set, as a list — the assignments to confirm, without scanning `assignments`. Always present, and always empty unless the clustering config enables calibration (see below). |
+
+`confidence` and `naming_confidence` answer different questions and are
+never interchangeable. `confidence` asks *did this file land in the right
+group*. `naming_confidence` asks *is that group's name right* — it is the
+share of independent naming attempts that agreed on the name a new DocSet was
+created with, in `(0, 1]`. It is `null` for files matched to a DocSet that
+already existed (nothing was named), and `null` on new DocSets too unless
+[`classification.naming_attempts`](#auto-classification) is raised above 1.
+A tightly-grouped cluster can still be badly named, so sort new DocSets by
+`naming_confidence` to see which names were near-unanimous and which were coin
+tosses worth a human look.
 
 LLM naming requires the same workspace setup as `--auto-classify`:
 
@@ -997,6 +1014,7 @@ section in `<workspace>/config.toml`:
 |---|---|---|
 | `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-2.5-flash-lite`, `anthropic/claude-opus-4-7`, `openai/gpt-4o`. |
 | `max_pages` | no (default `3`) | How many rendered page images (`page_images/page_1.png` …) to send to the LLM. Cap is per-classification cost: 1 is the cheap setting, 4+ is the thorough one. |
+| `naming_attempts` | no (default `1`) | How many independent proposals to request when naming a *newly clustered* DocSet (`dgml cluster`, not per-file `--auto-classify`). At `1` the single proposal is used as-is. At `2`+ the name the plurality of attempts agreed on wins, and that share is reported as the file's `naming_confidence` — a 3-of-3 agreement is safe to accept unreviewed, a 2-1 split is worth a look. Costs tokens linearly, so raise it only for runs where a wrong DocSet name is expensive to undo. |
 | `api_key` | no | Optional literal API key. Use only on per-developer workspaces (config.toml isn't checked in). Mutually exclusive with `api_key_env`. |
 | `api_key_env` | no | Optional name of the env var to read the API key from. Mutually exclusive with `api_key`. When neither is set, litellm uses its built-in per-provider lookup (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …). When `api_key_env` references an unset env var, `AUTH_ERROR` is raised. |
 

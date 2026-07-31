@@ -612,6 +612,8 @@ def test_cluster_assigns_unassigned_files_to_docsets(
     assert payload["assignments"][fid] == {
         "docset": "Sample Documents",
         "confidence": None,
+        # A single naming attempt (the default) is not an agreement measurement.
+        "naming_confidence": None,
         "is_new": True,
         "review": False,
     }
