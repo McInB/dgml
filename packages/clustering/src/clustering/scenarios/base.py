@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -33,6 +33,9 @@ from clustering.encoders.base import EncoderOutput
 from clustering.fusion import build_fusion
 from clustering.manifolds import build_manifold
 from clustering.utils.runid import run_id_for
+
+if TYPE_CHECKING:
+    from clustering.consolidation import Adjudicator
 
 
 @dataclass
@@ -464,3 +467,28 @@ class Scenario(ABC):
             # provenance of having been queued.
             review=list(result.review),
         )
+
+    def consolidate(
+        self,
+        result: ScenarioResult,
+        unknown_dataset: DocumentDataset,
+        adjudicator: Adjudicator,
+    ) -> ScenarioResult:
+        """LLM adjudication pass over the least-confident assignments.
+
+        Optional, config-gated (``scenario.consolidation``), and never on the
+        hot path: when ``consolidation.enabled`` is false this returns
+        ``result`` unchanged. Otherwise it selects the low-confidence tail,
+        asks ``adjudicator`` to reconsider each selected document against its
+        nearest candidate clusters, and merges the verdicts back through
+        :meth:`refine` — so no new merge machinery is introduced.
+
+        ``adjudicator`` is injected (an
+        :class:`~clustering.consolidation.Adjudicator`) so the LLM call lives
+        in the caller's layer, keeping this framework package LLM-free. The
+        import is deferred to call time because
+        :mod:`clustering.consolidation` imports this module.
+        """
+        from clustering.consolidation import consolidate as _consolidate
+
+        return _consolidate(self, result, unknown_dataset, adjudicator)

@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -69,6 +69,7 @@ from clustering.scenarios.s3_partial_few_shot import S3PartialFewShot
 from clustering.scenarios.s4_zero_shot import S4ZeroShot
 from clustering.scenarios.s5_full_supervised import S5FullSupervised
 
+from .classification import ClassificationConfig
 from .errors import ClusteringConfigInvalid
 
 _CONFIG_RESOURCE = "clustering_config.json"
@@ -172,6 +173,8 @@ def run_clustering_detailed(
     support_dataset: DocumentDataset | None = None,
     overrides: dict[str, Any] | None = None,
     cache_dir: Path | None = None,
+    classification_config: ClassificationConfig | None = None,
+    debug: bool = False,
 ) -> dict[str, DocPrediction]:
     """Cluster ``dataset`` and return ``{doc_id: DocPrediction}``.
 
@@ -195,6 +198,13 @@ def run_clustering_detailed(
     a partial ``{"encoder_text": {"name": "e5"}}`` leaves every other
     section (fusion, manifold, training, …) at its bundled default.
     Unrecognized fields surface as a :class:`ClusteringConfigInvalid`.
+
+    ``classification_config`` enables the optional LLM consolidation pass
+    over the low-confidence tail (see :mod:`dgml_core.consolidation`). It is
+    only consulted when the resolved config also sets
+    ``scenario.consolidation.enabled``; without it — or without a usable model
+    / API key — the run stays purely embedding-based. ``debug`` is forwarded to
+    that pass's LLM calls and is otherwise unused.
     """
     if n_samples_per_category < 0:
         raise ValueError(f"n_samples_per_category must be >= 0; got {n_samples_per_category}.")
@@ -218,6 +228,25 @@ def run_clustering_detailed(
         n_samples_per_category=n_samples_per_category,
     )
     result = scenario.fit_predict(dataset, support_dataset)
+
+    # Optional LLM consolidation of the low-confidence tail. Gated by
+    # ``scenario.consolidation.enabled`` and only when a classification config
+    # (⇒ a usable model + api key) is available; the adjudicator is built here
+    # in the orchestrator so the framework package stays LLM-free. It soft-fails
+    # inside :meth:`Scenario.consolidate`, so a missing key or provider error
+    # degrades to the embedding result rather than raising.
+    consolidation = config.scenario.consolidation
+    if consolidation.enabled and classification_config is not None:
+        from .consolidation import LLMAdjudicator
+
+        adjudicator = LLMAdjudicator(
+            replace(
+                classification_config,
+                model=consolidation.model or classification_config.model,
+            ),
+            debug=debug,
+        )
+        result = scenario.consolidate(result, dataset, adjudicator)
 
     # S1's raw labels are "cluster_N"; rewrite to "unknown_N" so the
     # caller's contract ("emergent cluster ⇒ 'unknown_N'") is the same

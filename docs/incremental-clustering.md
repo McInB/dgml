@@ -77,6 +77,13 @@ back a review queue instead of a bare ordinal score. See
 for the knobs; they are off by default, and enabling them changes which
 assignments get flagged, never which DocSet a file lands in.
 
+That better signal is also what makes
+[LLM consolidation](quickstart-clustering.md#asking-an-llm-about-the-hard-cases)
+worth turning on here: the pass selects the least-confident tail, so it is only
+as good as the confidence it ranks by. It is off by default too, and unlike the
+review queue it *can* move a file — set `consolidation.apply: auto` only once
+you've looked at what `suggest` proposes.
+
 ## Config presets (compute tiers)
 
 Four bundled presets tune the encoder/manifold/algorithm stack for a compute

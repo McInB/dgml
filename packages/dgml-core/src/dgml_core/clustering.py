@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Literal, get_args
 
 from .classification import (
+    ClassificationConfig,
     ClassificationDecision,
     load_classification_config,
     propose_new_docset_for_files,
@@ -671,6 +672,8 @@ def clustering_internal(
             support_dataset=support_dataset,
             overrides=overrides,
             cache_dir=workspace.embedding_cache_dir,
+            classification_config=_adjudication_config(workspace),
+            debug=debug,
         )
     else:
         detailed = run_clustering_detailed(
@@ -678,6 +681,8 @@ def clustering_internal(
             known_categories=known_categories,
             overrides=overrides,
             cache_dir=workspace.embedding_cache_dir,
+            classification_config=_adjudication_config(workspace),
+            debug=debug,
         )
 
     clusters = {doc_id: pred.cluster_name for doc_id, pred in detailed.items()}
@@ -692,6 +697,24 @@ def clustering_internal(
         method="embedding",
         known_categories=known_categories,
     )
+
+
+def _adjudication_config(workspace: Workspace) -> ClassificationConfig | None:
+    """The classification config the consolidation pass adjudicates with.
+
+    ``None`` when the workspace has no usable ``classification`` section, which
+    is the common case: consolidation is off by default, and
+    :func:`run_clustering_detailed` ignores this argument unless the resolved
+    clustering config also enables the pass. Resolved unconditionally (rather
+    than behind a second copy of the enabled-check) so the gate lives in exactly
+    one place; failures are swallowed to keep the never-raise clustering
+    contract — a workspace that asks for adjudication but can't reach a model
+    simply doesn't get it.
+    """
+    try:
+        return load_classification_config(workspace)
+    except DgmlError:
+        return None
 
 
 def _resolve_method(method: str, *, n_usable: int, threshold: int) -> str:

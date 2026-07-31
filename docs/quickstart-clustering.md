@@ -374,6 +374,63 @@ rebuilt without it. Fitting on the ordinary prototypes would be self-flattering
 (every document helps build the prototype it's measured against) and the
 resulting thresholds would be optimistic on documents the run has not seen.
 
+### Asking an LLM about the hard cases
+
+A review queue tells you which assignments are shaky. `scenario.consolidation`
+is the option to do something about them automatically: it takes the
+least-confident tail, offers each document its nearest few clusters, and asks
+the vision model the one question it is good at — *does this belong to one of
+these, or is it genuinely something new?*
+
+The cost model is the point. The embedding pipeline handles the whole corpus
+cheaply, and the LLM only ever sees the documents the statistics were unsure
+about — so spend scales with uncertainty, not with corpus size. On a clean run
+it can be zero documents.
+
+It is **off by default**, and needs a `classification` section in your workspace
+`config.toml` (the same model and API key auto-classification uses). Enable it
+in the `scenario` section of your clustering config:
+
+```json
+{
+  "scenario": {
+    "consolidation": {
+      "enabled": true,
+      "selector": { "strategy": "quantile", "quantile": 0.1 },
+      "apply": "suggest"
+    }
+  }
+}
+```
+
+| Parameter | What it controls | Default |
+|---|---|---|
+| `consolidation.enabled` | Master switch. | `false` |
+| `consolidation.apply` | `suggest` records each verdict and flags the document for review, leaving labels alone. `auto` writes the reassignments into the result. | `suggest` |
+| `consolidation.selector.strategy` | How the tail is chosen: `quantile` (bottom fraction by confidence), `confidence` (absolute floor), `margin` (narrow top-1/top-2 gap), `noise` (only the noise bucket). | `quantile` |
+| `consolidation.selector.max_docs` | Hard ceiling on documents adjudicated — your cost cap. | `200` |
+| `consolidation.candidates_k` | How many nearby clusters each document is offered. | `3` |
+| `consolidation.mode` | `reassign` asks per document; `repartition` re-groups the whole contested subset in one call. | `reassign` |
+| `consolidation.model` | Override the adjudication model. `null` reuses the workspace classification model. | `null` |
+
+`suggest` is the default deliberately: an LLM overruling the embedding
+partition is a change worth seeing before it lands. Either way every verdict —
+old label, new label, confidence, and the model's one-line rationale — is
+recorded in the run metadata, so `auto` is auditable rather than opaque.
+
+Two behaviours worth knowing about, because both look like "nothing happened":
+
+- **A flat confidence column suppresses the tail.** If every document scored
+  about the same (an uncalibrated score can saturate near 1.0 for all of them),
+  a bottom-quantile cut would select an essentially arbitrary set and let the
+  model perturb assignments that were fine. The pass skips instead and says so
+  in its metadata. Fixing the *confidence* signal — see the section above — is
+  what makes selection meaningful; an absolute `confidence_threshold` also
+  works, since it ranks nothing.
+- **Failures are soft.** A missing API key, a provider outage, or a malformed
+  reply degrades to the plain embedding result with the reason in metadata. A
+  consolidation problem never fails your clustering run.
+
 ### Symptom → knob
 
 - **One true category split across several clusters** (high homogeneity,
@@ -395,6 +452,14 @@ resulting thresholds would be optimistic on documents the run has not seen.
   set `scenario.calibration.abstain_threshold` and work the `review_queue`;
   add `calibration.method: temperature` if you want the threshold to keep
   meaning the same thing on the next corpus.
+- **A handful of documents are wrong and no config change fixes them without
+  breaking the rest** → enable `scenario.consolidation` and let the LLM
+  adjudicate just that tail. Set `selector.max_docs` to whatever you're
+  willing to spend.
+- **Consolidation is enabled but reports `n_selected: 0`** → read the `notes`
+  in its metadata. Usually the confidence column is flat, so the tail was
+  suppressed on purpose; give the score some resolution (`calibration.method`)
+  or select on an absolute `selector.confidence_threshold` instead.
 
 ## 6. Inspect what came out
 

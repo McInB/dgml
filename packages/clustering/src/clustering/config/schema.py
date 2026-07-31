@@ -194,6 +194,106 @@ class CalibrationConfig(_StrictModel):
         return self
 
 
+# ── LLM consolidation of the low-confidence tail ────────────────────────────
+class ConsolidationSelectorConfig(_StrictModel):
+    """Which assignments enter the LLM adjudication tail.
+
+    A document is selected iff the active ``strategy`` flags it, plus — when
+    ``include_noise`` — any noise / unassigned document. The union is capped at
+    ``max_docs``, least-confident first, so the LLM bill is bounded no matter
+    how uncertain a run turns out to be.
+
+    Each strategy requires its own knob, and a strategy whose knob is unset is
+    a config error rather than a silent fall-back to ``quantile`` — picking a
+    selection rule and quietly getting a different one is the kind of thing you
+    only notice from the bill.
+    """
+
+    strategy: Literal["quantile", "confidence", "margin", "noise"] = "quantile"
+    quantile: float = 0.10
+    """Bottom fraction by confidence to select, for ``quantile``."""
+    confidence_threshold: float | None = None
+    """Select assignments with confidence below this, for ``confidence``."""
+    margin_threshold: float | None = None
+    """Select assignments whose top1-top2 score gap is below this band, for
+    ``margin``. Needs per-class scores; on a scenario that emits none the
+    strategy degrades to ``quantile`` and says so in the run metadata."""
+    max_docs: int = 200
+    """Hard cap on adjudicated documents — the LLM cost ceiling."""
+    include_noise: bool = True
+    """Also adjudicate noise / unassigned (``*_noise`` / ``None``) documents."""
+
+    @model_validator(mode="after")
+    def _check_strategy_knobs(self) -> ConsolidationSelectorConfig:
+        if not 0.0 <= self.quantile <= 1.0:
+            raise ValueError(
+                f"consolidation.selector.quantile must be in [0, 1]; got {self.quantile}."
+            )
+        if self.max_docs < 0:
+            raise ValueError(f"consolidation.selector.max_docs must be >= 0; got {self.max_docs}.")
+        if self.confidence_threshold is not None and not 0.0 <= self.confidence_threshold <= 1.0:
+            raise ValueError(
+                "consolidation.selector.confidence_threshold must be in [0, 1]; "
+                f"got {self.confidence_threshold}."
+            )
+        if self.margin_threshold is not None and not 0.0 <= self.margin_threshold <= 1.0:
+            raise ValueError(
+                "consolidation.selector.margin_threshold must be in [0, 1]; "
+                f"got {self.margin_threshold}."
+            )
+        if self.strategy == "confidence" and self.confidence_threshold is None:
+            raise ValueError(
+                "consolidation.selector.strategy='confidence' needs confidence_threshold to be set."
+            )
+        if self.strategy == "margin" and self.margin_threshold is None:
+            raise ValueError(
+                "consolidation.selector.strategy='margin' needs margin_threshold to be set."
+            )
+        if self.strategy == "noise" and not self.include_noise:
+            raise ValueError(
+                "consolidation.selector.strategy='noise' with include_noise=false "
+                "selects nothing at all."
+            )
+        return self
+
+
+class ConsolidationConfig(_StrictModel):
+    """An optional LLM adjudication pass over the least-confident assignments.
+
+    Off by default and never on the hot path. When enabled, the selector picks
+    the low-confidence tail, an LLM reconsiders each selected document against
+    its ``candidates_k`` nearest clusters, and the verdicts are merged back
+    through the scenario's :meth:`~clustering.scenarios.base.Scenario.refine`
+    hook. Cost scales with how uncertain the run was, not with corpus size.
+    """
+
+    enabled: bool = False
+    selector: ConsolidationSelectorConfig = Field(default_factory=ConsolidationSelectorConfig)
+    candidates_k: int = 3
+    """Nearest existing clusters offered to the LLM per adjudicated document."""
+    mode: Literal["reassign", "repartition", "auto"] = "reassign"
+    """``reassign``: one candidate-pick decision per document. ``repartition``:
+    re-cluster a contested subset as a batch. ``auto``: let the adjudicator
+    choose per region."""
+    batch_size: int = 40
+    """Repartition batch size."""
+    model: str | None = None
+    """Adjudication model. ``None`` ⇒ reuse the workspace classification model."""
+    apply: Literal["suggest", "auto"] = "suggest"
+    """``suggest``: record verdicts and flag the documents for review, labels
+    unchanged. ``auto``: write the reassignments into the result. ``suggest``
+    is the default because an LLM overruling the embedding partition is a
+    change a human should see before it lands."""
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> ConsolidationConfig:
+        if self.candidates_k < 1:
+            raise ValueError(f"consolidation.candidates_k must be >= 1; got {self.candidates_k}.")
+        if self.batch_size < 1:
+            raise ValueError(f"consolidation.batch_size must be >= 1; got {self.batch_size}.")
+        return self
+
+
 # ── Scenario ──────────────────────────────────────────────────────────────
 class ScenarioConfig(_StrictModel):
     name: ScenarioName
@@ -397,6 +497,8 @@ class ScenarioConfig(_StrictModel):
 
     # ── Confidence calibration + abstain ──────────────────────────────────
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
+    # ── LLM consolidation of the low-confidence tail ──────────────────────
+    consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
 
     @model_validator(mode="after")
     def _check_confidence_temperature(self) -> ScenarioConfig:
