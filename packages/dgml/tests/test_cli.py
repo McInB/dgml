@@ -681,6 +681,10 @@ def test_cluster_reports_confidence_for_a_new_docset(
     assert payload["assignments"][fid] == {
         "docset": "Invoices",
         "confidence": 0.42,
+        # Grouping confidence and naming agreement are independent: the cluster
+        # scored 0.42 against its own centroid, while a single naming attempt
+        # (the default) is not an agreement measurement at all.
+        "naming_confidence": None,
         "is_new": True,
         "review": False,
     }

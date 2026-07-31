@@ -273,13 +273,14 @@ successfully named) is still assigned. The command always exits `0`.
   "assignments": {
     "k7q3xb91pmrf": {
       "docset": "Contracts", "confidence": 0.83,
-      "naming_confidence": null, "is_new": false
+      "naming_confidence": null, "is_new": false, "review": false
     },
     "abc123def456": {
       "docset": "Receipts", "confidence": 0.71,
-      "naming_confidence": null, "is_new": false
+      "naming_confidence": null, "is_new": false, "review": false
     }
-  }
+  },
+  "review_queue": []
 }
 ```
 
