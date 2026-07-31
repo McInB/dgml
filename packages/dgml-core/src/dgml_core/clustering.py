@@ -334,10 +334,15 @@ def clustering(
       already existed before this run (only meaningful for incremental).
     - ``n_new_clusters``: number of *new* DocSets created this run.
     - ``assignments``: ``{file_id: {"docset", "confidence", "is_new"}}``
-      for every successfully-assigned file — ``confidence`` is the
-      nearest-prototype confidence in ``[0, 1]`` (``null`` for emergent
-      clusters), ``is_new`` flags files that landed in a DocSet created
-      this run.
+      for every successfully-assigned file — ``confidence`` is in ``[0, 1]``,
+      and ``is_new`` flags files that landed in a DocSet created this run.
+      What ``confidence`` *means* depends on ``method``: for ``embedding``
+      it is the nearest-prototype confidence (``null`` for emergent
+      clusters, which have no prototype to be near); for ``llm`` it is the
+      model's self-reported confidence in the group the file was put in,
+      shared by every member of that group, and ``null`` when the model
+      declined to report one. Neither is a calibrated probability — treat
+      both as a ranking over which assignments to review first.
 
     ``skip_existing`` makes the whole call a no-op (returns ``skipped: True``,
     empty maps) when every file is already assigned — cheap to use on resume.
@@ -466,7 +471,13 @@ def clustering(
                 clusters[file_id] = new_name
                 assignments[file_id] = {
                     "docset": new_name,
-                    "confidence": None,
+                    # Read from the clusterer rather than hardcoded null. For
+                    # the embedding method this is null anyway (an emergent
+                    # cluster has no prototype to measure distance to), but the
+                    # llm method's confidence is a judgement about the *group*,
+                    # which is exactly what an emergent cluster is — so it is
+                    # every bit as meaningful here as on a matched DocSet.
+                    "confidence": internal.confidences.get(file_id),
                     "is_new": True,
                 }
 
@@ -710,7 +721,10 @@ def _llm_cluster_internal(
     return _InternalResult(
         clusters=result.clusters,
         render_skipped=render_skipped,
-        confidences=dict.fromkeys(result.clusters),
+        # Keyed off ``clusters`` rather than taken wholesale, so the confidence
+        # map is guaranteed to cover exactly the assigned files; a group the
+        # model gave no confidence for stays ``None``.
+        confidences={fid: result.confidences.get(fid) for fid in result.clusters},
         mode=effective_mode,
         method="llm",
         known_categories=known_categories,

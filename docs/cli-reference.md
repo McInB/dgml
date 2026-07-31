@@ -289,7 +289,7 @@ the incremental workflow:
 | `mode` | The effective run mode after resolving `auto` — `"fresh"` or `"incremental"`. |
 | `n_assigned_existing` | Number of files assigned to a DocSet that already existed before this run (the incremental "fit an existing cluster" case). |
 | `n_new_clusters` | Number of new DocSets created this run (emergent clusters that were LLM-named). |
-| `assignments` | Per-file detail: `docset` (final DocSet name), `confidence` (nearest-prototype confidence in `[0, 1]`, or `null` for emergent clusters), and `is_new` (whether the DocSet was created this run). |
+| `assignments` | Per-file detail: `docset` (final DocSet name), `confidence` (in `[0, 1]`, or `null`), and `is_new` (whether the DocSet was created this run). `confidence` means different things per `method`: under `embedding` it is the nearest-prototype confidence, `null` for emergent clusters (they have no prototype); under `llm` it is the model's self-reported confidence in the group the file was placed in — shared by every file in that group, `null` when the model declined to report one. Neither is a calibrated probability; use them to rank which assignments to review first, not as a threshold. |
 
 LLM naming requires the same workspace setup as `--auto-classify`:
 

@@ -40,6 +40,7 @@ from dgml_core.errors import ClassificationConfigMissing, ClassificationFailed
 from dgml_core.llm_clustering import (
     DEFAULT_MAX_FILES,
     LLMClusteringResult,
+    _group_confidence,
     llm_cluster_files,
 )
 from dgml_core.models import DocSet, FileRecord
@@ -428,6 +429,109 @@ def test_missing_groups_array_raises(workspace: Workspace) -> None:
     with patch("litellm.completion", return_value=_raw_response("group_documents", json.dumps({}))):
         with pytest.raises(ClassificationFailed, match="missing a 'groups' array"):
             llm_cluster_files(workspace, ["a"], config=_config())
+
+
+# ---------------------------------------------------------------------------
+# Self-reported confidence
+# ---------------------------------------------------------------------------
+
+
+def test_group_confidence_propagates_to_every_member(workspace: Workspace) -> None:
+    for fid in ("a", "b", "c"):
+        _seed(workspace, fid)
+    groups = [
+        _new_group("Invoice", ["doc_1", "doc_2"], confidence=0.9),
+        _new_group("Contract", ["doc_3"], confidence=0.4),
+    ]
+    with patch("litellm.completion", return_value=_group_response(groups)):
+        result = llm_cluster_files(workspace, ["a", "b", "c"], config=_config())
+
+    # The model judges the group, so every member inherits the group's number.
+    assert result.confidences == {"a": 0.9, "b": 0.9, "c": 0.4}
+
+
+def test_group_confidence_absent_is_none(workspace: Workspace) -> None:
+    for fid in ("a", "b"):
+        _seed(workspace, fid)
+    # Neither group carries `confidence` — the field is optional and lite
+    # models routinely omit it. Reporting None beats inventing a default.
+    groups = [_new_group("Invoice", ["doc_1"]), _new_group("Contract", ["doc_2"])]
+    with patch("litellm.completion", return_value=_group_response(groups)):
+        result = llm_cluster_files(workspace, ["a", "b"], config=_config())
+
+    assert result.confidences == {"a": None, "b": None}
+
+
+def test_unplaceable_members_get_no_confidence_entry(workspace: Workspace) -> None:
+    """The confidence map covers exactly the files that were actually placed."""
+    for fid in ("a", "b"):
+        _seed(workspace, fid)
+    # doc_2 is placed; doc_99 does not resolve to any seeded file.
+    groups = [_new_group("Invoice", ["doc_2", "doc_99"], confidence=0.7)]
+    with patch("litellm.completion", return_value=_group_response(groups)):
+        result = llm_cluster_files(workspace, ["a", "b"], config=_config())
+
+    assert set(result.confidences) == set(result.clusters)
+    assert result.failed_file_ids == ["a"]
+
+
+def test_confidence_is_an_optional_tool_property(workspace: Workspace) -> None:
+    _seed(workspace, "a")
+    with patch(
+        "litellm.completion", return_value=_group_response([_new_group("T", ["doc_1"])])
+    ) as completion:
+        llm_cluster_files(workspace, ["a"], config=_config())
+
+    group_schema = completion.call_args.kwargs["tools"][0]["function"]["parameters"]["properties"][
+        "groups"
+    ]["items"]
+    conf = group_schema["properties"]["confidence"]
+    assert conf["type"] == "number"
+    assert (conf["minimum"], conf["maximum"]) == (0.0, 1.0)
+    # Never required: forcing it would make a model that cannot produce the
+    # field fail the whole partition call, which is a bad trade for a signal.
+    assert "confidence" not in group_schema["required"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (0.0, 0.0),
+        (1.0, 1.0),
+        (0.73, 0.73),
+        (1, 1.0),  # a bare int is what models usually answer
+        (0, 0.0),
+        (1.5, 1.0),  # out of range clamps rather than discards
+        (-0.2, 0.0),
+        (None, None),
+        ("0.9", None),  # a numeric string is not silently coerced
+        (True, None),  # bool is an int subclass; must not read as 1.0
+        (float("nan"), None),  # would poison every downstream comparison
+    ],
+)
+def test_group_confidence_parsing(raw: Any, expected: float | None) -> None:
+    assert _group_confidence({"members": ["doc_1"], "confidence": raw}) == expected
+
+
+def test_group_confidence_missing_key() -> None:
+    assert _group_confidence({"members": ["doc_1"]}) is None
+
+
+def test_clustering_llm_assignment_carries_confidence(workspace: Workspace) -> None:
+    """End to end: the self-report reaches each assignment in the CLI payload.
+
+    This is the column that was previously always null for method="llm".
+    """
+    for fid in ("a", "b"):
+        _seed(workspace, fid)
+    write_classification_config(workspace, {"model": DEFAULT_TEST_MODEL})
+
+    groups = [_new_group("Invoice", ["doc_1", "doc_2"], confidence=0.85)]
+    with patch("litellm.completion", return_value=_group_response(groups)):
+        out = clustering(workspace, method="llm")
+
+    assert out["assignments"]["a"]["confidence"] == 0.85
+    assert out["assignments"]["b"]["confidence"] == 0.85
 
 
 # ---------------------------------------------------------------------------
