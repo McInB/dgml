@@ -431,6 +431,26 @@ Two behaviours worth knowing about, because both look like "nothing happened":
   reply degrades to the plain embedding result with the reason in metadata. A
   consolidation problem never fails your clustering run.
 
+To find out whether it actually helped, capture a run with the pass off and one
+with it on, then diff them:
+
+```bash
+dgml cluster --workspace ./ws --json > before.json
+# ... enable clustering.scenario.consolidation in the workspace config ...
+dgml cluster --workspace ./ws --json > after.json
+dgml file list --workspace ./ws --json > files.json
+
+uv run python scripts/clustering_metrics.py \
+    --before before.json --after after.json --files files.json
+```
+
+That prints both runs side by side with deltas — cluster shape, confidence, and
+(when ground truth is available) ARI, NMI, purity, and mapped accuracy — plus
+the list of documents that changed DocSet, which is the thing to actually read
+before switching `apply` to `auto`. Ground truth comes from a `--labels` map or
+from a one-folder-per-class corpus layout; with neither, the external scores are
+reported as unavailable rather than as zeros.
+
 ### Symptom → knob
 
 - **One true category split across several clusters** (high homogeneity,
