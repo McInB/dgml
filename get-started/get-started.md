@@ -185,6 +185,12 @@ Behind the scenes, DGML performs the following tasks per PDF:
 3. Renders each page into a high-resolution (300 DPI) PNG under `page_images/`.
 4. Extracts per-page text layout word boxes using `pdfminer.six` and stores them as JSON under `page_text/`.
 
+*Tip: on a large corpus, rendering is the slowest step. Add `--dpi 150` to halve
+render time and `page_images/` disk use — plenty for OCR and clustering. The
+word boxes in `page_text/` are written in the render's pixel space, so they
+scale with the flag; the value used is recorded on each File as
+`page_image_dpi`.*
+
 You can inspect the summary of this ingestion pass by piping the output to `jq`:
 ```bash
 uv run dgml file add "dgml-spec/samples/1-NonTraded-NAV-REITs/files" --recursive --on-conflict skip | jq .summary

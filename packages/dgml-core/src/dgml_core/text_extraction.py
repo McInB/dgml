@@ -164,12 +164,18 @@ def extract_text_digital(
     output_dir: Path,
     *,
     file_id: str,
+    dpi: int = DEFAULT_DPI,
 ) -> ExtractDigitalResult:
     """Extract digital text from each PDF page and write per-page JSON.
 
     One ``page_N.json`` is written per page, where ``N`` is 1-based to align
     with ``page_images/page_N.png``. Stale ``page_*.json`` files in
     ``output_dir`` are removed first so retries don't leave orphans.
+
+    ``dpi`` must be the resolution the matching ``page_images/`` were rendered
+    at, because word boxes are written in that render's *pixel* space. Passing a
+    different value silently misaligns every box against its page image — and
+    against the OCR boxes the hybrid merge compares them to.
 
     Raises :class:`TextExtractionFailed` if pdfminer.six cannot parse the PDF.
     A successful run with zero words on every page returns a result with
@@ -206,14 +212,12 @@ def extract_text_digital(
             x0, y0, x1, y1 = page_layout.bbox
             page_w_pts = float(x1 - x0)
             page_h_pts = float(y1 - y0)
-            width_px = max(0, round(page_w_pts * DEFAULT_DPI / 72))
-            height_px = max(0, round(page_h_pts * DEFAULT_DPI / 72))
+            width_px = max(0, round(page_w_pts * dpi / 72))
+            height_px = max(0, round(page_h_pts * dpi / 72))
 
             words: list[dict[str, Any]] = []
             for text, (x0, y0, x1, y1), style in _iter_words(page_layout):
-                box = _pts_box_to_pixel_lt_rb(
-                    x0, y0, x1, y1, page_h_pts=page_h_pts, dpi=DEFAULT_DPI
-                )
+                box = _pts_box_to_pixel_lt_rb(x0, y0, x1, y1, page_h_pts=page_h_pts, dpi=dpi)
                 if box is None:
                     continue
                 word: dict[str, Any] = {"t": text, "l": list(box)}

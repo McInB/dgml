@@ -784,11 +784,11 @@ Errors across the group: `DOCSET_NOT_FOUND`, `FILE_NOT_FOUND`,
 
 ## File commands
 
-### `dgml file add <path> [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--auto-classify]`
+### `dgml file add <path> [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--dpi N] [--auto-classify]`
 
 Add a File. The source is copied into the workspace, hashed, its pages
-are rendered to 300 dpi PNGs via `gs`, and per-page word boxes are
-written to `page_text/` according to `--text-mode`.
+are rendered to PNGs via `gs` (300 dpi by default — see `--dpi`), and
+per-page word boxes are written to `page_text/` according to `--text-mode`.
 
 `<path>` is a `.pdf`, or a convertible source (`.docx`/`.doc`/`.xlsx`/`.xls`)
 when a converter is configured for its format family in the workspace
@@ -817,6 +817,22 @@ ignored when `<path>` is a single file.
 | `digital` (default) | Extract digital text from the PDF with `pdfminer.six`. A permanent text-extraction error is recorded for files with no digital text — the File record is still created (soft fail). |
 | `ocr` | Send each rendered page image to the cloud provider configured in `<workspace>/config.toml`. Requires the `azure` or `aws` extra (`uv sync --extra azure` / `uv sync --extra aws` from a repo checkout; `pip install dgml[azure]`/`dgml[aws]` once DGML is published to PyPI). See "OCR configuration" below. |
 | `hybrid` | Run `digital` then `ocr` and merge the two per-page results by grouping words covering the same area into overlap regions (boxes overlap on IoU > 0.5 *or* one mostly contained in the other, so split/merge tokenization is resolved as a unit). Each region is resolved as a whole: OCR-only regions are kept; digital-only regions (no overlapping OCR) are assumed invisible to the human eye and dropped; mixed regions compare both sides' concatenated text by dash-normalized Levenshtein distance — if they agree (distance ≤ 2) digital wins (its characters come straight from the PDF font, more reliable than OCR even when OCR's tokenization is finer), and if they disagree OCR wins. A page whose digital text is mostly unresolved glyphs (pdfminer `(cid:N)` sentinels) falls back to OCR entirely. Default is silent — pass the global `--verbose` flag to surface per-page warnings and the merge summary on stderr. Requires the same `ocr` workspace config as `--text-mode ocr`. Optionally, an LLM can make the per-region decision instead of this heuristic — declare a `text_extraction` section in `config.toml` (e.g. a local Ollama model); see [storage-layout.md](storage-layout.md#text_extraction-optional). Any LLM failure falls back to the heuristic for that page. |
+
+`--dpi N` sets the resolution page images are rasterized at, in dots per
+inch (default `300`, must be a positive integer — `0` or a negative value is
+an argparse usage error, exit 2, before the workspace is touched). Lower
+values roughly linearly reduce render time and `page_images/` disk use: 150
+is usually ample for OCR and for the clustering vision encoder, which
+downscales anyway. The value is stored on the File as `page_image_dpi`, and
+`dgml check --retry-errors` re-renders and re-extracts at that recorded value
+rather than the current default, so a repair reproduces the file's existing
+geometry.
+
+Note that `--dpi` also governs `page_text/` word boxes, which are expressed
+in **page-image pixel space** (`round(pdf_pts * dpi / 72)`) rather than PDF
+points — so the coordinates in a File added with `--dpi 150` are half those
+of the same File added at 300. Anything consuming `dg:origin` boxes should
+read `page_image_dpi` off the File record rather than assuming 300.
 
 Conflict types recorded in the success payload as `conflict_kind`:
 

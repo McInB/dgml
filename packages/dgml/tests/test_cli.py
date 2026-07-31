@@ -486,6 +486,36 @@ def test_file_add_text_mode_default_is_digital(
     assert summary["total_words"] >= 4
 
 
+def test_file_add_dpi_flag_is_recorded_and_used(
+    tmp_path: Path, text_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+
+    rc = main(_ws_args(ws) + ["file", "add", str(text_pdf), "--dpi", "150"])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["file"]["page_image_dpi"] == 150
+
+    # page_text/ boxes are in the render's pixel space, so the flag has to reach
+    # digital extraction too — not just the rasterizer.
+    text_dir = ws / "files" / payload["file"]["id"] / "page_text"
+    page = json.loads((text_dir / "page_1.json").read_text())
+    assert page["width"] == round(612 * 150 / 72)
+
+
+def test_file_add_rejects_nonpositive_dpi(tmp_path: Path, text_pdf: Path) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    # An argparse usage error (exit 2), raised before the workspace is touched.
+    for bad in ("0", "-150", "notanumber"):
+        with pytest.raises(SystemExit) as exc:
+            main(_ws_args(ws) + ["file", "add", str(text_pdf), "--dpi", bad])
+        assert exc.value.code == 2
+    assert not list((ws / "files").iterdir())
+
+
 @needs_gs
 def test_file_add_conflict_errors_by_default(
     tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
