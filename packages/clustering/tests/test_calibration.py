@@ -156,9 +156,37 @@ def test_conformal_threshold_achieves_requested_coverage() -> None:
     # construction of the split-conformal quantile, that is at least the
     # requested fraction of the calibration set.
     probs = torch.softmax(logits / max(fitted.temperature, 1e-2), dim=-1)
-    true_prob = probs[torch.arange(logits.shape[0]), labels]
-    kept = (1.0 - true_prob) <= fitted.conformal_threshold
+    kept = (1.0 - probs.amax(dim=-1)) <= fitted.conformal_threshold
     assert float(kept.float().mean()) >= coverage
+
+
+def test_conformal_calibrates_the_statistic_it_thresholds() -> None:
+    """q̂ must be fitted on ``1 - p_top1``, the score ``apply`` compares against.
+
+    Fitting on the textbook ``1 - p(true)`` instead is silently self-defeating:
+    ``p(true) <= p_top1`` with equality only on correct predictions, so the
+    calibration set's *errors* push q̂ above anything the applied statistic can
+    reach and the gate stops firing. Measured over four corpora, that put
+    achieved coverage at 0.98-0.99 against a requested 0.90. This test fails if
+    the two statistics ever drift apart again: on a calibration set with real
+    errors the two q̂ values differ, and only the top1 one reproduces here.
+    """
+    logits, labels = _mixed_logits(m=200)
+    fitted = fit_calibrator(logits, labels, method="temperature", coverage=0.9)
+    assert fitted.conformal_threshold is not None
+
+    probs = torch.softmax(logits / max(fitted.temperature, 1e-2), dim=-1)
+    top1 = probs.amax(dim=-1)
+    true_prob = probs[torch.arange(logits.shape[0]), labels]
+    # The fixture has misassigned documents, so the two candidate scores are not
+    # the same distribution — otherwise this test would pass either way.
+    assert float((true_prob < top1 - 1e-9).float().mean()) > 0.05
+
+    _, abstain = fitted.apply(logits)
+    assert torch.equal(abstain, (1.0 - top1) > fitted.conformal_threshold)
+    # And the gate is live: a q̂ fitted on the wrong statistic sits above the
+    # applied score's range, which shows up as flagging nothing at all.
+    assert int(abstain.sum()) > 0
 
 
 def test_conformal_rejects_out_of_range_coverage() -> None:

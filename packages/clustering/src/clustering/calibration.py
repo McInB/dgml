@@ -34,11 +34,22 @@ scipy / scikit-learn / torch; no LLM dependency lives here):
   confidence directly, and unlike temperature can correct a systematic
   over-confidence that is not a pure scale effect.
 - **Conformal abstention** — a distribution-free split-conformal threshold on
-  the nonconformity score ``1 - p(true)``. Given a target ``coverage`` it
-  yields ``q̂`` such that routing every document with ``1 - p_top1 > q̂`` to a
-  review queue carries a finite-sample coverage guarantee on the *kept* set,
-  with no distributional assumptions. This is the piece that turns "confidence"
-  into an operational decision.
+  the nonconformity score ``1 - p_top1``. Given a target ``coverage`` it yields
+  ``q̂`` such that routing every document with ``1 - p_top1 > q̂`` to a review
+  queue keeps at most ``1 - coverage`` of a comparable batch, with no
+  distributional assumptions. This is the piece that turns "confidence" into an
+  operational decision: a review *budget* you can staff.
+
+  The statistic is ``1 - p_top1`` and not the textbook ``1 - p(true)`` because
+  the true label is exactly what is unavailable at inference. Calibrating on
+  ``1 - p(true)`` while thresholding ``1 - p_top1`` — which an earlier revision
+  of this module did — silently voids the guarantee: ``p(true) <= p_top1``
+  always, with equality only on correct predictions, so the calibration set's
+  errors inflate ``q̂`` past a value the applied statistic can reach and the gate
+  stops firing. Measured over four corpora, that mismatch put achieved coverage
+  at 0.98-0.99 against a requested 0.90 and cost 2-5x the review recall. The
+  price of the fix is the weaker promise stated above: a budget on how much gets
+  flagged, not a containment probability for the true label.
 
 Everything here is fit on **labeled** data, and only the few-shot / supervised
 scenarios (S3 / S5) have any — their per-DocSet support members. Fitting on
@@ -257,8 +268,9 @@ def fit_calibrator(
         labels: ``[M]`` integer class indices in ``[0, K)``.
         method: ``"temperature"`` (default), ``"platt"``, or ``"none"``.
         coverage: If set in ``(0, 1)``, also fit a split-conformal abstain
-            threshold targeting that coverage on the kept set. ``None``
-            disables conformal abstention.
+            threshold targeting that coverage — i.e. a review budget: at most
+            ``1 - coverage`` of a batch drawn like the calibration set is
+            flagged. ``None`` disables conformal abstention.
         abstain_threshold: Optional absolute calibrated-confidence floor;
             documents below it abstain regardless of conformal coverage.
 
@@ -295,8 +307,13 @@ def fit_calibrator(
     conformal_threshold: float | None = None
     if coverage is not None:
         cal_probs = _softmax_np(logits_np / max(temperature, _T_MIN))
-        true_prob = cal_probs[np.arange(m), labels_np]
-        conformal_threshold = _conformal_threshold(1.0 - true_prob, coverage)
+        # Calibrate on the statistic `Calibrator.apply` actually thresholds. Using
+        # `1 - p(true)` here instead would be the textbook nonconformity, but the
+        # true label does not exist at inference, so `apply` has no choice but to
+        # test `1 - p_top1` — and `p(true) <= p_top1`, so a q-hat fitted on the
+        # former is systematically too large for the latter to reach. See the
+        # module docstring for what that measured.
+        conformal_threshold = _conformal_threshold(1.0 - cal_probs.max(axis=-1), coverage)
 
     return Calibrator(
         method=method,

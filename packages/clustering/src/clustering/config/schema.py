@@ -173,7 +173,11 @@ class CalibrationConfig(_StrictModel):
 
     method: Literal["none", "temperature", "platt"] = "none"
     coverage: float | None = None
-    """Target coverage in (0, 1) for the conformal abstain gate. ``None`` off."""
+    """Target coverage in (0, 1) for the conformal abstain gate. ``None`` off.
+
+    A review *budget*: at most ``1 - coverage`` of a batch is flagged. Not a
+    probability that a kept assignment is correct.
+    """
     abstain_threshold: float | None = None
     """Absolute calibrated-confidence floor in [0, 1]; below it ⇒ review."""
 
