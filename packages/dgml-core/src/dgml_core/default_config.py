@@ -23,12 +23,20 @@ from __future__ import annotations
 # writes one of these into the `[models]` block; the tier→task mapping and
 # per-task overrides are documented in the CLI reference, not baked into the
 # file (the mapping may change without a config rewrite).
+#
+# The cheap Gemini tier uses the `gemini-flash-lite-latest` *alias*, not a
+# pinned version. A pinned flash-lite (`gemini-2.5-flash-lite`) was the default
+# here until Google closed it to new API users — it began returning HTTP 404
+# ("no longer available to new users") on a fresh key, so a new user running
+# `dgml init --provider google` got a config that failed on first use. The
+# alias tracks the current flash-lite and cannot go stale that way. Users who
+# need a reproducible pin can still set an explicit model in their own config.
 PROVIDER_MODELS: dict[str, dict[str, str]] = {
     "mixed": {
         # Gemini Flash-Lite for the cheap high-volume vision work
         # (classification/style); Anthropic for the document-reasoning pipeline
         # (transcription → labeling/value-extraction → schema generation).
-        "light": "gemini/gemini-2.5-flash-lite",
+        "light": "gemini/gemini-flash-lite-latest",
         "standard": "anthropic/claude-haiku-4-5",
         "advanced": "anthropic/claude-sonnet-4-6",
         "expert": "anthropic/claude-opus-4-8",
@@ -40,7 +48,7 @@ PROVIDER_MODELS: dict[str, dict[str, str]] = {
         "expert": "anthropic/claude-opus-4-8",
     },
     "google": {
-        "light": "gemini/gemini-2.5-flash-lite",
+        "light": "gemini/gemini-flash-lite-latest",
         "standard": "gemini/gemini-2.5-flash",
         "advanced": "gemini/gemini-2.5-pro",
         "expert": "gemini/gemini-2.5-pro",

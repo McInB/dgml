@@ -1004,7 +1004,7 @@ section in `<workspace>/config.toml`:
 ```json
 {
   "classification": {
-    "model": "gemini/gemini-2.5-flash-lite",
+    "model": "gemini/gemini-flash-lite-latest",
     "max_pages": 3,
     "api_key_env": "GEMINI_API_KEY"
   }
@@ -1013,7 +1013,7 @@ section in `<workspace>/config.toml`:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-2.5-flash-lite`, `anthropic/claude-opus-4-7`, `openai/gpt-4o`. |
+| `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-flash-lite-latest`, `anthropic/claude-opus-4-7`, `openai/gpt-4o`. |
 | `max_pages` | no (default `3`) | How many rendered page images (`page_images/page_1.png` …) to send to the LLM. Cap is per-classification cost: 1 is the cheap setting, 4+ is the thorough one. |
 | `naming_attempts` | no (default `1`) | How many independent proposals to request when naming a *newly clustered* DocSet (`dgml cluster`, not per-file `--auto-classify`). At `1` the single proposal is used as-is. At `2`+ the name the plurality of attempts agreed on wins, and that share is reported as the file's `naming_confidence` — a 3-of-3 agreement is safe to accept unreviewed, a 2-1 split is worth a look. Costs tokens linearly, so raise it only for runs where a wrong DocSet name is expensive to undo. |
 | `api_key` | no | Optional literal API key. Use only on per-developer workspaces (config.toml isn't checked in). Mutually exclusive with `api_key_env`. |
@@ -1044,7 +1044,7 @@ The `classification` payload block:
 ```json
 "classification": {
   "performed": true,
-  "model": "gemini/gemini-2.5-flash-lite",
+  "model": "gemini/gemini-flash-lite-latest",
   "decision": "existing",
   "docset_id": "k7q3xb91pmrf",
   "docset_created": false,
