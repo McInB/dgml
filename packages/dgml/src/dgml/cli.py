@@ -37,6 +37,7 @@ from dgml_core.conversion import FAMILY_BY_SUFFIX, load_conversion_config
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import DgmlError, WorkspaceNotInitialized, short_error_message
 from dgml_core.files import AddFileResult, ConflictPolicy, FileStore
+from dgml_core.migrations import MigrationResult, migrate_workspace, stamp_schema_version
 from dgml_core.models import DocSet
 from dgml_core.storage import Workspace, read_json
 from dgml_core.text_extraction import TextMode
@@ -946,6 +947,28 @@ def _add_chain_subparsers(
         _chain_config_arg(pv)
 
 
+def _report_migrations(
+    results: list[MigrationResult], ws: Workspace, args: argparse.Namespace
+) -> None:
+    """Announce an applied workspace migration on stderr, under ``--verbose``.
+
+    Verbose-gated on purpose. Migrations are automatic, additive and
+    idempotent, so the default-quiet cost is low — whereas stderr carries the
+    structured error envelope this CLI promises its callers, and a notice
+    printed ahead of a failing command would leave stderr holding a plain-text
+    line *and* a JSON object, breaking every agent that parses it. Under
+    ``--verbose`` stderr is already non-JSON (that is where the traceback
+    goes), so the notice is free there.
+
+    A migration that changed nothing says nothing either way: bumping the
+    version stamp on a workspace that had no work to do is bookkeeping, not an
+    upgrade."""
+    if not (getattr(args, "verbose", False) or os.environ.get("DGML_DEBUG")):
+        return
+    for result in (r for r in results if r.changed):
+        sys.stderr.write(f"[dgml] upgraded workspace at {ws.root} — {result.summary()}\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -956,10 +979,16 @@ def main(argv: list[str] | None = None) -> int:
         # `init` manages only the peer local_config.json; `workspace create`
         # is what actually builds the workspace — so both run before the
         # workspace exists.
-        if args.command not in ("init", "workspace") and not ws.is_initialized():
-            raise WorkspaceNotInitialized(
-                f"workspace at {ws.root} is not initialized — run 'dgml workspace create'"
-            )
+        if args.command not in ("init", "workspace"):
+            if not ws.is_initialized():
+                raise WorkspaceNotInitialized(
+                    f"workspace at {ws.root} is not initialized — run 'dgml workspace create'"
+                )
+            # Upgrade an older workspace in place before anything reads it. This
+            # is the one point every command passes through, so there is no
+            # separate migrate step to remember. No-op (one document read) when
+            # the workspace is already current.
+            _report_migrations(migrate_workspace(ws), ws, args)
         return _dispatch(args, ws, fmt)
     except DgmlError as exc:
         return _emit_error(exc.code, str(exc), fmt)
@@ -1029,6 +1058,9 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         ws.init()
         name = args.name or ws.root.name
         ws.write_meta(name=name, organization=args.organization)
+        # Stamp the current layout revision so a brand-new workspace is never
+        # mistaken for an old one and re-scanned by the migration on first use.
+        stamp_schema_version(ws)
         if existed and written:
             sys.stderr.write(
                 f"[dgml workspace create] overwrote {ws.config_path} from {ws.local_config_path}.\n"

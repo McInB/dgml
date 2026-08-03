@@ -189,22 +189,38 @@ class StorageService(ABC):
 
     @contextmanager
     def staged_write(self, key_prefix: str) -> Iterator[Path]:
-        """Yield a local directory for a tool that emits a *batch* of files by
-        path (ghostscript rendering a file's page images).
+        """Yield an empty local directory for a tool that emits a *batch* of
+        files by path (ghostscript rendering a file's page images).
 
-        On clean exit every file written under the yielded directory is stored
-        as a blob under ``key_prefix`` (preserving relative paths); if the body
-        raises, nothing is persisted. Default: a temp dir uploaded on exit.
-        ``LocalStore`` yields the real destination directory so the tool writes
-        final bytes in place (zero copy)."""
+        **The prefix is replaced, not added to.** On clean exit the blobs under
+        ``key_prefix`` are *exactly* the files written into the yielded
+        directory: everything written is stored (preserving relative paths) and
+        any pre-existing blob under the prefix that was not rewritten is
+        deleted. If the body raises, nothing is persisted and the prefix is left
+        as it was.
+
+        Replacement is part of the contract rather than an implementation
+        detail because the callers regenerate a whole set at once — re-render a
+        document whose page count dropped from 10 to 5 and the stale
+        ``page_6..10`` must not survive. They would otherwise be hashed into the
+        file's attestation, so a purely additive implementation makes the Merkle
+        root depend on which backend the workspace happens to live on.
+
+        A store overriding this must keep both halves of the contract: an
+        **empty** directory on entry, and an exact replacement on exit."""
         prefix = key_prefix.rstrip("/")
+        stale = set(self.list_blobs(prefix + "/"))
         with tempfile.TemporaryDirectory() as tmp:
             staging = Path(tmp)
             yield staging
             for path in sorted(staging.rglob("*")):
                 if path.is_file():
                     rel = path.relative_to(staging).as_posix()
-                    self.upload_blob(f"{prefix}/{rel}", path)
+                    key = f"{prefix}/{rel}"
+                    self.upload_blob(key, path)
+                    stale.discard(key)
+            for key in sorted(stale):
+                self.delete_blob(key)
 
     @contextmanager
     def materialize_dir(self, prefix: str) -> Iterator[Path]:
@@ -230,23 +246,40 @@ class StorageService(ABC):
         exit. For a read-modify-write working area the pipeline reloads across
         runs (the generation ``cache/``).
 
+        As with :meth:`staged_write`, the sync back is a **replacement**: a blob
+        the body deleted locally is deleted from the store, not silently
+        resurrected on the next run.
+
         The yielded directory is named after the last segment of ``prefix`` and
         lives inside a fresh temp dir, so its *parent* is a stable per-call
         scratch location — a sibling artifact written next to it (generation's
-        ``schema.json``) has somewhere to go. Default: temp dir, downloaded in
-        and uploaded out. ``LocalStore`` yields the real directory (no copy, no
-        sync — writes already land in the store)."""
+        ``schema.json``) has somewhere to go, and is deliberately *not* synced.
+        Default: temp dir, downloaded in and uploaded out. ``LocalStore`` yields
+        the real directory (no copy, no sync — writes and deletes already land
+        in the store).
+
+        Unlike :meth:`staged_write`, a crash does not roll back identically
+        across stores: the default persists nothing (the upload runs after the
+        ``yield``, not in a ``finally``), while ``LocalStore`` has already
+        written in place. That is tolerated because the only caller is a
+        regenerable cache — do not use this for artifacts that must not be
+        half-written."""
         base = prefix.rstrip("/") + "/"
         segment = prefix.rstrip("/").rsplit("/", 1)[-1] or "data"
+        stale = set(self.list_blobs(base))
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp) / segment
             work.mkdir(parents=True, exist_ok=True)
-            for key in self.list_blobs(base):
+            for key in stale:
                 self.download_blob(key, work / key[len(base) :])
             yield work
             for path in sorted(work.rglob("*")):
                 if path.is_file():
-                    self.upload_blob(base + path.relative_to(work).as_posix(), path)
+                    key = base + path.relative_to(work).as_posix()
+                    self.upload_blob(key, path)
+                    stale.discard(key)
+            for key in sorted(stale):
+                self.delete_blob(key)
 
     # ---- Derived reads — composed from the primitives above ----
 

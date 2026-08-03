@@ -35,6 +35,7 @@ from .errors import (
     InvalidPDF,
     PageRenderFailed,
     UnsupportedFileType,
+    WorkspaceMigrationFailed,
     WorkspaceNotInitialized,
 )
 from .file_attestation import (
@@ -57,6 +58,15 @@ from .file_attestation import (
     write_attestation,
 )
 from .files import AddFileResult, ConflictPolicy, FileStore
+from .migrations import (
+    WORKSPACE_SCHEMA_VERSION,
+    Migration,
+    MigrationResult,
+    migrate_workspace,
+    pending_migrations,
+    stamp_schema_version,
+    workspace_schema_version,
+)
 from .models import DocSet, FileRecord
 from .storage import Workspace
 from .storage_local import LocalStore
@@ -73,6 +83,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "DEFAULT_STORAGE_PROVIDER",
+    "WORKSPACE_SCHEMA_VERSION",
     "AddFileResult",
     "ArtifactKind",
     "ArtifactRef",
@@ -100,12 +111,15 @@ __all__ = [
     "InvalidPDF",
     "Issue",
     "LocalStore",
+    "Migration",
+    "MigrationResult",
     "PageRenderFailed",
     "StorageConfig",
     "StorageService",
     "UnsupportedFileType",
     "VerifyResult",
     "Workspace",
+    "WorkspaceMigrationFailed",
     "WorkspaceNotInitialized",
     "__version__",
     "attest_file",
@@ -118,10 +132,14 @@ __all__ = [
     "load_storage_config",
     "make_converter",
     "make_store",
+    "migrate_workspace",
+    "pending_migrations",
     "read_attestation",
+    "stamp_schema_version",
     "storage_fingerprint",
     "verify_attestation_dir",
     "verify_bundle",
     "verify_file_version",
+    "workspace_schema_version",
     "write_attestation",
 ]

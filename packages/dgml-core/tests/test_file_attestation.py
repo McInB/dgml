@@ -231,6 +231,36 @@ def test_docset_adds_schema_and_dgml_xml_in_slot_order(workspace: Workspace) -> 
     )
 
 
+def test_assignment_representation_does_not_affect_attestation(workspace: Workspace) -> None:
+    """How an assignment is stored must not perturb the attestation.
+
+    The Merkle root is DGML's proof-of-origin contract, so it has to depend only
+    on the attested artifacts. This pins that: a pair directory carrying an
+    ``assignment.json`` document, a legacy bare marker directory, and no
+    assignment at all must all produce the same slots and the same root — which
+    is also what keeps previously anchored records valid across this change."""
+    _seed_file(workspace, "f001", pages=1, pdf_name="contract.pdf")
+    _seed_docset(workspace, "ds01", full_schema=_FULL_SCHEMA_RNC)
+    _seed_dgml_xml(workspace, "ds01", "contract", b"<dg:chunk xmlns:dg='http://x'><a/></dg:chunk>")
+
+    def snapshot() -> tuple[list[str], str]:
+        version = collect_file_version(workspace, "f001", "ds01")
+        return [a.slot_id for a in version.artifacts], attest_file_version(version).root
+
+    # (1) no assignment recorded — the pair dir holds only the generated XML
+    baseline = snapshot()
+    assert baseline[0] == ["source", "page_image[1]", "full_schema", "dgml_xml"]
+
+    # (2) assignment as a real document, written into that same directory
+    workspace.store.put_doc("assignments", "ds01/f001", {"docset_id": "ds01", "file_id": "f001"})
+    assert (workspace.docset_file_dir("ds01", "f001") / "assignment.json").is_file()
+    assert snapshot() == baseline
+
+    # (3) legacy bare marker (no assignment.json)
+    (workspace.docset_file_dir("ds01", "f001") / "assignment.json").unlink()
+    assert snapshot() == baseline
+
+
 def test_extraction_schema_slot_present_without_generation_schema(workspace: Workspace) -> None:
     """The extraction schema is an independent slot — it appears even when the
     generation full-schema.rnc is absent, still ordered ahead of the DGML XML."""
@@ -1255,3 +1285,38 @@ def test_export_and_verify_through_default_path_bridge(
     assert attestation.root == _GOLDEN_DOCSET_ROOT
     assert (out_dir / "source" / "contract.pdf").read_bytes() == _GOLDEN_SOURCE
     assert verify_attestation_dir(out_dir).valid is True
+
+
+def test_shrinking_re_render_yields_the_same_root_on_both_backends(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The concrete attestation bug behind the staged_write replace contract.
+
+    Render a file's pages, then re-render it with fewer (a corrected page count,
+    a re-converted source). An upload-only staged_write leaves the surplus
+    images behind on a store that stages through temp files, while a store that
+    writes in place drops them — and since ``collect_file_version`` hashes
+    ``list_blobs(page_images)``, the two backends would then publish different
+    Merkle roots for identical content. Proof of origin cannot depend on where
+    the workspace is hosted."""
+    _seed_file(workspace, "f001", pages=5, pdf_name="contract.pdf")
+
+    def re_render_to_two_pages() -> str:
+        prefix = workspace.blob_key(workspace.file_pages_dir("f001"))
+        with workspace.store.staged_write(prefix) as pages_dir:
+            for n in (1, 2):
+                (pages_dir / f"page_{n}.png").write_bytes(f"fake-png-page-{n}".encode())
+        return attest_file(workspace, "f001").root
+
+    local_root = re_render_to_two_pages()
+    slots = [a.slot_id for a in collect_file_version(workspace, "f001").artifacts]
+    assert slots == ["source", "page_image[1]", "page_image[2]"]  # 3..5 are gone
+
+    # Put the surplus pages back, then repeat the whole thing through the base
+    # bridge — the implementation every third-party store inherits.
+    for n in range(3, 6):
+        (workspace.file_pages_dir("f001") / f"page_{n}.png").write_bytes(
+            f"fake-png-page-{n}".encode()
+        )
+    monkeypatch.setattr(Workspace, "store", property(lambda self: default_bridge_store(self.root)))
+    assert re_render_to_two_pages() == local_root

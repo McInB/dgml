@@ -20,6 +20,12 @@ from unittest.mock import patch
 
 import pytest
 from dgml.cli import main
+from dgml_core.migrations import (
+    WORKSPACE_SCHEMA_VERSION,
+    pending_migrations,
+    stamp_schema_version,
+    workspace_schema_version,
+)
 from dgml_core.run_clustering import DocPrediction
 from dgml_core.storage import Workspace
 
@@ -126,7 +132,13 @@ def test_workspace_create_from_local_config(
     assert (ws / "files").is_dir()
     # Identity was persisted for later namespace generation.
     meta = json.loads((ws / "workspace.json").read_text(encoding="utf-8"))
-    assert meta == {"name": "ws", "organization": "Acme"}
+    # workspace.json also carries the layout revision the workspace was written
+    # against, so an older one can be upgraded in place on first use.
+    assert meta == {
+        "name": "ws",
+        "organization": "Acme",
+        "schema_version": WORKSPACE_SCHEMA_VERSION,
+    }
     config_text = (ws / "config.json").read_text(encoding="utf-8")
     assert "//" in config_text  # comments survived the verbatim copy
 
@@ -3760,3 +3772,77 @@ def test_docset_generate_builds_tree_for_extraction_only_file(
     assert "<dg:extraction" in final  # prior extraction carried over
     assert ">Acme</docset:VendorName>" in final
     assert 'dg:origin="1 10 20 30 40"' in final  # grounding survived verbatim
+
+
+# ------------------------------------------------------- workspace migration
+
+
+def test_legacy_workspace_migrates_on_first_command(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The path a real pre-`assignment.json` user hits: an existing workspace
+    with directory-shaped assignments upgrades itself on the next command, with
+    no migrate step to run and no change to stdout's JSON contract."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    workspace = Workspace(root=ws.resolve())
+
+    rc = main(_ws_args(ws) + ["docset", "create", "--name", "Contracts"])
+    assert rc == 0
+    docset_id = _read_stdout(capsys)["id"]
+
+    # Fabricate the legacy shape: a file, and an assignment as a bare directory.
+    file_id = "aaaaaaaaaaaa"
+    workspace.store.put_doc("files", file_id, {"id": file_id})
+    workspace.docset_file_dir(docset_id, file_id).mkdir(parents=True)
+    # Roll the stamp back so the workspace looks like it predates the change.
+    stamp_schema_version(workspace, 0)
+
+    rc = main(_ws_args(ws) + ["docset", "list-files", docset_id, "--verbose"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["file_ids"] == [file_id]
+    assert "upgraded workspace" in captured.err  # announced, but never on stdout
+    assert (workspace.docset_file_dir(docset_id, file_id) / "assignment.json").is_file()
+
+    # Second command: already current, nothing announced even under --verbose.
+    rc = main(_ws_args(ws) + ["docset", "list-files", docset_id, "--verbose"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["file_ids"] == [file_id]
+    assert "upgraded workspace" not in captured.err
+
+
+def test_migration_notice_never_breaks_the_stderr_error_envelope(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without --verbose, stderr stays a single parseable JSON error envelope
+    even when the command both migrated the workspace and then failed."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    workspace = Workspace(root=ws.resolve())
+    workspace.docset_file_dir("ds000000001a", "f0000000001a").mkdir(parents=True)
+    stamp_schema_version(workspace, 0)
+    capsys.readouterr()
+
+    rc = main(_ws_args(ws) + ["docset", "list-files", "nosuchdocset"])
+    assert rc != 0
+    assert json.loads(capsys.readouterr().err)["error"]["code"] == "DOCSET_NOT_FOUND"
+    # the migration still ran
+    assert workspace_schema_version(workspace) == WORKSPACE_SCHEMA_VERSION
+
+
+def test_workspace_create_stamps_schema_version(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A new workspace is stamped current, so it is never re-scanned."""
+    ws = tmp_path / "ws"
+    rc = main(_ws_args(ws) + ["workspace", "create", "--name", "W", "--organization", "acme"])
+    assert rc == 0
+    capsys.readouterr()
+    workspace = Workspace(root=ws.resolve())
+    assert workspace_schema_version(workspace) == WORKSPACE_SCHEMA_VERSION
+    assert pending_migrations(workspace) == []
+    # identity survives the stamp
+    assert workspace.organization == "acme"
+    assert workspace.display_name == "W"

@@ -116,6 +116,18 @@ class StorageBackendMismatch(DgmlError):
     code = "STORAGE_BACKEND_MISMATCH"
 
 
+class WorkspaceMigrationFailed(DgmlError):
+    """A pending workspace-schema migration could not be applied.
+
+    Migrations run automatically on open, so this is nearly always a
+    permissions problem (a read-only mount). Failing loudly is deliberate:
+    an un-migrated workspace reads as structurally valid but incomplete —
+    e.g. pre-``assignment.json`` DocSet assignments would silently list as
+    empty — and a wrong answer is worse than a refusal."""
+
+    code = "WORKSPACE_MIGRATION_FAILED"
+
+
 class OcrConfigInvalid(DgmlError):
     code = "OCR_CONFIG_INVALID"
 

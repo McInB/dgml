@@ -20,6 +20,7 @@ from .errors import (
     InvalidArgument,
     SchemaInvalid,
     SchemaNotFound,
+    now_iso,
 )
 from .ids import new_id
 from .models import DocSet
@@ -124,10 +125,11 @@ class DocSetStore:
         if self.ws.store.get_doc("files", file_id) is None:
             raise FileNotFound(f"file '{file_id}' not found")
         # An assignment is a document keyed by the (docset, file) pair. Re-adding
-        # is idempotent (overwrites the same marker), matching the old mkdir.
-        self.ws.store.insert_doc(
+        # is idempotent — it replaces the same document, refreshing assigned_at.
+        self.ws.store.put_doc(
             "assignments",
-            {"_id": f"{docset_id}/{file_id}", "docset_id": docset_id, "file_id": file_id},
+            f"{docset_id}/{file_id}",
+            {"docset_id": docset_id, "file_id": file_id, "assigned_at": now_iso()},
         )
 
     def remove_file(self, docset_id: str, file_id: str) -> None:

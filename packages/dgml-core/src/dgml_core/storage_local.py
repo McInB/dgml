@@ -24,12 +24,16 @@ it is today — no migration, and everything that reads the tree directly
   ``docsets/<did>/full-schema.rnc``.
 - **JSON documents map by ``(collection, id)`` to their real manifest paths**:
   ``files`` → ``files/<id>/file.json``, ``docsets`` → ``docsets/<id>/docset.json``,
-  and so on. The document is stored **verbatim** — no ``_id`` is injected, so
-  ``file.json`` is exactly the ``FileRecord`` JSON it is today. Two collections are
-  special-cased: ``usage`` is the append-only ``usage.jsonl`` (one JSON object per
-  line), and ``assignments`` is today's **empty marker directory**
-  ``docsets/<did>/files/<fid>/`` — its ``{docset_id, file_id}`` body is reconstructed
-  from the path, so no ``assignment.json`` file is written.
+  ``assignments`` → ``docsets/<did>/files/<fid>/assignment.json``, and so on. The
+  document is stored **verbatim** — no ``_id`` is injected, so ``file.json`` is
+  exactly the ``FileRecord`` JSON it is today. One collection is special-cased:
+  ``usage`` is the append-only ``usage.jsonl`` (one JSON object per line).
+
+Every record is a *file*; no directory is load-bearing. Earlier revisions
+recorded an assignment as the bare existence of ``docsets/<did>/files/<fid>/``,
+which made a document's lifetime inseparable from its container's — deleting
+the record meant deleting the directory (and the generated artifacts inside
+it), and pruning an emptied directory could silently unassign a file.
 
 Blobs and documents interleave in the same directories, so :meth:`list_blobs`
 excludes the recognized document/reserved filenames. Every write is temp-file +
@@ -42,6 +46,7 @@ import contextlib
 import json
 import re
 import shutil
+import tempfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -60,12 +65,20 @@ DOCSET_FILES_DIR = "files"  # the per-docset assignment/output dir: docsets/<id>
 # Manifest / bootstrap filenames.
 FILE_MANIFEST = "file.json"
 DOCSET_MANIFEST = "docset.json"
+ASSIGNMENT_MANIFEST = "assignment.json"
 ERRORS_FILE = "errors.json"
 GENERATION_SCHEMA_FILE = "schema.json"
 WORKSPACE_FILE = "workspace.json"
 EXTRACTION_STATS_FILE = "extraction_stats.json"
 CONFIG_FILE = "config.json"
 USAGE_FILE = "usage.jsonl"
+
+# Workspace-internal scratch, never part of the blob namespace: the clustering
+# embedding cache (``Workspace.embedding_cache_dir``) and ``staged_write``'s
+# staging area both live here. Keeping it under the workspace root is what lets
+# a staged write land by rename instead of a second copy of the bytes.
+CACHE_DIR = ".cache"
+STAGING_DIR = "staging"
 
 
 class Collection(StrEnum):
@@ -130,6 +143,9 @@ _DOC_LAYOUTS: dict[str, _DocLayout] = {
     Collection.DOCSETS: _DocLayout(f"{docset_dir_template()}/{DOCSET_MANIFEST}", ("id",)),
     Collection.SCHEMAS: _DocLayout(f"{docset_dir_template()}/{GENERATION_SCHEMA_FILE}", ("id",)),
     Collection.WORKSPACE: _DocLayout(WORKSPACE_FILE, ()),
+    Collection.ASSIGNMENTS: _DocLayout(
+        f"{docset_file_dir_template()}/{ASSIGNMENT_MANIFEST}", ("did", "fid")
+    ),
     Collection.EXTRACTION_STATS: _DocLayout(
         f"{docset_file_dir_template()}/{EXTRACTION_STATS_FILE}", ("did", "fid")
     ),
@@ -240,6 +256,8 @@ class LocalStore(StorageService):
         name = parts[-1]
         if name.endswith(".tmp"):
             return False
+        if parts[0] == CACHE_DIR:
+            return False  # workspace-internal scratch, not stored content
         if name in _NON_BLOB_BASENAMES:
             return False
         return True
@@ -269,11 +287,34 @@ class LocalStore(StorageService):
 
     @contextlib.contextmanager
     def staged_write(self, key_prefix: str) -> Iterator[Path]:
-        # The staging dir IS the destination, so the tool renders final bytes in
-        # place — no upload step (the base default would copy temp → root).
-        dest = self._blob_path(key_prefix.rstrip("/"))
-        dest.mkdir(parents=True, exist_ok=True)
-        yield dest
+        # Stage into the workspace's own scratch, then move the results into
+        # place. Two reasons this isn't the older "hand back the destination and
+        # let the tool write in place":
+        #
+        #   * the contract yields an *empty* directory and replaces the prefix,
+        #     which writing in place cannot honour — a stale page_7.png from a
+        #     longer previous render would survive unless the tool happened to
+        #     delete it, and the store would disagree with a remote backend
+        #     about what the file's page images are;
+        #   * a crash mid-render must leave the prefix as it was, matching the
+        #     base implementation, rather than half-clobbering it.
+        #
+        # Staging under the workspace root keeps it on one filesystem, so the
+        # hand-off below is a rename — still no second copy of the bytes.
+        prefix = key_prefix.rstrip("/")
+        scratch = self._root / CACHE_DIR / STAGING_DIR
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as tmp:
+            staging = Path(tmp)
+            yield staging
+            self.delete_blobs(prefix)
+            dest = self._blob_path(prefix)
+            dest.mkdir(parents=True, exist_ok=True)
+            for path in sorted(staging.rglob("*")):
+                if path.is_file():
+                    target = dest / path.relative_to(staging)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    path.replace(target)
 
     @contextlib.contextmanager
     def materialize_dir(self, prefix: str) -> Iterator[Path]:
@@ -282,8 +323,12 @@ class LocalStore(StorageService):
 
     @contextlib.contextmanager
     def working_dir(self, prefix: str) -> Iterator[Path]:
-        # The real directory IS under the store root — writes land in place, so
-        # there is nothing to download in or upload back out.
+        # The real directory IS under the store root — writes and deletes land
+        # in place, so there is nothing to download in or upload back out, and
+        # the replace-on-exit contract holds for free. (Unlike staged_write this
+        # stays in-place: the caller is a regenerable cache, so persisting a
+        # partial one on a crash is harmless, and staging it would mean copying
+        # the whole cache in and out on every run.)
         work = self._blob_path(prefix.rstrip("/"))
         work.mkdir(parents=True, exist_ok=True)
         yield work
@@ -301,22 +346,16 @@ class LocalStore(StorageService):
             base.unlink()
         self._prune_empty_dirs(base)
 
-    def _is_assignment_marker(self, directory: Path) -> bool:
-        """Whether ``directory`` is a ``docsets/<did>/files/<fid>`` pair directory —
-        an *empty one is itself a live assignment* (see the assignments collection),
-        so pruning must never remove it; only ``delete_doc("assignments", …)`` does."""
-        try:
-            parts = directory.relative_to(self._root).parts
-        except ValueError:
-            return False
-        return len(parts) == 4 and parts[0] == DOCSETS_DIR and parts[2] == DOCSET_FILES_DIR
-
     def _prune_empty_dirs(self, base: Path) -> None:
         """Remove empty directories in and above ``base`` (bottom-up), stopping at
         the workspace root's top-level directories (``files/``, ``docsets/``) and the
         root itself — so composed blob+document deletes leave no lingering empty dirs
-        (matching the historical recursive remove). Assignment marker directories are
-        preserved: an empty one is a live assignment, not garbage."""
+        (matching the historical recursive remove).
+
+        No directory is load-bearing: every record is a document, so pruning an
+        empty directory can never destroy one. (It could when an assignment *was*
+        an empty ``docsets/<did>/files/<fid>/``, which is why this used to need a
+        guard against removing them.)"""
         if base.is_dir():
             subdirs = sorted(
                 (p for p in base.rglob("*") if p.is_dir()),
@@ -324,14 +363,10 @@ class LocalStore(StorageService):
                 reverse=True,
             )
             for sub in subdirs:
-                if self._is_assignment_marker(sub):
-                    continue
                 with contextlib.suppress(OSError):
                     sub.rmdir()
         directory = base
         while directory != self._root and directory.parent != self._root:
-            if self._is_assignment_marker(directory):
-                break
             try:
                 parent = directory.parent
                 directory.rmdir()
@@ -342,7 +377,7 @@ class LocalStore(StorageService):
     # ---- JSON documents (Mongo-shaped): mapped to today's manifest paths ----
 
     def _assignment_dir(self, doc_id: str) -> Path:
-        """The per-(docset, file) marker directory for an assignment id ``did/fid``."""
+        """The per-(docset, file) directory for an assignment id ``did/fid``."""
         did, fid = _split_id(doc_id, 2)
         return self._root / DOCSETS_DIR / did / DOCSET_FILES_DIR / fid
 
@@ -376,11 +411,6 @@ class LocalStore(StorageService):
     def get_doc(self, collection: str, doc_id: str) -> dict[str, Any] | None:
         if collection == Collection.USAGE:
             return None  # append-only; read via find_docs, not by id
-        if collection == Collection.ASSIGNMENTS:
-            did, fid = _split_id(doc_id, 2)
-            if not self._assignment_dir(doc_id).is_dir():
-                return None
-            return {"docset_id": did, "file_id": fid}
         path = self._doc_path(collection, doc_id)
         if not path.is_file():
             return None
@@ -390,12 +420,6 @@ class LocalStore(StorageService):
         return [doc for doc in self._iter_docs(collection) if _matches(doc, query)]
 
     def put_doc(self, collection: str, doc_id: str, doc: dict[str, Any]) -> None:
-        if collection == Collection.ASSIGNMENTS:
-            # An assignment is an empty marker directory (as today); its
-            # ``{docset_id, file_id}`` body is reconstructed from the path, so the
-            # doc body is not persisted.
-            self._assignment_dir(doc_id).mkdir(parents=True, exist_ok=True)
-            return
         # Stored verbatim — the manifest keeps its own fields (e.g. ``id``); no
         # ``_id`` is injected, so ``file.json`` is byte-identical to today.
         _write_text_atomic(
@@ -406,12 +430,15 @@ class LocalStore(StorageService):
     def delete_doc(self, collection: str, doc_id: str) -> None:
         if collection == Collection.USAGE:
             return
-        if collection == Collection.ASSIGNMENTS:
-            # Matches the historical remove_file: drop the whole pair directory
-            # (marker + any generated dgml.xml / extraction_stats inside).
-            shutil.rmtree(self._assignment_dir(doc_id), ignore_errors=True)
-            return
         self._doc_path(collection, doc_id).unlink(missing_ok=True)
+        if collection == Collection.ASSIGNMENTS:
+            # Deleting the assignment removes the record and nothing else — the
+            # pair's generated dgml.xml / extraction_stats are separate objects
+            # that a cascade deletes explicitly (see ``Workspace.unassign``).
+            # Drop the pair directory if that left it empty, so the tree matches
+            # what a recursive remove would leave.
+            with contextlib.suppress(OSError):
+                self._assignment_dir(doc_id).rmdir()
 
     def delete_docs(self, collection: str, query: Mapping[str, Any]) -> int:
         if collection == Collection.USAGE:
@@ -459,14 +486,6 @@ class LocalStore(StorageService):
                     continue  # tolerate a corrupt tail line from a crashed append
                 if isinstance(obj, dict):
                     yield obj
-            return
-        if collection == Collection.ASSIGNMENTS:
-            # Enumerate the per-(docset, file) marker directories, reconstructing
-            # each assignment's body from the path.
-            pattern = f"{DOCSETS_DIR}/*/{DOCSET_FILES_DIR}/*"
-            for path in sorted(self._root.glob(pattern)):
-                if path.is_dir():
-                    yield {"docset_id": path.parent.parent.name, "file_id": path.name}
             return
         for path in self._doc_paths(collection):
             try:

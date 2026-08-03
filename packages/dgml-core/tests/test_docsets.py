@@ -325,3 +325,74 @@ def test_remove_file_rejects_empty_docset_id(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     with pytest.raises(InvalidArgument):
         store.remove_file("", "abcdefghijkl")
+
+
+# ------------------------------------------------- assignment cascade semantics
+
+
+def _assigned_pair(workspace: Workspace) -> tuple[DocSetStore, str, str]:
+    """A docset with one assigned file that has generated artifacts."""
+    store = DocSetStore(workspace)
+    ds = store.create(name="X")
+    fid = "abcdefghijkl"
+    workspace.store.put_doc("files", fid, {"id": fid})
+    store.add_file(ds.id, fid)
+    workspace.store.put_blob(f"docsets/{ds.id}/files/{fid}/report.dgml.xml", b"<x/>")
+    workspace.store.put_doc("extraction_stats", f"{ds.id}/{fid}", {"matched": 3})
+    return store, ds.id, fid
+
+
+def test_add_file_records_an_assignment_document(workspace: Workspace) -> None:
+    store = DocSetStore(workspace)
+    ds = store.create(name="X")
+    fid = "abcdefghijkl"
+    workspace.store.put_doc("files", fid, {"id": fid})
+    store.add_file(ds.id, fid)
+
+    doc = workspace.store.get_doc("assignments", f"{ds.id}/{fid}")
+    assert doc is not None
+    assert doc["docset_id"] == ds.id
+    assert doc["file_id"] == fid
+    assert doc["assigned_at"]  # the relationship can carry metadata now
+
+
+def test_unassign_removes_record_and_pair_artifacts(workspace: Workspace) -> None:
+    """The cascade must delete the assignment *and* the pair's artifacts.
+
+    Each is a separate store object, so this only passes if `unassign` deletes
+    all three explicitly — the behavior a remote backend depends on. It used to
+    also pass on local disk when the assignment delete alone did an rmtree."""
+    store, did, fid = _assigned_pair(workspace)
+    workspace.unassign(did, fid)
+
+    assert workspace.store.get_doc("assignments", f"{did}/{fid}") is None
+    assert not workspace.store.blob_exists(f"docsets/{did}/files/{fid}/report.dgml.xml")
+    assert workspace.store.get_doc("extraction_stats", f"{did}/{fid}") is None
+    assert store.list_files(did) == []
+
+
+def test_remove_file_removes_pair_artifacts(workspace: Workspace) -> None:
+    store, did, fid = _assigned_pair(workspace)
+    store.remove_file(did, fid)
+    assert store.list_files(did) == []
+    assert not workspace.store.blob_exists(f"docsets/{did}/files/{fid}/report.dgml.xml")
+    assert workspace.store.get_doc("extraction_stats", f"{did}/{fid}") is None
+
+
+def test_docset_delete_removes_every_assignment_and_artifact(workspace: Workspace) -> None:
+    store, did, fid = _assigned_pair(workspace)
+    store.delete(did)
+    assert workspace.store.get_doc("assignments", f"{did}/{fid}") is None
+    assert workspace.store.find_docs("assignments", {"docset_id": did}) == []
+    assert workspace.store.list_blobs(f"docsets/{did}/") == []
+    # the underlying file is untouched
+    assert workspace.store.get_doc("files", fid) is not None
+
+
+def test_reassign_is_idempotent(workspace: Workspace) -> None:
+    store, did, fid = _assigned_pair(workspace)
+    store.add_file(did, fid)  # re-adding replaces the same document
+    assert store.list_files(did) == [fid]
+    assert len(workspace.store.find_docs("assignments", {"docset_id": did})) == 1
+    # and it must not disturb the pair's generated artifacts
+    assert workspace.store.blob_exists(f"docsets/{did}/files/{fid}/report.dgml.xml")

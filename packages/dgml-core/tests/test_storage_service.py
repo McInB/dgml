@@ -106,13 +106,17 @@ def test_delete_blobs_is_blob_only_and_prunes(tmp_path: Path) -> None:
     assert not (tmp_path / "files" / "f1").exists()
 
 
-def test_delete_blobs_preserves_assignment_markers(tmp_path: Path) -> None:
+def test_delete_blobs_preserves_assignments(tmp_path: Path) -> None:
+    """A blob-only delete must never take the assignment with it.
+
+    This used to need an explicit prune guard, because an *empty* pair directory
+    was itself the assignment. Now the assignment is a document that lives in
+    that directory, so it survives for the ordinary reason: ``delete_blobs``
+    does not touch documents, and the directory is not empty."""
     store = local_store(tmp_path)
-    # an assignment is an empty marker dir; a generated dgml.xml blob sits beside it
-    store.insert_doc("assignments", {"_id": "d1/f1", "docset_id": "d1", "file_id": "f1"})
+    store.put_doc("assignments", "d1/f1", {"docset_id": "d1", "file_id": "f1"})
     store.put_blob("docsets/d1/files/f1/report.dgml.xml", b"<x/>")
     store.delete_blobs("docsets/d1/files/f1/")
-    # the blob is gone, but pruning must not remove the marker → assignment survives
     assert not store.blob_exists("docsets/d1/files/f1/report.dgml.xml")
     assert store.get_doc("assignments", "d1/f1") == {"docset_id": "d1", "file_id": "f1"}
     assert (tmp_path / "docsets" / "d1" / "files" / "f1").is_dir()
@@ -188,17 +192,25 @@ def test_docset_and_workspace_collections(tmp_path: Path) -> None:
     assert json.loads((tmp_path / "workspace.json").read_text())["organization"] == "Acme"
 
 
-def test_assignments_as_empty_marker_dirs(tmp_path: Path) -> None:
+def _assign(store: LocalStore, docset_id: str, file_id: str) -> None:
+    store.put_doc(
+        "assignments",
+        f"{docset_id}/{file_id}",
+        {"docset_id": docset_id, "file_id": file_id},
+    )
+
+
+def test_assignments_are_documents(tmp_path: Path) -> None:
     store = local_store(tmp_path)
-    store.insert_doc("assignments", {"_id": "d1/f1", "docset_id": "d1", "file_id": "f1"})
-    store.insert_doc("assignments", {"_id": "d1/f2", "docset_id": "d1", "file_id": "f2"})
-    store.insert_doc("assignments", {"_id": "d2/f1", "docset_id": "d2", "file_id": "f1"})
-    # on disk it's today's empty marker directory — no assignment.json file
+    _assign(store, "d1", "f1")
+    _assign(store, "d1", "f2")
+    _assign(store, "d2", "f1")
+    # on disk it's a real document in the pair directory, not the directory itself
     pair = tmp_path / "docsets" / "d1" / "files" / "f1"
-    assert pair.is_dir()
-    assert not (pair / "assignment.json").exists()
-    assert list(pair.iterdir()) == []
-    # the body is reconstructed from the path
+    assert json.loads((pair / "assignment.json").read_text()) == {
+        "docset_id": "d1",
+        "file_id": "f1",
+    }
     assert store.get_doc("assignments", "d1/f1") == {"docset_id": "d1", "file_id": "f1"}
     assert store.get_doc("assignments", "d1/nope") is None
     # both relationship directions are queryable
@@ -211,10 +223,66 @@ def test_assignments_as_empty_marker_dirs(tmp_path: Path) -> None:
         "d2",
     ]
     assert len(store.find_docs("assignments", {})) == 3
-    # delete removes the whole pair dir (matches the historical remove_file)
+    # deleting the record drops the document, and the emptied pair dir with it
     store.delete_doc("assignments", "d1/f1")
     assert not pair.exists()
     assert len(store.find_docs("assignments", {})) == 2
+
+
+def test_assignment_body_is_stored_not_reconstructed(tmp_path: Path) -> None:
+    """A real document can carry fields the path cannot encode (assigned_at,
+    and later provenance) — the whole point of not being a marker directory."""
+    store = local_store(tmp_path)
+    body = {"docset_id": "d1", "file_id": "f1", "assigned_at": "2026-07-31T00:00:00Z"}
+    store.put_doc("assignments", "d1/f1", body)
+    assert store.get_doc("assignments", "d1/f1") == body
+    assert store.find_docs("assignments", {"assigned_at": "2026-07-31T00:00:00Z"}) == [body]
+
+
+def test_delete_doc_assignment_leaves_pair_artifacts(tmp_path: Path) -> None:
+    """Deleting the assignment deletes the record and nothing else.
+
+    The old marker-directory representation made this impossible: ``delete_doc``
+    had to ``rmtree`` the pair directory, so a single-document delete silently
+    took the generated dgml.xml and extraction_stats with it. Removing the
+    pair's artifacts is now the caller's explicit job (``Workspace.unassign``),
+    which is what makes the cascade behave the same on every backend."""
+    store = local_store(tmp_path)
+    _assign(store, "d1", "f1")
+    store.put_blob("docsets/d1/files/f1/report.dgml.xml", b"<x/>")
+    store.put_doc("extraction_stats", "d1/f1", {"matched": 3})
+
+    store.delete_doc("assignments", "d1/f1")
+
+    assert store.get_doc("assignments", "d1/f1") is None
+    assert store.get_blob("docsets/d1/files/f1/report.dgml.xml") == b"<x/>"
+    assert store.get_doc("extraction_stats", "d1/f1") == {"matched": 3}
+
+
+def test_assignment_json_is_not_a_blob(tmp_path: Path) -> None:
+    """``assignment.json`` must stay out of the blob namespace.
+
+    ``collect_file_version`` hashes ``list_blobs`` output into the attestation
+    Merkle tree, so a document leaking into it would change on-chain roots."""
+    store = local_store(tmp_path)
+    _assign(store, "d1", "f1")
+    store.put_blob("docsets/d1/files/f1/report.dgml.xml", b"<x/>")
+    assert store.list_blobs("docsets/d1/files/f1/") == ["docsets/d1/files/f1/report.dgml.xml"]
+
+
+def test_bare_pair_directory_is_not_an_assignment(tmp_path: Path) -> None:
+    """A directory alone records nothing — only the document does.
+
+    Earlier revisions treated the bare existence of ``docsets/<did>/files/<fid>/``
+    as the assignment. That representation cannot survive its own deletion: once
+    ``delete_doc`` removes the record, a pair directory still holding generated
+    artifacts is indistinguishable from an assignment that was never deleted, so
+    the delete silently un-does itself. Recognising bare directories is therefore
+    not a compatibility shim we can keep — it is a correctness hole."""
+    store = local_store(tmp_path)
+    (tmp_path / "docsets" / "d1" / "files" / "f1").mkdir(parents=True)
+    assert store.get_doc("assignments", "d1/f1") is None
+    assert store.find_docs("assignments", {}) == []
 
 
 def test_insert_doc_requires_id(tmp_path: Path) -> None:
@@ -232,7 +300,7 @@ def test_delete_doc_and_delete_docs(tmp_path: Path) -> None:
     store.delete_doc("files", "missing")  # no error
 
     for did, fid in [("d1", "f1"), ("d1", "f2"), ("d2", "f1")]:
-        store.insert_doc("assignments", {"_id": f"{did}/{fid}", "docset_id": did, "file_id": fid})
+        _assign(store, did, fid)
     removed = store.delete_docs("assignments", {"docset_id": "d1"})
     assert removed == 2
     assert len(store.find_docs("assignments", {})) == 1
@@ -369,32 +437,105 @@ def test_materialize_default_downloads_to_temp_and_cleans_up(tmp_path: Path) -> 
     assert not held.exists()  # cleaned up on exit
 
 
-def test_staged_write_local_renders_in_place(tmp_path: Path) -> None:
-    store = local_store(tmp_path)
-    with store.staged_write("files/a/page_images") as d:
-        # the staging dir IS the destination (zero copy)
-        assert d == tmp_path / "files" / "a" / "page_images"
+_PAGES = "files/a/page_images"
+
+# staged_write's contract has to hold identically on a zero-copy local store and
+# on one that stages through temp files, so each case below runs against both.
+_BOTH_STORES: list[Callable[[Path], LocalStore]] = [local_store, default_bridge_store]
+
+
+@pytest.mark.parametrize("make_store_", _BOTH_STORES)
+def test_staged_write_yields_an_empty_dir_and_persists_on_exit(
+    tmp_path: Path, make_store_: Callable[[Path], LocalStore]
+) -> None:
+    store = make_store_(tmp_path)
+    store.put_blob(f"{_PAGES}/page_1.png", b"old")
+    with store.staged_write(_PAGES) as d:
+        assert list(d.iterdir()) == []  # never the live destination
         (d / "page_1.png").write_bytes(b"img1")
         (d / "page_2.png").write_bytes(b"img2")
-    assert store.get_blob("files/a/page_images/page_1.png") == b"img1"
-    assert store.get_blob("files/a/page_images/page_2.png") == b"img2"
+    assert store.get_blob(f"{_PAGES}/page_1.png") == b"img1"
+    assert store.get_blob(f"{_PAGES}/page_2.png") == b"img2"
 
 
-def test_staged_write_default_uploads_on_exit(tmp_path: Path) -> None:
-    store = default_bridge_store(tmp_path)
-    with store.staged_write("files/a/page_images") as d:
-        assert d != tmp_path / "files" / "a" / "page_images"  # temp, not destination
+@pytest.mark.parametrize("make_store_", _BOTH_STORES)
+def test_staged_write_replaces_rather_than_adds(
+    tmp_path: Path, make_store_: Callable[[Path], LocalStore]
+) -> None:
+    """Re-render a document whose page count dropped: the extra pages must go.
+
+    A purely additive implementation leaves page_3..5 behind, and because
+    ``collect_file_version`` hashes ``list_blobs(page_images)`` those phantom
+    pages would enter the attestation — making the Merkle root depend on which
+    backend the workspace happens to live on."""
+    store = make_store_(tmp_path)
+    with store.staged_write(_PAGES) as d:
+        for n in range(1, 6):
+            (d / f"page_{n}.png").write_bytes(f"v1-{n}".encode())
+    assert len(store.list_blobs(_PAGES + "/")) == 5
+
+    with store.staged_write(_PAGES) as d:
+        for n in range(1, 3):
+            (d / f"page_{n}.png").write_bytes(f"v2-{n}".encode())
+
+    assert store.list_blobs(_PAGES + "/") == [f"{_PAGES}/page_1.png", f"{_PAGES}/page_2.png"]
+    assert store.get_blob(f"{_PAGES}/page_1.png") == b"v2-1"
+
+
+@pytest.mark.parametrize("make_store_", _BOTH_STORES)
+def test_staged_write_does_not_persist_on_error(
+    tmp_path: Path, make_store_: Callable[[Path], LocalStore]
+) -> None:
+    """A failed render leaves the previous content untouched — it must not
+    half-clobber the prefix it was about to replace."""
+    store = make_store_(tmp_path)
+    store.put_blob(f"{_PAGES}/page_1.png", b"old")
+    with pytest.raises(RuntimeError), store.staged_write(_PAGES) as d:
+        (d / "page_1.png").write_bytes(b"new")
+        (d / "page_2.png").write_bytes(b"new")
+        raise RuntimeError("render failed")
+    assert store.list_blobs(_PAGES + "/") == [f"{_PAGES}/page_1.png"]
+    assert store.get_blob(f"{_PAGES}/page_1.png") == b"old"
+
+
+@pytest.mark.parametrize("make_store_", _BOTH_STORES)
+def test_staged_write_preserves_documents_under_the_prefix(
+    tmp_path: Path, make_store_: Callable[[Path], LocalStore]
+) -> None:
+    """Replacement is scoped to blobs; a document sharing the prefix survives."""
+    store = make_store_(tmp_path)
+    store.put_doc("extraction_stats", "d1/f1", {"matched": 3})
+    with store.staged_write("docsets/d1/files/f1") as d:
+        (d / "report.dgml.xml").write_bytes(b"<x/>")
+    assert store.get_doc("extraction_stats", "d1/f1") == {"matched": 3}
+    assert store.get_blob("docsets/d1/files/f1/report.dgml.xml") == b"<x/>"
+
+
+def test_staged_write_parity_between_backends(tmp_path: Path) -> None:
+    """The same sequence of renders must leave both stores holding the same
+    keys — the property W10's cross-backend parity test will rely on."""
+
+    def run(store: LocalStore) -> list[str]:
+        with store.staged_write(_PAGES) as d:
+            for n in range(1, 4):
+                (d / f"page_{n}.png").write_bytes(b"v1")
+        with store.staged_write(_PAGES) as d:
+            (d / "page_1.png").write_bytes(b"v2")
+        return store.list_blobs(_PAGES + "/")
+
+    assert run(local_store(tmp_path / "local")) == run(default_bridge_store(tmp_path / "bridge"))
+
+
+def test_staged_write_scratch_is_not_visible_as_blobs(tmp_path: Path) -> None:
+    """LocalStore stages inside the workspace so the hand-off is a rename; that
+    scratch must stay out of the blob namespace (as must the embedding cache)."""
+    store = local_store(tmp_path)
+    with store.staged_write(_PAGES) as d:
         (d / "page_1.png").write_bytes(b"img1")
-    assert store.get_blob("files/a/page_images/page_1.png") == b"img1"
-
-
-def test_staged_write_does_not_persist_on_error(tmp_path: Path) -> None:
-    store = default_bridge_store(tmp_path)
-    with pytest.raises(RuntimeError):
-        with store.staged_write("files/a/page_images") as d:
-            (d / "page_1.png").write_bytes(b"img1")
-            raise RuntimeError("render failed")
-    assert store.blob_exists("files/a/page_images/page_1.png") is False
+        assert store.list_blobs("") == []  # mid-flight staging is invisible
+    (tmp_path / ".cache" / "embeddings").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".cache" / "embeddings" / "e.npy").write_bytes(b"x")
+    assert store.list_blobs("") == [f"{_PAGES}/page_1.png"]
 
 
 def test_materialize_dir_local_yields_real_dir_zero_copy(tmp_path: Path) -> None:
@@ -443,6 +584,24 @@ def test_working_dir_default_syncs_down_and_up(tmp_path: Path) -> None:
     assert not held.exists()  # temp cleaned up
     assert store.get_blob("docsets/d1/cache/new.json") == b"new"  # uploaded out
     assert not store.blob_exists("docsets/d1/schema.json")  # sibling not uploaded
+
+
+@pytest.mark.parametrize("make_store_", _BOTH_STORES)
+def test_working_dir_syncs_deletions_out(
+    tmp_path: Path, make_store_: Callable[[Path], LocalStore]
+) -> None:
+    """A read-modify-write area syncs *removals* too — an evicted cache entry
+    must not be resurrected on the next run by an upload-only sync."""
+    store = make_store_(tmp_path)
+    store.put_blob("docsets/d1/cache/keep.json", b"keep")
+    store.put_blob("docsets/d1/cache/evict.json", b"evict")
+    with store.working_dir("docsets/d1/cache") as work:
+        (work / "evict.json").unlink()
+        (work / "added.json").write_bytes(b"added")
+    assert store.list_blobs("docsets/d1/cache/") == [
+        "docsets/d1/cache/added.json",
+        "docsets/d1/cache/keep.json",
+    ]
 
 
 # --------------------------------------------------------------------------- sha256_blob
