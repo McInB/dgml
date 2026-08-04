@@ -14,28 +14,29 @@
 
 Hybrid mode (``--text-mode hybrid``) reconciles digital and OCR word
 streams per page. By default it uses a deterministic Levenshtein/region
-heuristic (see :mod:`dgml.hybrid`). When a workspace declares a
-``text_extraction`` section in ``config.toml``, the per-region merge
-decision is delegated to the configured LLM instead — letting it choose
-digital text, OCR text, or a combination (e.g. de-ligaturing, fixing a
-run-together word).
+heuristic (see :mod:`dgml.hybrid`). When the ``text_extraction`` section of
+``config.toml`` sets ``enabled = true``, the per-region merge decision is
+delegated to the configured LLM instead — letting it choose digital text, OCR
+text, or a combination (e.g. de-ligaturing, fixing a run-together word).
 
 This section *tunes the merge within hybrid mode*; it does **not** select
 the text mode. The ``--text-mode`` flag still chooses which extractor
-runs. When the section is absent, :func:`load_text_extraction_config`
-returns ``None`` and hybrid falls back to the heuristic — so existing
-workspaces are unchanged.
+runs.
 
-Config shape (all but ``model`` optional)::
+**``enabled = true`` is the switch** — the section's presence configures the
+feature but does not turn it on. Without it :func:`load_text_extraction_config`
+returns ``None`` and hybrid falls back to the heuristic. See
+:mod:`dgml_core.style_config` for the rationale (shipped-template safety, and
+the warning for a configured-but-disabled section); the two behave identically.
 
-    {
-      "text_extraction": {
-        "model": "ollama_chat/gemma4:latest",
-        "api_base": "http://localhost:11434",
-        "temperature": 0.0,
-        "max_tokens": 4000
-      }
-    }
+Config shape (``model`` falls back to the ``[models].standard`` tier)::
+
+    [text_extraction]
+    enabled = true
+    model = "ollama_chat/gemma4:latest"
+    api_base = "http://localhost:11434"
+    temperature = 0.0
+    max_tokens = 4000
 
 API key resolution mirrors :mod:`dgml.classification`: literal
 ``api_key`` > env-name lookup via ``api_key_env`` > litellm's per-provider
@@ -51,7 +52,7 @@ from typing import Any
 
 from .config import load_merged_config
 from .errors import AuthError, TextExtractionConfigInvalid
-from .models_config import ConfigSection, Tier, resolve_tiered_model
+from .models_config import ConfigSection, Tier, resolve_tiered_model, section_enabled
 from .storage import Workspace
 
 DEFAULT_TEMPERATURE = 0.0
@@ -80,21 +81,29 @@ class TextExtractionConfig:
 def load_text_extraction_config(workspace: Workspace) -> TextExtractionConfig | None:
     """Read and validate the ``text_extraction`` section of the merged config.
 
-    Returns ``None`` when no ``text_extraction`` section is present — hybrid mode
-    then uses its heuristic merge. When present, ``model`` may be omitted to fall
-    back to the ``[models].standard`` tier. Raises
-    :class:`TextExtractionConfigInvalid` when malformed.
+    Returns ``None`` unless the section sets ``enabled = true`` — hybrid mode then
+    uses its heuristic merge. The section's presence configures the feature, it
+    does not switch it on. When enabled, ``model`` may be omitted to fall back to
+    the ``[models].standard`` tier. Raises :class:`TextExtractionConfigInvalid`
+    when malformed.
     """
     merged = load_merged_config(workspace)
     section = merged.get(ConfigSection.TEXT_EXTRACTION)
     if section is None:
-        return None  # the section's presence is the on switch
+        return None
     if not isinstance(section, dict):
         raise TextExtractionConfigInvalid("'text_extraction' must be a table")
     sec: dict[str, Any] = section
 
-    # Section present but no model → invalid (the tier only supplies a model when
-    # the feature is on; it does not turn the feature on).
+    # Nothing below this line may run for a disabled section — see the matching
+    # comment in `style_config.load_style_config` for why.
+    if not section_enabled(
+        sec, section_name=ConfigSection.TEXT_EXTRACTION, invalid=TextExtractionConfigInvalid
+    ):
+        return None
+
+    # Enabled but no model → invalid (the tier only supplies a model for an
+    # enabled feature; it does not turn the feature on).
     rm = resolve_tiered_model(
         merged,
         section_name=ConfigSection.TEXT_EXTRACTION,

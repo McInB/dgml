@@ -107,14 +107,17 @@ def load_ocr_config(workspace: Workspace) -> OcrConfig:
     Validation of provider-specific fields is delegated to each provider
     class (:meth:`OcrProvider.parse_config`) so this loader stays generic.
 
-    When no ``ocr`` section is present in the merged config: on macOS, defaults
-    to the on-device provider (:data:`DEFAULT_OCR_PROVIDER`) and emits a
+    When the merged config has no ``ocr`` section — or an empty one: on macOS,
+    defaults to the on-device provider (:data:`DEFAULT_OCR_PROVIDER`) and emits a
     warning; on other platforms (no built-in OCR engine) raises
     :class:`OcrConfigMissing`. Raises :class:`OcrConfigInvalid` when a
     config exists but is malformed.
     """
     ocr = load_merged_config(workspace).get(ConfigSection.OCR)
-    if ocr is None:
+    if not ocr:
+        # Absent or empty. Unlike `style` / `text_extraction`, this section's mere
+        # presence carries no meaning — `provider` is what selects a backend — so
+        # a bare `[ocr]` is the same as none at all rather than a misconfiguration.
         return _default_ocr_config()
     if not isinstance(ocr, dict):
         raise OcrConfigInvalid("'ocr' must be a table")

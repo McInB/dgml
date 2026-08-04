@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from dgml_core.style import (
     build_style,
     fontname_is_bold,
@@ -319,25 +320,90 @@ def test_load_style_config_absent_returns_none(tmp_path: Path) -> None:
     assert load_style_config(_ws_with_config(tmp_path, {"ocr": {}})) is None
 
 
+def test_load_style_config_requires_enabled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`enabled = true` is the switch — a configured-but-unenabled section is off.
+
+    Also covers the pre-`enabled` migration shape (a section with a model and no
+    `enabled` key), which must warn rather than fail silently.
+    """
+    from dgml_core import models_config
+    from dgml_core.style_config import load_style_config
+
+    sections: tuple[dict[str, object], ...] = (
+        {},  # bare
+        {"enabled": False},  # the shipped default
+        {"enabled": False, "model": "m"},
+        {"model": "m"},  # pre-`enabled` config
+    )
+    for section in sections:
+        config = {"style": section}
+        models_config._WARNED_DISABLED.clear()
+        capsys.readouterr()
+        assert load_style_config(_ws_with_config(tmp_path, config)) is None
+        warned = "not enabled" in capsys.readouterr().err
+        # Only a section carrying real configuration is worth warning about;
+        # `enabled = false` alone is the shipped default and says nothing.
+        assert warned is (set(section) - {"enabled"} != set())
+
+
+def test_load_style_config_disabled_never_validates(tmp_path: Path) -> None:
+    """A disabled section is not read at all — not even for a resolvable model.
+
+    Load-bearing: the shipped config.toml carries `[style] enabled = false` with
+    no model, and the no-API-key template comments `[models]` out entirely, so
+    validating a disabled section would make the default config raise on load.
+    """
+    from dgml_core.style_config import load_style_config
+
+    assert load_style_config(_ws_with_config(tmp_path, {"style": {"enabled": False}})) is None
+
+
+def test_load_style_config_enabled_falls_back_to_light_tier(tmp_path: Path) -> None:
+    from dgml_core.style_config import load_style_config
+
+    cfg = load_style_config(
+        _ws_with_config(
+            tmp_path,
+            {"models": {"light": "gemini/gemini-2.5-flash-lite"}, "style": {"enabled": True}},
+        )
+    )
+    assert cfg is not None
+    assert cfg.model == "gemini/gemini-2.5-flash-lite"
+
+
+def test_load_style_config_rejects_non_bool_enabled(tmp_path: Path) -> None:
+    from dgml_core.errors import StyleConfigInvalid
+    from dgml_core.style_config import load_style_config
+
+    with pytest.raises(StyleConfigInvalid, match="enabled"):
+        load_style_config(_ws_with_config(tmp_path, {"style": {"enabled": "yes"}}))
+
+
 def test_load_style_config_valid(tmp_path: Path) -> None:
     from dgml_core.style_config import load_style_config
 
     cfg = load_style_config(
-        _ws_with_config(tmp_path, {"style": {"model": "anthropic/claude-haiku-4-5"}})
+        _ws_with_config(
+            tmp_path, {"style": {"enabled": True, "model": "anthropic/claude-haiku-4-5"}}
+        )
     )
     assert cfg is not None
     assert cfg.model == "anthropic/claude-haiku-4-5"
 
 
 def test_load_style_config_requires_model(tmp_path: Path) -> None:
-    """Presence of the section is the switch, so a section without a model is
-    a misconfiguration, not a silent no-op."""
+    """`enabled = true` with no model and no [models] tier is a misconfiguration,
+    not a silent no-op — the user asked for the feature and it can't resolve."""
     import pytest
     from dgml_core.errors import StyleConfigInvalid
     from dgml_core.style_config import load_style_config
 
     with pytest.raises(StyleConfigInvalid):
-        load_style_config(_ws_with_config(tmp_path, {"style": {"max_tokens": 100}}))
+        load_style_config(
+            _ws_with_config(tmp_path, {"style": {"enabled": True, "max_tokens": 100}})
+        )
 
 
 def test_load_style_config_rejects_dual_keys(tmp_path: Path) -> None:
@@ -349,7 +415,7 @@ def test_load_style_config_rejects_dual_keys(tmp_path: Path) -> None:
         load_style_config(
             _ws_with_config(
                 tmp_path,
-                {"style": {"model": "m", "api_key": "k", "api_key_env": "E"}},
+                {"style": {"enabled": True, "model": "m", "api_key": "k", "api_key_env": "E"}},
             )
         )
 
@@ -397,7 +463,7 @@ def test_ground_honors_style_config_for_ocr(tmp_path: Path, monkeypatch) -> None
     pages_dir.mkdir(parents=True, exist_ok=True)
     (pages_dir / "page_1.png").write_bytes(b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
-        dump_toml({"style": {"model": "anthropic/claude-haiku-4-5"}}),
+        dump_toml({"style": {"enabled": True, "model": "anthropic/claude-haiku-4-5"}}),
         encoding="utf-8",
     )
     monkeypatch.setattr(style_llm, "_request_styles", lambda c, i, s: {0: "font-weight: bold"})
@@ -465,7 +531,7 @@ def _seed_ocr_style_workspace(tmp_path: Path):  # type: ignore[no-untyped-def]
     pages_dir.mkdir(parents=True, exist_ok=True)
     (pages_dir / "page_1.png").write_bytes(b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
-        dump_toml({"style": {"model": "anthropic/claude-haiku-4-5"}}),
+        dump_toml({"style": {"enabled": True, "model": "anthropic/claude-haiku-4-5"}}),
         encoding="utf-8",
     )
     src = tmp_path / "doc.dgml.xml"
@@ -619,6 +685,7 @@ def test_style_credential_failure_preserves_grounding(tmp_path: Path, monkeypatc
         dump_toml(
             {
                 "style": {
+                    "enabled": True,
                     "model": "anthropic/claude-haiku-4-5",
                     "api_key_env": "DGML_STYLE_KEY_MISSING",
                 }

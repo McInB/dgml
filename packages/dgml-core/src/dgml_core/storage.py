@@ -296,6 +296,25 @@ _OCR_GUIDANCE = """\
 # api_key_env = "AZURE_DOCINTEL_KEY"
 """
 
+# Both features are off unless `enabled = true`. They ship as real (rather than
+# commented-out) sections so `dgml init` advertises that they exist and the user
+# only has to flip the flag — a section on its own switches nothing on.
+_FEATURE_GUIDANCE = """\
+# Image-based dg:style for `--text-mode ocr` files. OCR carries no font facts, so
+# dg:style is empty for scanned documents unless a vision model reads each page
+# image and reports the formatting it observes. Costs one vision call per page.
+# The model defaults to the [models].light tier; set `model` here to override.
+[style]
+enabled = false
+
+# LLM-assisted merging for `--text-mode hybrid`. Disabled, hybrid reconciles each
+# page's digital and OCR text with a deterministic Levenshtein heuristic; enabled,
+# a model adjudicates the clusters that heuristic finds ambiguous.
+# The model defaults to the [models].standard tier; set `model` here to override.
+[text_extraction]
+enabled = false
+"""
+
 
 def canonical_provider(provider: str) -> str:
     """Validate a ``--provider`` value against :data:`PROVIDER_MODELS` and
@@ -349,14 +368,14 @@ def render_config_toml(provider: str | None) -> str:
             '# standard = "..."\n'
             '# advanced = "..."\n'
             '# expert   = "..."\n'
-            "\n" + _OCR_GUIDANCE
+            "\n" + _OCR_GUIDANCE + "\n" + _FEATURE_GUIDANCE
         )
     tiers = PROVIDER_MODELS[provider]
     width = max(len(t) for t in tiers)
     lines = ["[models]"]
     for tier in ("light", "standard", "advanced", "expert"):
         lines.append(f'{tier.ljust(width)} = "{tiers[tier]}"')
-    return "\n".join(lines) + "\n\n" + _OCR_GUIDANCE
+    return "\n".join(lines) + "\n\n" + _OCR_GUIDANCE + "\n" + _FEATURE_GUIDANCE
 
 
 def write_user_config(provider: str | None, *, overwrite: bool) -> tuple[bool, Path | None]:

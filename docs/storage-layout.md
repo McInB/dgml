@@ -312,18 +312,22 @@ A malformed section fails the next `docset generate` with
 
 Switches the per-page merge used by `--text-mode hybrid` from its
 built-in heuristic to an LLM. Hybrid mode reconciles the digital and OCR
-word streams cluster by cluster; when this section is present, each
-to-decide cluster is handed to the configured model, which chooses
-digital text, OCR text, or a combination (e.g. de-ligaturing a word, or
-splitting a run-together token). When the section is **absent**, hybrid
-mode uses its deterministic Levenshtein heuristic — so this is purely
-opt-in and existing workspaces are unaffected.
+word streams cluster by cluster; with `enabled = true`, each to-decide
+cluster is handed to the configured model, which chooses digital text, OCR
+text, or a combination (e.g. de-ligaturing a word, or splitting a
+run-together token). Without it — whether the section is absent, empty, or
+sets `enabled = false` — hybrid mode uses its deterministic Levenshtein
+heuristic. `dgml init` writes the section with `enabled = false`.
+
+A section that is configured but not enabled logs a one-line warning to
+stderr rather than being ignored in silence.
 
 This section *tunes the merge within hybrid mode*; it does **not** select
 the text mode. The `--text-mode` flag still chooses which extractor runs.
 
 ```toml
 [text_extraction]
+enabled = true
 model = "ollama_chat/gemma4:latest"
 api_base = "http://localhost:11434"
 temperature = 0.0
@@ -331,6 +335,8 @@ temperature = 0.0
 
 Field rules:
 
+- `enabled` — optional bool, default `false`. The on switch; everything else in
+  the section is ignored while it is false.
 - `model` — optional; falls back to the `standard` tier. Provider-prefixed
   litellm model id. A local [Ollama](https://ollama.com/) model
   (`ollama/<name>`) keeps the merge on-device; any litellm-supported model works.
@@ -356,12 +362,15 @@ A malformed section fails the next hybrid extraction with error code
 Enables image-based `dg:style` for `--text-mode ocr`
 files. Digital and hybrid files derive `dg:style` deterministically from
 the PDF glyphs during grounding, but OCR carries no font information — so
-by default OCR files get no `dg:style`. **The section's presence is the
-switch:** when it is present, the grounding pass has the configured vision
-`model` read each page image and report the observed formatting per
-grounded snippet (filtered to the allow-list). When the section is
-**absent**, OCR files stay unstyled — purely opt-in, existing workspaces
-unaffected.
+by default OCR files get no `dg:style`. **`enabled = true` is the switch:**
+with it, the grounding pass has the configured vision `model` read each page
+image and report the observed formatting per grounded snippet (filtered to the
+allow-list). Without it — whether the section is absent, empty, or sets
+`enabled = false` — OCR files stay unstyled. `dgml init` writes the section
+with `enabled = false`, so the feature is advertised but never on by default.
+
+A section that is configured (a model, credentials) but not enabled logs a
+one-line warning to stderr rather than being ignored in silence.
 
 The setting is honored **only for files whose recorded `text_mode` is
 `ocr`**; it never overrides or competes with the deterministic
@@ -369,22 +378,27 @@ digital/hybrid path.
 
 ```toml
 [style]
+enabled = true
 model = "anthropic/claude-haiku-4-5"
 ```
 
 Field rules:
 
+- `enabled` — optional bool, default `false`. The on switch; everything else in
+  the section is ignored while it is false.
 - `model` — optional; falls back to the `light` tier. Provider-prefixed litellm
-  model id; must be vision-capable (it is shown page images). The section's
-  presence — not the model — is the on switch.
+  model id; must be vision-capable (it is shown page images). A model alone does
+  **not** enable the feature.
 - `api_base` — optional endpoint URL (e.g. for a local Ollama vision model).
 - `api_key` / `api_key_env` — optional literal key / env-var name,
   mutually exclusive; when both unset, litellm falls back to its
   provider-default env var.
 - `max_tokens` — optional positive int, default 4000.
 
-A malformed section (including a missing `model`) is validated up front by
-`docset generate` and fails fast with error code `STYLE_CONFIG_INVALID`.
+A malformed **enabled** section (including one whose `model` resolves to
+nothing) is validated up front by `docset generate` and fails fast with error
+code `STYLE_CONFIG_INVALID`. A disabled section is never validated, so shipping
+`enabled = false` alone is always safe.
 
 ### `clustering` (optional)
 

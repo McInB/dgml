@@ -156,6 +156,19 @@ def test_render_config_toml_is_valid_and_complete() -> None:
     assert "# [models]" in placeholder
 
 
+def test_render_config_toml_ships_opt_in_features_disabled() -> None:
+    """Both opt-in features are named (so `dgml init` advertises them) but off.
+
+    They ship as real sections rather than commented out so the user only flips
+    the flag; shipping them *enabled* would silently start charging for a vision
+    call per page.
+    """
+    for provider in [*PROVIDER_MODELS, None]:
+        data = tomllib.loads(render_config_toml(provider))
+        assert data["style"] == {"enabled": False}
+        assert data["text_extraction"] == {"enabled": False}
+
+
 def test_write_user_config_create_then_refresh_with_backup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

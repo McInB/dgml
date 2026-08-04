@@ -1324,7 +1324,7 @@ def test_docset_generate_rejects_malformed_style_config(
                 "model": "anthropic/claude-haiku-4-5",
                 "label_model": "anthropic/claude-sonnet-4-6",
             },
-            "style": {"max_tokens": 100},
+            "style": {"enabled": True, "max_tokens": 100},
         },
     )
 
@@ -1357,7 +1357,7 @@ def test_docset_generate_rejects_unset_style_api_key_env(
                 "model": "anthropic/claude-haiku-4-5",
                 "label_model": "anthropic/claude-sonnet-4-6",
             },
-            "style": {"model": "m", "api_key_env": "DGML_STYLE_KEY_MISSING"},
+            "style": {"enabled": True, "model": "m", "api_key_env": "DGML_STYLE_KEY_MISSING"},
         },
     )
 

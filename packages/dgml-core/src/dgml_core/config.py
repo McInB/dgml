@@ -33,10 +33,12 @@ with ``env_nested_delimiter="__"`` — so ``DGML_MODELS__ADVANCED=…`` sets
 declared field, so ``extra="ignore"`` drops them — they never reach the config.)
 
 This layer produces a plain ``dict``; validation, defaults, and the stable
-``*_CONFIG_INVALID`` error codes remain in the per-section dataclass loaders. A
-section left at its empty-table default is omitted from the returned mapping
-(``exclude_defaults``), so a loader keyed on a section's *presence* (``style`` /
-``text_extraction``) still sees "absent" when nothing configured it.
+``*_CONFIG_INVALID`` error codes remain in the per-section dataclass loaders.
+The returned mapping holds exactly the sections some layer actually *mentioned*
+(``exclude_unset``) — including one written with no keys, which arrives as an
+empty table. Only a section no layer names at all is omitted. Loaders must
+therefore treat ``{}`` and "absent" alike unless they mean to distinguish them
+(see :func:`dgml_core.ocr.load_ocr_config`, which does not).
 """
 
 from __future__ import annotations
@@ -118,10 +120,11 @@ def load_merged_config(
 
     Merges, in increasing precedence: built-in defaults → user
     ``~/.config/dgml/config.toml`` → workspace ``<workspace>/config.toml`` →
-    ``DGML_`` env vars → ``cli_overrides`` (highest). Sections left unset are
-    omitted from the result. Keys are :class:`~dgml_core.models_config.ConfigSection`
-    members (every declared field name is a section), so loaders index the result
-    with the enum rather than a bare string.
+    ``DGML_`` env vars → ``cli_overrides`` (highest). A section no layer mentions
+    is omitted; a section written with no keys is kept as an empty table. Keys are
+    :class:`~dgml_core.models_config.ConfigSection` members (every declared field
+    name is a section), so loaders index the result with the enum rather than a
+    bare string.
     """
     user_path = user_config_path()
     if not user_path.exists() and workspace.has_legacy_json_config():
@@ -140,6 +143,6 @@ def load_merged_config(
         # A section set to a non-table (e.g. `generation = "haiku"`) — a
         # malformed config, surfaced uniformly like a TOML parse error.
         raise CorruptMetadata(f"malformed config: {exc}") from exc
-    dump: dict[str, Any] = settings.model_dump(exclude_defaults=True)
+    dump: dict[str, Any] = settings.model_dump(exclude_unset=True)
     # Field names are exactly the section names, so every key is a ConfigSection.
     return {ConfigSection(section): value for section, value in dump.items()}
