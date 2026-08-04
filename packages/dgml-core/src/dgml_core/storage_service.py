@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from . import layout
 from .config import load_merged_config
 from .errors import StorageConfigInvalid, StorageProviderUnresolvable
 from .hashing import sha256_file
@@ -218,7 +219,7 @@ class StorageService(ABC):
             for path in sorted(staging.rglob("*")):
                 if path.is_file():
                     rel = path.relative_to(staging).as_posix()
-                    key = f"{prefix}/{rel}"
+                    key = layout.pair_id(prefix, rel)
                     self.upload_blob(key, path)
                     stale.discard(key)
             for key in sorted(stale):

@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import layout
 from .config import load_merged_config
 from .docsets import DocSetStore
 from .errors import (
@@ -668,7 +669,7 @@ def extract_values(
         # tree (full-extraction), or written as a standalone dg:chunk when no
         # tree exists yet (extraction).
         stem = Path(FileStore(workspace).get(file_id).original_filename).stem
-        xml_key = workspace.file_dgml_xml_key(docset_id, file_id, stem)
+        xml_key = layout.dgml_xml_key(docset_id, file_id, stem)
         existing = (
             workspace.store.get_blob(xml_key).decode("utf-8")
             if workspace.store.blob_exists(xml_key)
@@ -833,7 +834,9 @@ def _write_extraction_stats(
         # array (some models drop optional tool-call parameters).
         "phase1_layout": phase1_layout,
     }
-    workspace.store.put_doc("extraction_stats", f"{docset_id}/{file_id}", stats)
+    workspace.store.put_doc(
+        layout.Collection.EXTRACTION_STATS, layout.pair_id(docset_id, file_id), stats
+    )
 
 
 # ---- Phase 3: per-page LLM for unmatched items ----------------------------
@@ -931,7 +934,7 @@ def _phase3_call_for_page(
     """One litellm call: send the page + ids that need locating, return
     ``{id: [{page_number, bounding_box}, ...]}`` parsed from the model's
     ``submit_locations`` tool call."""
-    image_key = f"{workspace.file_pages_key(file_id)}/page_{page_number}.png"
+    image_key = layout.file_page_image_key(file_id, page_number)
     if not workspace.store.blob_exists(image_key):
         raise ValuesExtractionFailed(
             f"phase 3: no page image for file '{file_id}' page {page_number}"

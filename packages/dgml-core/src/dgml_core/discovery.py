@@ -39,6 +39,7 @@ from typing import Any
 from lxml import etree  # type: ignore[import-untyped]
 from lxml.etree import _Element  # type: ignore[import-untyped]
 
+from . import layout
 from .errors import DocSetNotFound, FileNotFound, InvalidArgument, NotFoundError
 from .models import FileRecord
 from .storage import Workspace
@@ -144,15 +145,15 @@ def load_subtree_root(ws: Workspace, file_id: str, docset_id: str) -> _Element:
         raise InvalidArgument("file id must not be empty")
     if not docset_id.strip():
         raise InvalidArgument("docset id must not be empty")
-    record_data = ws.store.get_doc("files", file_id)
+    record_data = ws.store.get_doc(layout.Collection.FILES, file_id)
     if record_data is None:
         raise FileNotFound(f"file '{file_id}' not found in workspace")
-    if ws.store.get_doc("docsets", docset_id) is None:
+    if ws.store.get_doc(layout.Collection.DOCSETS, docset_id) is None:
         raise DocSetNotFound(f"docset '{docset_id}' not found in workspace")
 
     record = FileRecord.from_json(record_data)
     stem = Path(record.original_filename).stem
-    xml_key = ws.file_dgml_xml_key(docset_id, file_id, stem)
+    xml_key = layout.dgml_xml_key(docset_id, file_id, stem)
     if not ws.store.blob_exists(xml_key):
         raise NotFoundError(
             f"no generated DGML XML for file '{file_id}' in docset '{docset_id}' "
@@ -160,11 +161,7 @@ def load_subtree_root(ws: Workspace, file_id: str, docset_id: str) -> _Element:
         )
 
     # Prefer the grounded variant (``<stem>.dgml.grounded.xml``) if present.
-    grounded_key = (
-        xml_key[: -len(".xml")] + ".grounded.xml"
-        if xml_key.endswith(".xml")
-        else xml_key + ".grounded.xml"
-    )
+    grounded_key = layout.dgml_grounded_xml_key(docset_id, file_id, stem)
     preferred = grounded_key if ws.store.blob_exists(grounded_key) else xml_key
 
     try:

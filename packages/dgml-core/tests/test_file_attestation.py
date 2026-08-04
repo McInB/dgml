@@ -34,7 +34,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from dgml_core import DEFAULT_STORAGE_PROVIDER, LocalStore, StorageConfig
+from dgml_core import DEFAULT_STORAGE_PROVIDER, LocalStore, StorageConfig, layout
 from dgml_core.errors import (
     AttestationInvalid,
     CorruptMetadata,
@@ -1302,7 +1302,7 @@ def test_shrinking_re_render_yields_the_same_root_on_both_backends(
     _seed_file(workspace, "f001", pages=5, pdf_name="contract.pdf")
 
     def re_render_to_two_pages() -> str:
-        prefix = workspace.blob_key(workspace.file_pages_dir("f001"))
+        prefix = layout.file_pages_prefix("f001")
         with workspace.store.staged_write(prefix) as pages_dir:
             for n in (1, 2):
                 (pages_dir / f"page_{n}.png").write_bytes(f"fake-png-page-{n}".encode())

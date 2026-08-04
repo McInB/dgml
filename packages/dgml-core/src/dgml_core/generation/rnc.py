@@ -42,6 +42,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from xml.etree import ElementTree as ET
 
+from .. import layout
+
 if TYPE_CHECKING:
     from dgml_core.storage import Workspace
 
@@ -298,19 +300,21 @@ def write_docset_rnc(ws: Workspace, docset_id: str) -> str | None:
     Returns the written blob key, or ``None`` when the docset has no schema.json
     yet (nothing to render). Called at the end of ``docset generate`` so the RNC
     always reflects the final grounded, linked XML. Routed through the store: the
-    generation ``schema.json`` and ``docset.json`` are read as documents, the
+    generation ``schema.json`` is read as a blob (exact bytes), ``docset.json``
+    as a document, the
     generated ``*.dgml.xml`` are materialized (``build_rnc`` needs real paths for
     lxml), and the rendered RNC is written back as a blob. This is the artifact
     DGMLX bundles ship and attest (superseding schema.json there).
     """
-    schema_data = ws.store.get_doc("schemas", docset_id)
-    if schema_data is None:
+    schema_key = layout.docset_generation_schema_key(docset_id)
+    if not ws.store.blob_exists(schema_key):
         return None
-    docset_data = ws.store.get_doc("docsets", docset_id)
+    schema_data = json.loads(ws.store.get_blob(schema_key))
+    docset_data = ws.store.get_doc(layout.Collection.DOCSETS, docset_id)
     label = str(docset_data.get("name", docset_id)) if docset_data else docset_id
-    with ws.store.materialize_dir(ws.docset_files_key(docset_id)) as files_dir:
+    with ws.store.materialize_dir(layout.docset_files_prefix(docset_id)) as files_dir:
         xml_paths = sorted(files_dir.glob("*/*.dgml.xml"))
         rendered = build_rnc(schema_data, xml_paths, label=label)
-    full_key = ws.docset_full_schema_key(docset_id)
+    full_key = layout.docset_full_schema_key(docset_id)
     ws.store.put_blob(full_key, rendered.encode("utf-8"))
     return full_key

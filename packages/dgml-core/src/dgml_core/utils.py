@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import io
 
+from . import layout
 from .docsets import DocSetStore
 from .files import FileStore
 from .storage import Workspace
@@ -33,7 +34,7 @@ def gather_file_pages(workspace: Workspace, file_id: str, max_pages: int) -> lis
     Callers decide what that means in their context (e.g. classification
     soft-fails; a future OCR helper may treat it as a precondition).
     """
-    prefix = workspace.file_pages_key(file_id)
+    prefix = layout.file_pages_prefix(file_id)
     keys = workspace.store.list_blobs(prefix)[:max_pages]
     return [workspace.store.get_blob(k) for k in keys]
 

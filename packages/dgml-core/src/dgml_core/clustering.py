@@ -49,6 +49,7 @@ from typing import Any, Literal, get_args
 
 from clustering.scenarios.base import UNKNOWN_NOISE_LABEL
 
+from . import layout
 from .classification import (
     ClassificationConfig,
     ClassificationDecision,
@@ -611,7 +612,7 @@ def clustering_internal(
     usable: list[str] = []
     skipped: list[str] = []
     for fid in file_ids:
-        if workspace.store.list_blobs(workspace.file_pages_key(fid)):
+        if workspace.store.list_blobs(layout.file_pages_prefix(fid)):
             usable.append(fid)
         else:
             skipped.append(fid)
@@ -684,7 +685,7 @@ def clustering_internal(
         for fid in docset_store.list_files(docset.id):
             if picked >= MAX_SUPPORT_SAMPLES_PER_DOCSET:
                 break
-            if workspace.store.list_blobs(workspace.file_pages_key(fid)):
+            if workspace.store.list_blobs(layout.file_pages_prefix(fid)):
                 support_file_ids.append(fid)
                 support_labels[fid] = docset.name
                 picked += 1

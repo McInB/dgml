@@ -99,6 +99,7 @@ from pathlib import Path
 
 from lxml import etree  # type: ignore[import-untyped]
 
+from . import layout
 from .errors import (
     AttestationInvalid,
     DocSetNotFound,
@@ -275,10 +276,10 @@ def collect_file_version(
     # (get_doc lets that CorruptMetadata propagate). Existence is defined by the
     # manifest, not a directory, so this works on any store.
     store = ws.store  # bound once: ws.store re-resolves the backend on every access
-    record_data = store.get_doc("files", file_id)
+    record_data = store.get_doc(layout.Collection.FILES, file_id)
     if record_data is None:
         raise FileNotFound(f"file '{file_id}' not found in workspace")
-    if docset_id is not None and store.get_doc("docsets", docset_id) is None:
+    if docset_id is not None and store.get_doc(layout.Collection.DOCSETS, docset_id) is None:
         raise DocSetNotFound(f"docset '{docset_id}' not found in workspace")
     record = FileRecord.from_json(record_data)
 
@@ -291,14 +292,14 @@ def collect_file_version(
 
     # Slot 1: the original source document (a .pdf, or the .docx/.xls/… that
     # was converted). Named "source" — the role, not the file format.
-    source_key = ws.file_source_key(file_id, record.original_filename)
+    source_key = layout.file_source_key(file_id, record.original_filename)
     if store.blob_exists(source_key):
         refs.append(_binary_ref("source", source_key, store.sha256_blob(source_key)))
 
     # Slot 2: page images, ordered by page number (not lexicographic —
     # 'page_10.png' sorts before 'page_2.png' alphabetically).
     for img_key in sorted(
-        store.list_blobs(ws.file_pages_key(file_id)),
+        store.list_blobs(layout.file_pages_prefix(file_id)),
         key=lambda k: _page_num(Path(k)),
     ):
         n = _page_num(Path(img_key))
@@ -314,7 +315,7 @@ def collect_file_version(
         # `docset generate`). Hashed as raw bytes, like the extraction schema.
         # schema.json is deliberately not a leaf — the RNC carries every one
         # of its fields as `# Field: value` comments.
-        full_schema_key = ws.docset_full_schema_key(docset_id)
+        full_schema_key = layout.docset_full_schema_key(docset_id)
         if store.blob_exists(full_schema_key):
             refs.append(
                 _binary_ref("full_schema", full_schema_key, store.sha256_blob(full_schema_key))
@@ -324,7 +325,7 @@ def collect_file_version(
         # RELAX NG Compact) that governs this file's `dg:extraction`. Hashed as
         # raw bytes — RNC is plain text, neither JSON nor XML. Present only once
         # `extraction set-schema` / `generate-schema` has run for the docset.
-        extraction_schema_key = ws.docset_schema_key(docset_id)
+        extraction_schema_key = layout.docset_extraction_schema_key(docset_id)
         if store.blob_exists(extraction_schema_key):
             refs.append(
                 _binary_ref(
@@ -335,7 +336,7 @@ def collect_file_version(
             )
 
         # Slot 5: DGML XML output for this file.
-        dgml_xml_key = ws.file_dgml_xml_key(docset_id, file_id, Path(record.original_filename).stem)
+        dgml_xml_key = layout.dgml_xml_key(docset_id, file_id, Path(record.original_filename).stem)
         # The one leaf that genuinely needs the bytes: an XML leaf hash is the
         # merkle_root of the parsed tree, not a digest of the file.
         if store.blob_exists(dgml_xml_key):
@@ -491,7 +492,7 @@ def export_attestation(
     store = ws.store  # bound once: ws.store re-resolves the backend on every access
     # attest_file already validated the file exists (via collect_file_version);
     # re-read its manifest through the store for the source stem.
-    record_data = store.get_doc("files", file_id)
+    record_data = store.get_doc(layout.Collection.FILES, file_id)
     if record_data is None:
         raise FileNotFound(f"file '{file_id}' not found in workspace")
     record = FileRecord.from_json(record_data)
@@ -537,7 +538,7 @@ def _write_opc_parts(staging: Path, rel_paths: dict[str, str]) -> list[str]:
     the attestation. Returns the bundle's part list (every part except the
     special ``[Content_Types].xml``), ready to be handed to :func:`zip_package`.
     """
-    attestation_rel = f"{METADATA_DIRNAME}/{METADATA_FILENAME}"
+    attestation_rel = layout.pair_id(METADATA_DIRNAME, METADATA_FILENAME)
     parts = [*rel_paths.values(), attestation_rel, PACKAGE_RELS_PATH]
 
     # Package relationships, in declaration order; rIds are assigned
@@ -638,7 +639,7 @@ def read_attestation(directory: Path) -> AttestationInventory:
     """
     q = _attestation_qname
     path = directory / METADATA_DIRNAME / METADATA_FILENAME
-    rel = f"{METADATA_DIRNAME}/{METADATA_FILENAME}"
+    rel = layout.pair_id(METADATA_DIRNAME, METADATA_FILENAME)
     if not path.exists():
         raise AttestationInvalid(f"no {rel} found in {directory}")
     try:

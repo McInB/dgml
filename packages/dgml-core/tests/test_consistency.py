@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from dgml_core import layout
 from dgml_core.consistency import _reextract, check_workspace
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
@@ -287,7 +288,7 @@ def test_reextract_hybrid_threads_debug(
 
     fid = "fid"
     workspace.store.put_blob(f"files/{fid}/doc.pdf", b"%PDF-1.4\n")
-    source_key = workspace.blob_key(workspace.file_dir(fid) / "doc.pdf")
+    source_key = layout.file_source_key(fid, "doc.pdf")
     _reextract(workspace, source_key, fid, "hybrid", verbose=False, debug=debug)
 
     assert captured["debug"] is debug

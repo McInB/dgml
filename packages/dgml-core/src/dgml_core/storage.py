@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from . import layout
+
 if TYPE_CHECKING:
     from .storage_service import StorageService
 
@@ -28,7 +30,7 @@ from .default_config import PROVIDER_MODELS
 
 ENV_VAR = "DGML_HOME"
 DEFAULT_DIR_NAME = "dgml-workspace"
-CONFIG_NAME = "config.toml"
+CONFIG_NAME = layout.CONFIG_FILE
 USER_CONFIG_DIR = "dgml"
 WORKSPACE_META_NAME = "workspace.json"
 
@@ -54,29 +56,40 @@ class Workspace:
             root = (Path.cwd() / DEFAULT_DIR_NAME).resolve()
         return cls(root=root)
 
+    def local_path(self, key: str) -> Path:
+        """The on-disk location a store key would occupy under this root.
+
+        The ``*_dir`` / ``*_path`` helpers below are all thin wrappers over this
+        plus a :mod:`dgml_core.layout` key builder, so a real filesystem path and
+        the key naming the same data cannot drift apart. Domain code addresses
+        data by **key** and does not need this; it exists for the few things that
+        genuinely require a path (reading the user's source file, test fixtures
+        that build a tree directly)."""
+        return self.root / key.rstrip("/")
+
     @property
     def docsets_dir(self) -> Path:
-        return self.root / "docsets"
+        return self.root / layout.DOCSETS_DIR
 
     @property
     def files_dir(self) -> Path:
-        return self.root / "files"
+        return self.root / layout.FILES_DIR
 
     @property
     def embedding_cache_dir(self) -> Path:
         """Where clustering encoders cache content-hashed embeddings so
         re-embedding unchanged files across runs is cheap. Per-workspace and
         safe to delete."""
-        return self.root / ".cache" / "embeddings"
+        return self.root / layout.CACHE_DIR / layout.EMBEDDINGS_DIR
 
     def docset_dir(self, docset_id: str) -> Path:
-        return self.docsets_dir / docset_id
+        return self.local_path(layout.docset_prefix(docset_id))
 
     def docset_files_dir(self, docset_id: str) -> Path:
-        return self.docset_dir(docset_id) / "files"
+        return self.local_path(layout.docset_files_prefix(docset_id))
 
     def docset_json_path(self, docset_id: str) -> Path:
-        return self.docset_dir(docset_id) / "docset.json"
+        return self.docset_dir(docset_id) / layout.DOCSET_MANIFEST
 
     def docset_schema_path(self, docset_id: str) -> Path:
         # The grounded *extraction* schema, stored in RELAX NG Compact (the
@@ -85,13 +98,13 @@ class Workspace:
         # the engine's grounded_field JSON Schema on read). Distinct from the
         # *generation tag* schema at docset_generation_schema_path — separate
         # names so the two never clobber.
-        return self.docset_dir(docset_id) / "extraction-schema.rnc"
+        return self.local_path(layout.docset_extraction_schema_key(docset_id))
 
     def docset_generation_schema_path(self, docset_id: str) -> Path:
         # The generation *tag* schema written by `docset generate`
         # (consumed by convert_batch — the machine exchange format that seeds
         # later runs via --schema-path).
-        return self.docset_dir(docset_id) / "schema.json"
+        return self.docset_dir(docset_id) / layout.GENERATION_SCHEMA_FILE
 
     def docset_full_schema_path(self, docset_id: str) -> Path:
         # schema.json rendered as RELAX NG Compact at the end of `docset
@@ -100,19 +113,19 @@ class Workspace:
         # survives as `# Field: value` comments, so this is the artifact that
         # ships in DGMLX bundles and is hashed into the file attestation
         # (slot "full_schema").
-        return self.docset_dir(docset_id) / "full-schema.rnc"
+        return self.local_path(layout.docset_full_schema_key(docset_id))
 
     def docset_file_dir(self, docset_id: str, file_id: str) -> Path:
-        """Per-(docset, file) directory. The marker dir for the assignment; the
+        """Per-(docset, file) directory. Holds the assignment document, the
         file's core ``<stem>.dgml.xml`` (generated tree and/or dg:extraction)
-        and its extraction_stats.json sidecar land here."""
-        return self.docset_files_dir(docset_id) / file_id
+        and its extraction_stats.json sidecar."""
+        return self.local_path(layout.docset_pair_prefix(docset_id, file_id))
 
     def docset_file_extraction_stats_path(self, docset_id: str, file_id: str) -> Path:
         """Per-extraction phase timings, costs, and match %, written on every
         successful extract_values run so the UX can render a Stats tab without
-        re-deriving anything from usage.jsonl. Lives in the file's marker dir."""
-        return self.docset_file_dir(docset_id, file_id) / "extraction_stats.json"
+        re-deriving anything from usage.jsonl. Lives in the pair directory."""
+        return self.docset_file_dir(docset_id, file_id) / layout.EXTRACTION_STATS_FILE
 
     def file_dgml_xml_path(self, docset_id: str, file_id: str, file_stem: str) -> Path:
         """Canonical location of the DGML XML output for one file in a
@@ -121,76 +134,83 @@ class Workspace:
 
         This is the deterministic, per-(docset, file) slot that ``dgml
         docset generate`` writes to and that file attestation reads as the
-        DGML artifact for the pair. It lives in the file's marker directory so
+        DGML artifact for the pair. It lives in the pair directory so
         placement never depends on the original filename being unique within
         the docset. Pass
         ``Path(original_filename).stem`` as ``file_stem``."""
-        return self.docset_file_dir(docset_id, file_id) / f"{file_stem}.dgml.xml"
+        return self.local_path(layout.dgml_xml_key(docset_id, file_id, file_stem))
 
     def file_dir(self, file_id: str) -> Path:
-        return self.files_dir / file_id
+        return self.local_path(layout.file_prefix(file_id))
 
     def file_json_path(self, file_id: str) -> Path:
-        return self.file_dir(file_id) / "file.json"
+        return self.file_dir(file_id) / layout.FILE_MANIFEST
+
+    def file_errors_path(self, file_id: str) -> Path:
+        return self.file_dir(file_id) / layout.ERRORS_FILE
 
     def file_pages_dir(self, file_id: str) -> Path:
-        return self.file_dir(file_id) / "page_images"
+        return self.local_path(layout.file_pages_prefix(file_id))
 
     def file_text_dir(self, file_id: str) -> Path:
-        return self.file_dir(file_id) / "page_text"
+        return self.local_path(layout.file_text_prefix(file_id))
 
     def blob_key(self, path: Path) -> str:
-        """The storage key for a workspace artifact ``path``.
+        """The store key naming ``path``, the inverse of :meth:`local_path`.
 
-        Blob keys are workspace-root-relative POSIX strings (``files/<id>/…``);
-        ``LocalStore`` maps a key back onto ``root/<key>``, while a remote store
-        treats it as an opaque object key. Derived from the ``Workspace`` path
-        methods so the on-disk layout stays single-sourced here — callers route
-        payload I/O through ``store`` by handing it ``blob_key(some_path)``."""
-        return path.relative_to(self.root).as_posix()
+        Pure path arithmetic (relative to this root, as POSIX) — it holds no
+        knowledge of the layout itself, so it stays correct as
+        :mod:`dgml_core.layout` evolves. For the filesystem-bound cases that
+        have a real path in hand and need the key for it."""
+        return path.resolve().relative_to(self.root).as_posix()
 
     # ---- Store keys for workspace artifacts ----
     #
     # A key is the workspace-root-relative POSIX string a blob lives at; callers
     # hand these straight to ``store`` (``list_blobs`` / ``get_blob`` / …). They
-    # are the store-native address. The parallel ``*_dir`` / ``*_path`` methods
-    # return the *same* location as a local ``Path`` (``root/<key>``), kept for
-    # the handful of filesystem-bound cases — the intentional local source read
-    # and test fixtures — and as the single source of the layout these delegate
-    # to.
+    # are the store-native address. Each one delegates to a
+    # :mod:`dgml_core.layout` builder — layout is the single source of the
+    # on-disk shape, and these are the convenience spelling of it. The parallel
+    # ``*_dir`` / ``*_path`` methods return the *same* location as a local
+    # ``Path`` (``root/<key>``), kept for the handful of filesystem-bound cases:
+    # the intentional local source read and test fixtures.
+    #
+    # ``*_key`` never carries a trailing slash; the ``layout.*_prefix`` builders
+    # do (it is load-bearing for prefix matching in ``list_blobs``), so the
+    # directory-shaped keys below strip it.
 
     def file_key(self, file_id: str) -> str:
-        return self.blob_key(self.file_dir(file_id))
+        return layout.file_prefix(file_id).rstrip("/")
 
     def file_source_key(self, file_id: str, filename: str) -> str:
-        return self.blob_key(self.file_dir(file_id) / filename)
+        return layout.file_source_key(file_id, filename)
 
     def file_pages_key(self, file_id: str) -> str:
-        return self.blob_key(self.file_pages_dir(file_id))
+        return layout.file_pages_prefix(file_id).rstrip("/")
 
     def file_text_key(self, file_id: str) -> str:
-        return self.blob_key(self.file_text_dir(file_id))
+        return layout.file_text_prefix(file_id).rstrip("/")
 
     def docset_key(self, docset_id: str) -> str:
-        return self.blob_key(self.docset_dir(docset_id))
+        return layout.docset_prefix(docset_id).rstrip("/")
 
     def docset_files_key(self, docset_id: str) -> str:
-        return self.blob_key(self.docset_files_dir(docset_id))
+        return layout.docset_files_prefix(docset_id).rstrip("/")
 
     def docset_file_key(self, docset_id: str, file_id: str) -> str:
-        return self.blob_key(self.docset_file_dir(docset_id, file_id))
+        return layout.docset_pair_prefix(docset_id, file_id).rstrip("/")
 
     def docset_schema_key(self, docset_id: str) -> str:
-        return self.blob_key(self.docset_schema_path(docset_id))
+        return layout.docset_extraction_schema_key(docset_id)
 
     def docset_generation_schema_key(self, docset_id: str) -> str:
-        return self.blob_key(self.docset_generation_schema_path(docset_id))
+        return layout.docset_generation_schema_key(docset_id)
 
     def docset_full_schema_key(self, docset_id: str) -> str:
-        return self.blob_key(self.docset_full_schema_path(docset_id))
+        return layout.docset_full_schema_key(docset_id)
 
     def file_dgml_xml_key(self, docset_id: str, file_id: str, file_stem: str) -> str:
-        return self.blob_key(self.file_dgml_xml_path(docset_id, file_id, file_stem))
+        return layout.dgml_xml_key(docset_id, file_id, file_stem)
 
     def read_page_text(self, file_id: str, page: int) -> dict[str, Any] | None:
         """The per-page word-box JSON for ``page`` of ``file_id`` (a blob),
@@ -200,7 +220,7 @@ class Workspace:
         malformed content raises :class:`~dgml_core.errors.CorruptMetadata`."""
         from .errors import CorruptMetadata
 
-        key = f"{self.file_text_key(file_id)}/page_{page}.json"
+        key = layout.file_page_text_key(file_id, page)
         try:
             data = self.store.get_blob(key)
         except FileNotFoundError:
@@ -215,11 +235,11 @@ class Workspace:
         """Optional per-workspace ``config.toml`` (resolution layer 3). Overrides
         keys from the user-level ``~/.config/dgml/config.toml``; absent in the
         common case where the user config suffices."""
-        return self.root / CONFIG_NAME
+        return self.root / layout.CONFIG_FILE
 
     @property
     def usage_log_path(self) -> Path:
-        return self.root / "usage.jsonl"
+        return self.root / layout.USAGE_FILE
 
     @property
     def meta_path(self) -> Path:
@@ -227,7 +247,7 @@ class Workspace:
         ``organization``. Written by ``dgml workspace create``. The
         organization is what docset namespace URIs embed
         (``http://dgml.io/<organization>/<DocSetSlug>``)."""
-        return self.root / WORKSPACE_META_NAME
+        return self.root / layout.WORKSPACE_FILE
 
     @property
     def store(self) -> StorageService:
@@ -251,21 +271,26 @@ class Workspace:
         last for the same reason it does in the file/docset cascades: it is the
         step that prunes the emptied container on ``LocalStore``.
         """
-        self.store.delete_doc("assignments", f"{docset_id}/{file_id}")
-        self.store.delete_doc("extraction_stats", f"{docset_id}/{file_id}")
-        self.store.delete_blobs(f"docsets/{docset_id}/files/{file_id}/")
+        pair = layout.pair_id(docset_id, file_id)
+        self.store.delete_doc(layout.Collection.ASSIGNMENTS, pair)
+        self.store.delete_doc(layout.Collection.EXTRACTION_STATS, pair)
+        self.store.delete_blobs(layout.docset_pair_prefix(docset_id, file_id))
 
     def read_meta(self) -> dict[str, Any]:
         """Return the parsed ``workspace.json`` mapping, or ``{}`` when the file
         is absent (workspaces created before ``workspace.json`` existed)."""
-        data = self.store.get_doc("workspace", "workspace")
+        data = self.store.get_doc(layout.Collection.WORKSPACE, layout.Collection.WORKSPACE)
         return data if isinstance(data, dict) else {}
 
     def write_meta(self, *, name: str, organization: str) -> None:
         """Persist the workspace identity (``name`` + ``organization``) to
         ``workspace.json``. The organization is embedded in docset namespace
         URIs. Backs ``dgml workspace create``."""
-        self.store.put_doc("workspace", "workspace", {"name": name, "organization": organization})
+        self.store.put_doc(
+            layout.Collection.WORKSPACE,
+            layout.Collection.WORKSPACE,
+            {"name": name, "organization": organization},
+        )
 
     @property
     def organization(self) -> str:

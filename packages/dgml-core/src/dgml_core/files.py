@@ -20,6 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from . import layout
 from .conversion import (
     convert_to_pdf_bytes,
     converter_name_for_path,
@@ -98,12 +99,15 @@ class FileStore:
     def list_all(self) -> list[FileRecord]:
         # find_docs enumerates files/*/file.json (sorted, skipping corrupt),
         # matching the historical directory scan.
-        return [FileRecord.from_json(data) for data in self.ws.store.find_docs("files", {})]
+        return [
+            FileRecord.from_json(data)
+            for data in self.ws.store.find_docs(layout.Collection.FILES, {})
+        ]
 
     def get(self, file_id: str) -> FileRecord:
         if not file_id.strip():
             raise InvalidArgument("file id must not be empty")
-        data = self.ws.store.get_doc("files", file_id)
+        data = self.ws.store.get_doc(layout.Collection.FILES, file_id)
         if data is None:
             raise FileNotFound(f"file '{file_id}' not found")
         return FileRecord.from_json(data)
@@ -264,7 +268,7 @@ class FileStore:
         # source is converted to a PDF here (persisted alongside it as
         # `<stem>.pdf` by _ensure_pdf) to drive page rendering / count / text
         # extraction; generation later reuses that same persisted PDF.
-        source_key = self.ws.file_source_key(file_id, source_path.name)
+        source_key = layout.file_source_key(file_id, source_path.name)
         self.ws.store.upload_blob(source_key, source_path)
 
         pdf_key, conversion_error, pdf_converter = self._ensure_pdf(source_key, file_id)
@@ -279,7 +283,7 @@ class FileStore:
                 text_mode=text_mode.value,
                 pdf_converter=pdf_converter,
             )
-            self.ws.store.put_doc("files", file_id, record.to_json())
+            self.ws.store.put_doc(layout.Collection.FILES, file_id, record.to_json())
             return AddFileResult(
                 record=record,
                 created=True,
@@ -315,7 +319,7 @@ class FileStore:
             page_image_renderer=RENDERER_NAME,
             pdf_converter=pdf_converter,
         )
-        self.ws.store.put_doc("files", file_id, record.to_json())
+        self.ws.store.put_doc(layout.Collection.FILES, file_id, record.to_json())
         return AddFileResult(
             record=record,
             created=True,
@@ -401,7 +405,7 @@ class FileStore:
         """Render pages, recording errors. Returns a human-readable error
         message on failure or partial success, or ``None`` on full success."""
         try:
-            pages_prefix = self.ws.file_pages_key(file_id)
+            pages_prefix = layout.file_pages_prefix(file_id)
             with self.ws.store.staged_write(pages_prefix) as pages_dir:
                 rendered = render_pages(pdf_path, pages_dir, dpi=dpi)
         except PageRenderFailed as exc:
@@ -473,7 +477,7 @@ class FileStore:
         page_count: int | None,
         dpi: int = DEFAULT_DPI,
     ) -> tuple[str | None, dict[str, Any] | None]:
-        text_prefix = self.ws.file_text_key(file_id)
+        text_prefix = layout.file_text_prefix(file_id)
         try:
             with self.ws.store.staged_write(text_prefix) as text_dir:
                 result = extract_text_digital(pdf_path, text_dir, file_id=file_id, dpi=dpi)
@@ -495,8 +499,8 @@ class FileStore:
             # config has to be fixed before retrying.
             return self._record_text_failure(file_id, str(exc), permanent=True), None
 
-        text_prefix = self.ws.file_text_key(file_id)
-        pages_prefix = self.ws.file_pages_key(file_id)
+        text_prefix = layout.file_text_prefix(file_id)
+        pages_prefix = layout.file_pages_prefix(file_id)
         try:
             with (
                 self.ws.store.materialize_dir(pages_prefix) as pages_dir,
@@ -533,8 +537,8 @@ class FileStore:
         except DgmlError as exc:
             return self._record_text_failure(file_id, str(exc), permanent=True), None
 
-        text_prefix = self.ws.file_text_key(file_id)
-        pages_prefix = self.ws.file_pages_key(file_id)
+        text_prefix = layout.file_text_prefix(file_id)
+        pages_prefix = layout.file_pages_prefix(file_id)
         try:
             with (
                 self.ws.store.materialize_dir(pages_prefix) as pages_dir,
@@ -593,13 +597,15 @@ class FileStore:
     def delete(self, file_id: str) -> None:
         if not file_id.strip():
             raise InvalidArgument("file id must not be empty")
-        if self.ws.store.get_doc("files", file_id) is None:
+        if self.ws.store.get_doc(layout.Collection.FILES, file_id) is None:
             raise FileNotFound(f"file '{file_id}' not found")
         # Unassign from every docset (removing each pair's marker + generated
         # outputs), then delete the file's own documents and blobs. delete_blobs
         # runs last so it prunes the now-empty file directory.
-        for assignment in self.ws.store.find_docs("assignments", {"file_id": file_id}):
+        for assignment in self.ws.store.find_docs(
+            layout.Collection.ASSIGNMENTS, {"file_id": file_id}
+        ):
             self.ws.unassign(assignment["docset_id"], file_id)
-        self.ws.store.delete_doc("files", file_id)
-        self.ws.store.delete_doc("errors", file_id)
+        self.ws.store.delete_doc(layout.Collection.FILES, file_id)
+        self.ws.store.delete_doc(layout.Collection.ERRORS, file_id)
         self.ws.store.delete_blobs(f"files/{file_id}/")

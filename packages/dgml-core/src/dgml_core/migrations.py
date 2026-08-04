@@ -88,20 +88,21 @@ def _migrate_assignments_to_documents(ws: Workspace) -> int:
     any other backend. Writes only the documents that are missing, and touches
     nothing else in the pair directory.
     """
-    from .storage_local import ASSIGNMENT_MANIFEST, LocalStore
+    from .layout import ASSIGNMENT_MANIFEST, DOCSET_FILES_DIR, Collection, pair_id
+    from .storage_local import LocalStore
 
     store = ws.store
     if not isinstance(store, LocalStore):
         return 0
 
     migrated = 0
-    for pair_dir in sorted(ws.docsets_dir.glob("*/files/*")):
+    for pair_dir in sorted(ws.docsets_dir.glob(f"*/{DOCSET_FILES_DIR}/*")):
         if not pair_dir.is_dir() or (pair_dir / ASSIGNMENT_MANIFEST).is_file():
             continue
         docset_id, file_id = pair_dir.parent.parent.name, pair_dir.name
         store.put_doc(
-            "assignments",
-            f"{docset_id}/{file_id}",
+            Collection.ASSIGNMENTS,
+            pair_id(docset_id, file_id),
             {"docset_id": docset_id, "file_id": file_id},
         )
         migrated += 1
@@ -129,9 +130,11 @@ def stamp_schema_version(ws: Workspace, version: int = WORKSPACE_SCHEMA_VERSION)
 
     Called for a freshly created workspace so it is never mistaken for an old
     one, and after each migration so a crash mid-sequence resumes correctly."""
+    from .layout import Collection
+
     meta = dict(ws.read_meta())
     meta[_VERSION_FIELD] = version
-    ws.store.put_doc("workspace", "workspace", meta)
+    ws.store.put_doc(Collection.WORKSPACE, Collection.WORKSPACE, meta)
 
 
 def pending_migrations(ws: Workspace) -> list[Migration]:
