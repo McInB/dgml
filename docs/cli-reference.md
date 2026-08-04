@@ -507,9 +507,9 @@ path derives `font-weight`, `font-style`, `font-size` (an `em` bucket relative t
 the page's modal body size: `0.75em | 1em | 1.25em | 1.5em | 2em`), `color` (any
 CSS named color), and `text-transform: uppercase` (all-caps text).
 `--text-mode ocr` carries no font facts, so `dg:style` is empty there unless the
-workspace opts into the image-based path by adding a `style`
-section to `config.toml` (its presence is the switch; it names a vision
-`model` — see [storage-layout.md](storage-layout.md)). That path assesses the
+workspace opts into the image-based path by setting `enabled = true` in the
+`style` section of `config.toml` (the section ships disabled; it optionally
+names a vision `model` — see [storage-layout.md](storage-layout.md)). That path assesses the
 same properties from the page image **plus `text-align`** (which needs the
 rendered layout to judge). It is honored only for OCR files and never competes
 with the deterministic digital/hybrid path. A malformed `style` section fails

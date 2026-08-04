@@ -80,6 +80,11 @@ TIERS: tuple[Tier, ...] = tuple(Tier)
 # extract) doesn't flood stderr with the same line. Keyed by (requested, used).
 _WARNED_TIER_FALLBACKS: set[tuple[Tier, Tier]] = set()
 
+# Same idea for "configured but not enabled" advisories (see `section_enabled`):
+# every loader re-reads the merged config, so without this the same line would be
+# written several times per command.
+_WARNED_DISABLED: set[ConfigSection] = set()
+
 
 @dataclass(frozen=True)
 class ModelsConfig:
@@ -142,6 +147,41 @@ def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
     return ModelsConfig(
         **{t.value: _validate_optional_str(section.get(t.value), t.value) for t in TIERS}
     )
+
+
+def section_enabled(
+    section: dict[str, Any],
+    *,
+    section_name: ConfigSection,
+    invalid: type[DgmlError],
+) -> bool:
+    """Whether an opt-in feature section carries ``enabled = true``.
+
+    The ``style`` and ``text_extraction`` sections are switches: they configure a
+    feature that is off unless explicitly turned on. ``enabled`` is that switch —
+    the section's mere *presence* means nothing, so the shipped ``config.toml``
+    can name both features (with comments explaining them) without enabling
+    either.
+
+    Warns — once per section per process — when a section is disabled but carries
+    real configuration beyond ``enabled`` itself. A section holding only
+    ``enabled = false`` is the shipped default and says nothing about intent; one
+    that also names a model or credentials was written by someone who expects it
+    to run. Configs predating the ``enabled`` switch look exactly like that, and
+    turning them off silently is the failure mode this switch exists to prevent.
+
+    Raises ``invalid`` when ``enabled`` is present but not a boolean.
+    """
+    enabled: object = section.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise invalid(f"'{section_name}.enabled' must be true or false")
+    if not enabled and set(section) - {"enabled"} and section_name not in _WARNED_DISABLED:
+        _WARNED_DISABLED.add(section_name)
+        sys.stderr.write(
+            f"[dgml] the [{section_name}] config section is configured but not enabled; "
+            f"it will be ignored. Set {section_name}.enabled = true to use it.\n"
+        )
+    return enabled
 
 
 @dataclass(frozen=True)

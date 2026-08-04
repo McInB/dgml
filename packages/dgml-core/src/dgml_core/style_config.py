@@ -15,26 +15,29 @@
 For ``--text-mode digital``/``hybrid`` files, ``dg:style`` is derived
 deterministically from the PDF glyphs during grounding (see
 :mod:`dgml.style` / :mod:`dgml.xml_grounding`). OCR files carry no font
-facts, so their ``dg:style`` is empty — unless a workspace opts in via a
-``style`` section in ``config.toml``, which lets a vision model read each
+facts, so their ``dg:style`` is empty — unless a workspace opts in via the
+``style`` section of ``config.toml``, which lets a vision model read each
 page image and report the observed formatting (see :mod:`dgml.style_llm`).
 
-This is off by default: **the section's presence is the
-switch.** When it is absent, :func:`load_style_config` returns ``None`` and
-grounding leaves OCR files unstyled — so existing workspaces are unchanged.
-When present it must name a vision ``model``. The setting is honored only
-for files whose recorded ``text_mode`` is ``ocr``; it never competes with
-the deterministic digital/hybrid path.
+This is off by default: **``enabled = true`` is the switch.** Without it
+:func:`load_style_config` returns ``None`` and grounding leaves OCR files
+unstyled. The section's *presence* configures the feature but does not turn it
+on — ``dgml init`` ships ``[style] enabled = false`` so the feature is
+discoverable without being enabled, and a disabled section is never validated
+(a template carrying no ``model`` must not raise). A section that is configured
+but not enabled warns, so a config predating this flag is not silently ignored.
 
-Config shape (``model`` is required when the section is present)::
+Honored only for files whose recorded ``text_mode`` is ``ocr``; it never
+competes with the deterministic digital/hybrid path.
 
-    {
-      "style": {
-        "model": "anthropic/claude-haiku-4-5",
-        "api_base": "http://localhost:11434",
-        "max_tokens": 4000
-      }
-    }
+Config shape (``model`` is optional — it falls back to the ``[models].light``
+tier — but the feature only runs when ``enabled``)::
+
+    [style]
+    enabled = true
+    model = "anthropic/claude-haiku-4-5"
+    api_base = "http://localhost:11434"
+    max_tokens = 4000
 
 API key resolution mirrors :mod:`dgml.text_extraction_config`: literal
 ``api_key`` > env-name lookup via ``api_key_env`` > litellm's per-provider
@@ -49,7 +52,7 @@ from typing import Any
 
 from .config import load_merged_config
 from .errors import AuthError, StyleConfigInvalid
-from .models_config import ConfigSection, Tier, resolve_tiered_model
+from .models_config import ConfigSection, Tier, resolve_tiered_model, section_enabled
 from .storage import Workspace
 
 DEFAULT_MAX_TOKENS = 4000
@@ -75,20 +78,28 @@ class StyleConfig:
 def load_style_config(workspace: Workspace) -> StyleConfig | None:
     """Read and validate the ``style`` section of the merged config.
 
-    Returns ``None`` when no ``style`` section is present (the section's presence
-    is the on switch). When present, ``model`` may be omitted to fall back to the
-    ``[models].light`` tier. Raises :class:`StyleConfigInvalid` when malformed.
+    Returns ``None`` unless the section sets ``enabled = true`` — the section's
+    presence configures the feature, it does not switch it on. When enabled,
+    ``model`` may be omitted to fall back to the ``[models].light`` tier. Raises
+    :class:`StyleConfigInvalid` when malformed.
     """
     merged = load_merged_config(workspace)
     section = merged.get(ConfigSection.STYLE)
     if section is None:
-        return None  # the section's presence is the on switch
+        return None
     if not isinstance(section, dict):
         raise StyleConfigInvalid("'style' must be a table")
     sec: dict[str, Any] = section
 
-    # Section present but no model → StyleConfigInvalid (the tier only supplies a
-    # model when the feature is on; it does not turn the feature on).
+    # Nothing below this line may run for a disabled section: the shipped
+    # config.toml carries `[style] enabled = false` with no model, and the
+    # no-API-key template comments `[models]` out entirely — so validating a
+    # disabled section would make the default config raise on every load.
+    if not section_enabled(sec, section_name=ConfigSection.STYLE, invalid=StyleConfigInvalid):
+        return None
+
+    # Enabled but no model → StyleConfigInvalid (the tier only supplies a model
+    # for an enabled feature; it does not turn the feature on).
     rm = resolve_tiered_model(
         merged,
         section_name=ConfigSection.STYLE,
