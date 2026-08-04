@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from clustering.data.datasets import DocumentDataset, DocumentRecord
-from clustering.scenarios.base import ScenarioResult
+from clustering.scenarios.base import CLUSTER_NOISE_LABEL, UNKNOWN_NOISE_LABEL, ScenarioResult
 from dgml_core.errors import ClusteringConfigInvalid
 from dgml_core.run_clustering import run_clustering
 from PIL import Image
@@ -124,6 +124,23 @@ def test_run_clustering_no_known_categories_picks_s1_and_rewrites_labels() -> No
 
     assert out == {"a": "unknown_0", "b": "unknown_1", "c": "unknown_0"}
     mock_s1.assert_called_once()
+
+
+def test_run_clustering_maps_s1_noise_onto_the_shared_noise_label() -> None:
+    """S1's noise bucket must land on the same name S2 uses, so one
+    comparison identifies "placed in no cluster" whichever scenario ran.
+
+    Today the generic ``cluster_`` → ``unknown_`` prefix rewrite happens to
+    produce this too, so this pins intent rather than catching a live bug:
+    it fails the day either constant is renamed out from under the other.
+    """
+    dataset = _FakeDataset(["a", "b"])
+    fake = _result(["a", "b"], [CLUSTER_NOISE_LABEL, "cluster_0"])
+
+    with patch("dgml_core.run_clustering.S1Unsupervised.fit_predict", return_value=fake):
+        out = run_clustering(dataset, known_categories=[])
+
+    assert out == {"a": UNKNOWN_NOISE_LABEL, "b": "unknown_0"}
 
 
 def test_all_known_zero_samples_picks_s4() -> None:
