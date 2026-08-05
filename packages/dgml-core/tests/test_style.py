@@ -946,7 +946,8 @@ def test_ground_records_one_style_usage_row_per_page(tmp_path: Path, monkeypatch
         )
         (pages_dir / f"page_{page}.png").write_bytes(b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
-        dump_toml({"style": {"model": "anthropic/claude-haiku-4-5"}}), encoding="utf-8"
+        dump_toml({"style": {"enabled": True, "model": "anthropic/claude-haiku-4-5"}}),
+        encoding="utf-8",
     )
 
     headings = "".join(f"<Heading>TITLE{p}</Heading>" for p in range(1, n_pages + 1))
