@@ -25,21 +25,20 @@ The root is determined in this order:
 
 `dgml workspace create --organization <org>` (or `Workspace.init()` in code)
 creates the directory layout for a fresh workspace and records its identity in
-`workspace.json`. It seeds the shared `local_config.json` from the bundled
-template when absent, so `dgml init` first is **optional** — run `init`
-separately only when you want to review/edit the shared config before creating
-any workspace (the "configure once, create many" flow). The CLI refuses to
-operate on an uninitialized workspace except for `init` and `workspace create`.
-See
-[the three-layer config model](#where-config-comes-from--the-three-layer-model)
-for how config flows from the bundled template into each workspace.
+`workspace.json`. Config is owned by `dgml init` (the "configure once per
+machine" flow) — `workspace create` does not create or touch it. If the
+user-level config is absent, the workspace is still created and a warning is
+printed telling you to run `dgml init`. The CLI refuses to operate on an
+uninitialized workspace except for `init` and `workspace create`. See
+[the resolution order](#where-config-comes-from--the-resolution-order) for how
+config merges across layers.
 
 ## Directory structure
 
 ```
 <workspace_root>/
 ├── workspace.json                    # { name, organization } — written by `workspace create`
-├── config.json                       # OCR / LLM / clustering settings (optional)
+├── config.toml                       # OCR / LLM / clustering settings (optional)
 ├── usage.jsonl                       # LLM call event log (optional)
 ├── docsets/
 │   └── <docset_id>/                  # 12-char base-36 ID
@@ -59,7 +58,8 @@ for how config flows from the bundled template into each workspace.
         │                             #   not already a PDF; what pages/text and
         │                             #   generation use (see docs/conversion.md)
         ├── file.json                 # metadata (see schema below)
-        ├── page_images/              # 300 dpi PNG page renders (cacheable; see below)
+        ├── page_images/              # PNG page renders at page_image_dpi
+        │                             #   (300 by default; cacheable, see below)
         │   ├── page_1.png
         │   └── page_2.png
         ├── page_text/                # one JSON of word boxes per page
@@ -74,10 +74,10 @@ with `secrets.choice` ([packages/dgml/src/dgml/ids.py](../packages/dgml/src/dgml
 ## Page-image render cache (`$DGML_PAGE_CACHE`, optional)
 
 Rendering `page_images/` shells out to ghostscript, which dominates the cost
-of `dgml file add`. The render is a pure function of the PDF bytes (plus the
-fixed 300 dpi and renderer), so when the **`DGML_PAGE_CACHE`** environment
-variable names a directory, the renderer keys each render by a content hash
-and reuses it:
+of `dgml file add`. The render is a pure function of the PDF bytes, the
+renderer, and the dpi, so when the **`DGML_PAGE_CACHE`** environment variable
+names a directory, the renderer keys each render by a hash of all three and
+reuses it:
 
 - **Hit** — an identical PDF rendered before is copied from the cache and
   ghostscript is not invoked (it need not even be installed).
@@ -117,114 +117,123 @@ The workspace identity, written by `dgml workspace create`:
 - `name` — human-readable label (`--name`, optional; defaults to the workspace
   directory name). Surfaced by `dgml status`; not used in URIs.
 
-## `config.json` (optional)
+## Configuration (`config.toml`)
 
-Workspace-level settings. Required when `--text-mode ocr` is used or
-when LLM-backed schema generation / value extraction is enabled (see
-the `grounded` section below).
+LLM / OCR / clustering settings, in **TOML**. Required when `--text-mode ocr`
+is used or when LLM-backed generation / schema / value extraction runs.
 
-### Where config comes from — the three-layer model
+### Where config comes from — the resolution order
 
-You configure **once** and reuse across **every** workspace. Config flows
-through three layers:
+Configuration is a **deep merge** across five layers, each overriding the keys
+of those above it (a layer overrides only what it sets and inherits the rest):
 
-```text
-source default_config.json   (shipped in the dgml-core wheel; the baseline template)
-        │  seeded by `dgml init` (or `dgml init --refresh` to re-pull)
-        ▼
-<workspace-parent>/local_config.json   (your ONE shared config, a peer of the
-        │  copied by `dgml workspace create`   workspace; reused by every sibling)
-        ▼
-<workspace>/config.json      (per-workspace; what the loaders actually read)
-```
+| # | Layer | Location |
+|---|---|---|
+| 1 | Built-in defaults | shipped in the wheel (dataclass defaults: `max_pages`, `temperature`, …) |
+| 2 | **User config** | `$XDG_CONFIG_HOME/dgml/config.toml` if set, else `%APPDATA%\dgml\config.toml` on Windows, else `~/.config/dgml/config.toml` — written by `dgml init` |
+| 3 | Workspace config | `<workspace>/config.toml` (optional per-workspace overrides) |
+| 4 | Environment variables | `DGML_`-prefixed, `__` for nesting |
+| 5 | CLI flags | per invocation (e.g. `--schema-model`) |
 
-- `dgml init` copies the bundled template to `local_config.json` — a **peer of
-  the workspace root** (`workspace.root.parent / "local_config.json"`; with the
-  default `./dgml-workspace` this is `./local_config.json`). Edit it once.
-- `dgml workspace create` copies `local_config.json` verbatim to
-  `<workspace>/config.json`. Every sibling workspace inherits the same shared
-  config.
-- Only `<workspace>/config.json` is read at runtime. Editing the shared
-  `local_config.json` afterwards does not touch existing workspaces until you
-  re-run `dgml workspace create --force` (which re-syncs it).
+`dgml init` writes the **user config** (layer 2) — configure once per machine;
+every workspace inherits it. A per-workspace `config.toml` (layer 3) is optional
+and created by hand only for workspace-specific overrides; `dgml workspace
+create` does **not** write one.
 
-The template prefills the **model** fields (`classification.model`,
-`generation.model`/`label_model`, `grounded.schema_model`/`values_model`) and
-the **OCR provider + endpoint** — the decisions that cost money or need an
-account. The free knobs (`max_pages`, `max_tool_iters`, `temperature`,
-`max_tokens`) are **not** in the file; they keep their code defaults (documented
-per section below). There are **no in-code model defaults**: a loader raises its
-`*_CONFIG_MISSING` code when a model is unconfigured, so DGML never makes a paid
+**Env-var overrides (layer 4).** Prefix `DGML_`, split path segments on `__`,
+lowercased — e.g. `DGML_MODELS__ADVANCED=gemini/gemini-2.5-pro`,
+`DGML_GENERATION__LABEL_MODEL=…`, `DGML_OCR__ENDPOINT=…`. This overrides config
+**settings**; it is distinct from provider **secret** vars (`ANTHROPIC_API_KEY`,
+`GEMINI_API_KEY`, …), which litellm and the `*_api_key_env` indirection use to
+supply the actual key. `DGML_HOME` (workspace root) and `DGML_DEBUG` are reserved
+and never treated as config.
+
+There are **no in-code model defaults**: a loader raises its `*_CONFIG_MISSING`
+code when a model can't be resolved from any layer, so DGML never makes a paid
 LLM call you didn't set up.
 
-The optional `text_extraction` section is **not** in the template, so
-`--text-mode hybrid` uses its built-in (free) heuristic by default. Add the
-section yourself to route the hybrid merge through an LLM instead (see below).
+### The `[models]` tiers
 
-`local_config.json` lands in a working directory next to the workspace, so it
-is **git-ignored** (this repo already ignores it) — treat it like a local
-secret/config file, not source.
+The simplest way to configure models is the `[models]` block — four tiers that
+back the per-task models:
 
-**Comments.** `config.json` and `local_config.json` may carry **full-line**
-`//` comments (a line whose first non-whitespace characters are `//`). They are
-stripped before parsing; `//` inside a string value (e.g. an `https://`
-endpoint) is never touched. Machine-written manifests (`file.json`,
-`docset.json`, …) are strict JSON — comments are a config-only affordance.
+```toml
+[models]
+light    = "gemini/gemini-flash-lite-latest"  # classification, style
+standard = "anthropic/claude-haiku-4-5"    # transcription, text extraction
+advanced = "anthropic/claude-sonnet-4-6"   # labeling, value extraction
+expert   = "anthropic/claude-opus-4-8"     # schema generation
+```
 
-**Secrets policy.** A workspace is per-developer / per-deployment — not
-checked into source control and not necessarily shared. By default the
-config file references API keys via `*_api_key_env` env-var-name fields
-(which never store the secret itself, just the env var to look it up
-in). But every section that accepts `*_api_key_env` also accepts a
-literal `*_api_key` field; a developer who keeps their workspace local
-can drop the key value directly into config.json if they prefer. The
-two are mutually exclusive per side, and the literal wins when both are
-present. When neither is set, downstream tooling falls back to its
-default credential chain (Entra ID for Azure, the standard
-`ANTHROPIC_API_KEY` / `GEMINI_API_KEY` env vars for litellm, etc.).
+(The tier→task mapping lives in code and may change; it is not written into the
+file.) Each per-task field below is an **override** that wins over its tier; when
+a task names no model of its own it falls back to its tier. A tier that is unset
+falls back to the nearest set tier (nearest lower first, then higher) with a
+warning — so a minimal config that sets only, say, `standard` still resolves
+every task.
+
+Tiers name only models — they carry no credentials. Credentials are configured
+per task on the task's own section (e.g. `generation.api_key_env`,
+`grounded.schema_api_key`); a model sourced from a tier uses its task section's
+credentials, or falls back to litellm's per-provider env var when the section
+sets none.
+
+`dgml init --provider {anthropic,google,mixed}` writes a ready-made
+`[models]` table; omit `--provider` to auto-detect from the API-key env vars
+that are set (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`).
+
+**Secrets policy.** By default config references API keys via `*_api_key_env`
+env-var-name fields (which store the env var name, not the secret). Every
+section that accepts `*_api_key_env` also accepts a literal `*_api_key`; the two
+are mutually exclusive per side and the literal wins. When neither is set,
+downstream tooling falls back to its default credential chain (Entra ID for
+Azure, the conventional `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` env vars for
+litellm, etc.).
+
+**Migration.** The config format was JSON (`config.json`) before this release.
+A workspace whose only config is a legacy `config.json` raises
+`LEGACY_CONFIG_PRESENT`; run `dgml init` to write the TOML user config and copy
+any settings across.
 
 ### `classification` (optional, required for `dgml file add --auto-classify`)
 
-```json
-{
-  "classification": {
-    "model": "gemini/gemini-3.1-flash-lite"
-  }
-}
+The model defaults to the `[models].light` tier; add this section only to
+override it or set classification-specific credentials.
+
+```toml
+[classification]
+model = "gemini/gemini-flash-lite-latest"
 ```
 
 Field rules:
 
-- `model` — required. Vision-capable, provider-prefixed litellm model id used to
-  route a file to a DocSet. A small, low-latency model is sufficient.
+- `model` — optional; falls back to the `light` tier. Vision-capable,
+  provider-prefixed litellm model id used to route a file to a DocSet.
 - `max_pages` — optional positive int, default `3`. First-N pages shown to the
   classifier.
-- `api_key` / `api_key_env` — optional literal key / env-var name, mutually
-  exclusive. When neither is set, litellm falls back to its provider-default env
-  var (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …).
+- `api_key` / `api_key_env` / `api_base` — optional; mutually-exclusive key /
+  env-var name, plus an optional endpoint. Apply whether the model is set here or
+  comes from the `light` tier; when unset, litellm uses its per-provider env var.
 
 ### `ocr` (optional, required for `--text-mode ocr`)
 
-```json
-{
-  "ocr": {
-    "provider": "azure",
-    "endpoint": "https://example.cognitiveservices.azure.com/",
-    "api_key_env": "AZURE_DOCINTEL_KEY"
-  }
-}
+Not a model tier — an OCR backend. On macOS an absent `[ocr]` section defaults
+to the on-device Apple Vision engine.
+
+```toml
+[ocr]
+provider = "azure"
+endpoint = "https://example.cognitiveservices.azure.com/"
+api_key_env = "AZURE_DOCINTEL_KEY"
 ```
 
 For AWS:
 
-```json
-{
-  "ocr": {
-    "provider": "aws",
-    "region": "us-east-1",
-    "profile": "default"
-  }
-}
+```toml
+[ocr]
+provider = "aws"
+region = "us-east-1"
+profile = "default"
 ```
 
 Field rules:
@@ -242,63 +251,59 @@ Field rules:
 
 ### `grounded` (optional, required for `dgml docset schema generate` / `dgml file extract`)
 
-```json
-{
-  "grounded": {
-    "schema_model": "anthropic/claude-opus-4-7",
-    "values_model": "gemini/gemini-2.5-pro",
-    "schema_api_key_env": "ANTHROPIC_API_KEY",
-    "values_api_key_env": "GEMINI_API_KEY"
-  }
-}
+The two models default to tiers — `schema_model` ← `expert`, `values_model` ←
+`advanced`. Add this section only to override a model or set per-side
+credentials.
+
+```toml
+[grounded]
+schema_model = "anthropic/claude-opus-4-8"
+values_model = "gemini/gemini-2.5-pro"
+schema_api_key_env = "ANTHROPIC_API_KEY"
+values_api_key_env = "GEMINI_API_KEY"
 ```
 
 Field rules:
 
-- `schema_model` — required. Provider-prefixed litellm model id used by
+- `schema_model` — optional; falls back to the `expert` tier. Used by
   `dgml docset schema generate`.
-- `values_model` — required. Provider-prefixed litellm model id used by
+- `values_model` — optional; falls back to the `advanced` tier. Used by
   `dgml file extract` and the auto-extract hook on `docset add-file`.
-- `schema_api_key` / `values_api_key` — optional literal keys for the
-  respective sides. Mutually exclusive with the matching `*_env` field.
-- `schema_api_key_env` / `values_api_key_env` — optional env var names
-  for the respective sides. When neither the literal nor the env-name
-  field is set on a side, litellm falls back to its provider-default
-  env var (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, etc.).
+- `schema_api_key` / `values_api_key` — optional literal keys per side,
+  mutually exclusive with the matching `*_env` field.
+- `schema_api_key_env` / `values_api_key_env` — optional env var names per side.
+- `schema_api_base` / `values_api_base` — optional endpoint per side.
+  These per-side credentials apply whether the model is set here or comes from
+  its tier; when unset, litellm uses its per-provider env var.
 - `max_tool_iters` — optional positive int, default 20. Cap on
   `get_page_words` tool calls per extraction.
 
 ### `generation` (required for `dgml docset generate`)
 
-Names the two LLMs the PDF→DGML pipeline runs. There is **no code default** and
-no CLI flag — like the other model-consuming commands, `generate` reads its
-models solely from this section, so which model runs is one visible choice per
-workspace. Both `model` and `label_model` are **required**.
-Without this section, generation fails with `GENERATION_CONFIG_MISSING`.
+The two LLMs the PDF→DGML pipeline runs. Each defaults to a tier —
+`model` (per-page **transcription**) ← `standard`, `label_model` (the batch-wide
+**semantic labeling** call) ← `advanced` — so this section is optional. There is
+no CLI flag; the models are a visible config choice. If neither a field nor its
+tier resolves a model, generation fails with `GENERATION_CONFIG_MISSING`.
 
-```json
-{
-  "generation": {
-    "model": "anthropic/claude-haiku-4-5",
-    "label_model": "anthropic/claude-sonnet-4-6",
-    "api_key_env": "ANTHROPIC_API_KEY"
-  }
-}
+```toml
+[generation]
+# Overrides (optional — the tiers cover both by default):
+label_model = "anthropic/claude-opus-4-8"
 ```
 
 Field rules:
 
-- `model` — required. Provider-prefixed litellm model id for
-  the per-page **transcription** (the bulk of the calls).
-- `label_model` — required. Model for the single batch-wide **semantic
-  labeling** call, named explicitly so a stronger labeling model is a
-  deliberate choice. (This is also the model used by the final semantic-link
-  pass and by `dgml discover`'s semantic filters.)
-- `api_key` / `api_key_env` — optional literal key / env-var name, mutually
-  exclusive. When neither is set, litellm falls back to its provider-default
-  env var (`ANTHROPIC_API_KEY`, etc.).
-- `api_base` — optional endpoint URL (e.g. for a self-hosted/proxy
-  provider); omit for hosted providers.
+- `model` — optional; falls back to the `standard` tier. Per-page transcription.
+- `label_model` — optional; falls back to the `advanced` tier. The single
+  batch-wide semantic-labeling call (also used by the final semantic-link pass
+  and `dgml discover`'s semantic filters).
+- Transcription credentials: `api_key` / `api_key_env` / `api_base`.
+- Labeling credentials: `label_api_key` / `label_api_key_env` /
+  `label_api_base`. The two models carry **independent** credentials because
+  they may name different providers (e.g. the default `mixed` config transcribes
+  on Anthropic and labels on Gemini). These apply whether the models are set here
+  or come from their tiers; when unset, litellm uses its per-provider env var.
 
 A malformed section fails the next `docset generate` with
 `GENERATION_CONFIG_INVALID`.
@@ -307,31 +312,34 @@ A malformed section fails the next `docset generate` with
 
 Switches the per-page merge used by `--text-mode hybrid` from its
 built-in heuristic to an LLM. Hybrid mode reconciles the digital and OCR
-word streams cluster by cluster; when this section is present, each
-to-decide cluster is handed to the configured model, which chooses
-digital text, OCR text, or a combination (e.g. de-ligaturing a word, or
-splitting a run-together token). When the section is **absent**, hybrid
-mode uses its deterministic Levenshtein heuristic — so this is purely
-opt-in and existing workspaces are unaffected.
+word streams cluster by cluster; with `enabled = true`, each to-decide
+cluster is handed to the configured model, which chooses digital text, OCR
+text, or a combination (e.g. de-ligaturing a word, or splitting a
+run-together token). Without it — whether the section is absent, empty, or
+sets `enabled = false` — hybrid mode uses its deterministic Levenshtein
+heuristic. `dgml init` writes the section with `enabled = false`.
+
+A section that is configured but not enabled logs a one-line warning to
+stderr rather than being ignored in silence.
 
 This section *tunes the merge within hybrid mode*; it does **not** select
 the text mode. The `--text-mode` flag still chooses which extractor runs.
 
-```json
-{
-  "text_extraction": {
-    "model": "ollama_chat/gemma4:latest",
-    "api_base": "http://localhost:11434",
-    "temperature": 0.0
-  }
-}
+```toml
+[text_extraction]
+enabled = true
+model = "ollama_chat/gemma4:latest"
+api_base = "http://localhost:11434"
+temperature = 0.0
 ```
 
 Field rules:
 
-- `model` — required. Provider-prefixed litellm model id. A local
-  [Ollama](https://ollama.com/) model (`ollama/<name>`) keeps the merge
-  on-device; any litellm-supported model works.
+- `enabled` — optional bool, default `false`. The on switch; everything else in
+  the section is ignored while it is false.
+- `model` — optional; falls back to the `standard` tier. Provider-prefixed
+  litellm model id. A local [Ollama](https://ollama.com/) model
+  (`ollama/<name>`) keeps the merge on-device; any litellm-supported model works.
 - `api_base` — optional. The endpoint URL. Required for Ollama
   (`http://localhost:11434`); omit for hosted providers.
 - `api_key` / `api_key_env` — optional literal key / env-var name,
@@ -354,38 +362,43 @@ A malformed section fails the next hybrid extraction with error code
 Enables image-based `dg:style` for `--text-mode ocr`
 files. Digital and hybrid files derive `dg:style` deterministically from
 the PDF glyphs during grounding, but OCR carries no font information — so
-by default OCR files get no `dg:style`. **The section's presence is the
-switch:** when it is present, the grounding pass has the configured vision
-`model` read each page image and report the observed formatting per
-grounded snippet (filtered to the allow-list). When the section is
-**absent**, OCR files stay unstyled — purely opt-in, existing workspaces
-unaffected.
+by default OCR files get no `dg:style`. **`enabled = true` is the switch:**
+with it, the grounding pass has the configured vision `model` read each page
+image and report the observed formatting per grounded snippet (filtered to the
+allow-list). Without it — whether the section is absent, empty, or sets
+`enabled = false` — OCR files stay unstyled. `dgml init` writes the section
+with `enabled = false`, so the feature is advertised but never on by default.
+
+A section that is configured (a model, credentials) but not enabled logs a
+one-line warning to stderr rather than being ignored in silence.
 
 The setting is honored **only for files whose recorded `text_mode` is
 `ocr`**; it never overrides or competes with the deterministic
 digital/hybrid path.
 
-```json
-{
-  "style": {
-    "model": "anthropic/claude-haiku-4-5"
-  }
-}
+```toml
+[style]
+enabled = true
+model = "anthropic/claude-haiku-4-5"
 ```
 
 Field rules:
 
-- `model` — **required** (the section exists only to enable the path).
-  Provider-prefixed litellm model id; must be vision-capable (it is shown
-  page images).
+- `enabled` — optional bool, default `false`. The on switch; everything else in
+  the section is ignored while it is false.
+- `model` — optional; falls back to the `light` tier. Provider-prefixed litellm
+  model id; must be vision-capable (it is shown page images). A model alone does
+  **not** enable the feature.
 - `api_base` — optional endpoint URL (e.g. for a local Ollama vision model).
 - `api_key` / `api_key_env` — optional literal key / env-var name,
   mutually exclusive; when both unset, litellm falls back to its
   provider-default env var.
 - `max_tokens` — optional positive int, default 4000.
 
-A malformed section (including a missing `model`) is validated up front by
-`docset generate` and fails fast with error code `STYLE_CONFIG_INVALID`.
+A malformed **enabled** section (including one whose `model` resolves to
+nothing) is validated up front by `docset generate` and fails fast with error
+code `STYLE_CONFIG_INVALID`. A disabled section is never validated, so shipping
+`enabled = false` alone is always safe.
 
 ### `clustering` (optional)
 
@@ -662,9 +675,13 @@ each contain one file per page.
 overlap, OCR wins on conflict).
 
 `page_image_dpi` and `page_image_renderer` record how `page_images/` were
-rendered — currently always `300` and `"ghostscript"`, but stored per file
-so a later renderer or DPI change is detectable. They are `null` if a
-non-PDF source failed to convert (no page images were produced).
+rendered — the renderer is currently always `"ghostscript"`; the dpi is `300`
+unless `dgml file add --dpi N` set otherwise. They are stored per file both so
+a later renderer change is detectable and because they are load-bearing: the
+dpi is the scale of every `page_text/` word box (see below), and `dgml check
+--retry-errors` re-renders and re-extracts at the *recorded* value so a repair
+reproduces the file's existing geometry instead of today's default. They are
+`null` if a non-PDF source failed to convert (no page images were produced).
 
 `pdf_converter` names the converter that turned a non-PDF source into the
 PDF the pipeline ran on (the converter's name with any trailing
@@ -677,8 +694,11 @@ One per page, written regardless of `text_mode` (`"digital"`, `"ocr"`,
 or `"hybrid"` all share this shape). Word locations are
 in **image-pixel space** matching the corresponding `page_images/page_N.png`
 render — i.e. ints with the top-left origin, computed as
-`round(pdf_pts * dpi / 72)` where `dpi` is the same 300 dpi used by
-`render_pages`. Files are compact (one line, no pretty-printing) so a
+`round(pdf_pts * dpi / 72)` where `dpi` is the file's `page_image_dpi` — the
+same value `render_pages` used, 300 unless `--dpi` said otherwise. Consumers
+of these coordinates should read `page_image_dpi` off `file.json` rather than
+assuming 300: the boxes in a File added with `--dpi 150` are half the size of
+the same File's at 300. Files are compact (one line, no pretty-printing) so a
 workspace with many pages doesn't bloat on disk:
 
 ```json

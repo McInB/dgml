@@ -90,10 +90,17 @@ class CorruptMetadata(DgmlError):
     code = "CORRUPT_METADATA"
 
 
-class LocalConfigMissing(DgmlError):
-    """No peer ``local_config.json`` when ``dgml workspace create`` needs one."""
+class ModelsConfigInvalid(DgmlError):
+    """The ``[models]`` tier block is malformed (non-string / empty tier)."""
 
-    code = "LOCAL_CONFIG_MISSING"
+    code = "MODELS_CONFIG_INVALID"
+
+
+class LegacyConfigPresent(DgmlError):
+    """A pre-migration ``config.json`` is the only config present; the format is
+    now TOML. Surfaced so the user runs ``dgml init`` to migrate."""
+
+    code = "LEGACY_CONFIG_PRESENT"
 
 
 class StorageConfigInvalid(DgmlError):
@@ -154,6 +161,15 @@ class ConversionFailed(DgmlError):
 
 class AuthError(DgmlError):
     code = "AUTH_ERROR"
+
+
+class ModelNotSupported(DgmlError):
+    """An LLM model id litellm doesn't recognize — usually a misspelling, a
+    wrong/absent provider prefix, or a model this litellm version doesn't know.
+    Checked up front so a bad id surfaces clearly instead of as a confusing
+    downstream parameter error at call time."""
+
+    code = "MODEL_NOT_SUPPORTED"
 
 
 class OcrFailed(DgmlError):

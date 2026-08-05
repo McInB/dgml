@@ -97,49 +97,65 @@ export DGML_HOME=./my-dgml-workspace
 uv run dgml workspace create --organization "Acme" --name "Getting Started"
 ```
 *Note: `workspace create` is idempotent and safe to re-run. It creates the
-workspace (`docsets/` + `files/`), records its identity in `workspace.json`,
-and seeds the shared `local_config.json` (a peer of the workspace) from the
-bundled template if it doesn't exist yet, copying it in as `config.json` — so
-no separate `dgml init` is needed. The response's `next_action` tells you where
-to edit the models / OCR endpoint. Run `dgml init` first only if you'd rather
-review and edit that shared config before any workspace is created; re-run
-`dgml workspace create --force` to re-sync an edited config into an existing
-workspace.*
+workspace (`docsets/` + `files/`) and records its identity in `workspace.json`.
+It does **not** create or touch your user-level config — that's `dgml init`'s
+job (run once per machine; see §1.4). If you haven't run `dgml init` yet,
+`workspace create` still succeeds but prints a warning to configure credentials.
+To override models for one workspace, drop a `<workspace>/config.toml`; it
+deep-merges over the user config.*
 
 ### 1.4 Configure Models and API Keys
 Ingesting files needs no configuration, but every LLM-backed command you will
 run later in this guide — `dgml docset generate` (Phase 1), the cluster
 auto-naming (Phase 2), and value extraction — reads its model and credentials
-from `<workspace>/config.json`. There are **no in-code model defaults**: an
+from your config. There are **no in-code model defaults**: an
 unconfigured section fails the command with an error like
 `GENERATION_CONFIG_MISSING` rather than silently making a paid LLM call you
 didn't set up. Configure it now so the later phases run through cleanly.
 
-Open `<workspace>/config.json` (seeded by `workspace create` in the previous
-step) and review these sections:
+Run `dgml init` once to write the user-level `~/.config/dgml/config.toml` with a
+`[models]` block — it auto-detects your provider from the API-key env vars that
+are set (or pass `--provider <anthropic|google|mixed>`):
 
-```json
-{
-  "generation": {
-    "model": "anthropic/claude-haiku-4-5",
-    "label_model": "anthropic/claude-sonnet-4-6",
-    "api_key_env": "ANTHROPIC_API_KEY"
-  },
-  "classification": {
-    "model": "gemini/gemini-2.5-flash",
-    "api_key_env": "GEMINI_API_KEY"
-  }
-}
+```bash
+uv run dgml init
 ```
 
-- **`generation`** — required by `dgml docset generate`. `model` runs the
-  per-page transcription (the bulk of the calls); `label_model` runs the single
-  batch-wide semantic-labeling call. Any provider-prefixed litellm model id
-  works.
+That `[models]` block is enough to run every phase — the four tiers back the
+per-task models (transcription/text-extraction ← `standard`, labeling/
+value-extraction ← `advanced`, classification/style ← `light`, schema-generation
+← `expert`):
+
+```toml
+[models]
+light    = "gemini/gemini-flash-lite-latest"
+standard = "anthropic/claude-haiku-4-5"
+advanced = "anthropic/claude-sonnet-4-6"
+expert   = "anthropic/claude-opus-4-8"
+```
+
+To pin a specific model for one task, add its per-task section (it overrides the
+tier). Drop these in the user config, or in a `<workspace>/config.toml` to scope
+them to this workspace only (it deep-merges over the user config):
+
+```toml
+[generation]
+model = "anthropic/claude-haiku-4-5"
+label_model = "anthropic/claude-sonnet-4-6"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[classification]
+model = "gemini/gemini-2.5-flash"
+api_key_env = "GEMINI_API_KEY"
+```
+
+- **`generation`** — used by `dgml docset generate`. `model` runs the per-page
+  transcription (defaults to the `standard` tier); `label_model` runs the single
+  batch-wide semantic-labeling call (defaults to `advanced`).
 - **`classification`** — a vision-capable model used to auto-name clusters in
-  Phase 2 (and by `dgml file add --auto-classify`).
-- **`grounded`** — only needed for schema-driven value extraction
-  (`dgml extraction …`, see the interlude before Phase 3).
+  Phase 2 (and by `dgml file add --auto-classify`); defaults to the `light` tier.
+- **`grounded`** — schema generation (`expert`) + value extraction (`advanced`),
+  only needed for `dgml extraction …` (see the interlude before Phase 3).
 
 Each section names its API key indirectly via `api_key_env` — the **name** of
 an environment variable, never the secret itself. Export the matching key in
@@ -150,11 +166,11 @@ export ANTHROPIC_API_KEY="sk-ant-…"
 export GEMINI_API_KEY="…"
 ```
 
-*Tip: edits to `<workspace>/config.json` apply to this workspace only. To make
-your configuration the default for future workspaces, edit the shared
-`local_config.json` (a peer of the workspace directory) and re-run
-`dgml workspace create --force` to re-sync it. The full schema of every config
-section is in [docs/storage-layout.md](../docs/storage-layout.md).*
+*Tip: settings in `<workspace>/config.toml` apply to this workspace only. To make
+your configuration the default for every workspace, edit the user-level
+`~/.config/dgml/config.toml` instead — each workspace's config deep-merges over
+it. The full schema of every config section is in
+[docs/storage-layout.md](../docs/storage-layout.md).*
 
 ### 1.5 Ingest Sample Documents
 Let's add the non-traded REIT PDF documents from `dgml-spec/samples/1-NonTraded-NAV-REITs/files`. We use `--recursive` to walk folders and `--on-conflict skip` to ensure our run is idempotent (safely resuming if interrupted):
@@ -168,6 +184,12 @@ Behind the scenes, DGML performs the following tasks per PDF:
 2. Computes the SHA-256 hash of the bytes.
 3. Renders each page into a high-resolution (300 DPI) PNG under `page_images/`.
 4. Extracts per-page text layout word boxes using `pdfminer.six` and stores them as JSON under `page_text/`.
+
+*Tip: on a large corpus, rendering is the slowest step. Add `--dpi 150` to halve
+render time and `page_images/` disk use — plenty for OCR and clustering. The
+word boxes in `page_text/` are written in the render's pixel space, so they
+scale with the flag; the value used is recorded on each File as
+`page_image_dpi`.*
 
 You can inspect the summary of this ingestion pass by piping the output to `jq`:
 ```bash
@@ -239,7 +261,16 @@ uv sync --extra clustering
 
 *(Once DGML is published to PyPI, this will become `pip install "dgml[clustering]"`.)*
 
-Additionally, auto-naming the resulting clusters requires a vision-capable LLM in the `classification` section of your `<workspace>/config.json` — you set this up in §1.4. Make sure the matching API key (e.g. `GEMINI_API_KEY`) is exported in your terminal environment.
+Additionally, auto-naming the resulting clusters uses a vision LLM — the `light`
+tier from your `[models]` block (`dgml init` set this up). To override it for
+clustering specifically, add a `[classification]` section to your config:
+
+```toml
+[classification]
+model = "gemini/gemini-2.5-flash"
+api_key_env = "GEMINI_API_KEY"
+```
+*Make sure your `GEMINI_API_KEY` (or chosen provider key) is exported in your terminal environment.*
 
 ### 2.2 Ingest the Infrastructure Funds
 First, let's ingest the large batch of Infrastructure Fund PDFs into our workspace:
@@ -263,7 +294,7 @@ Under the hood, the clusterer:
 1. Embeds each unassigned document from its first-page text (the default is a corpus-fitted TF-IDF text encoder; a file also needs a rendered first-page image to be eligible).
 2. Reduces the embeddings with UMAP and runs the **Leiden community detection algorithm** to identify distinct clusters.
 3. Assigns any cluster whose name matches an existing DocSet to that DocSet.
-4. For each remaining cluster, collects a few sample page images and sends them to the vision LLM configured in `classification` (§1.4), which proposes a cohesive **Name** (e.g., "Loan Agreements", "Valuation Memos") and **Description** for the group.
+4. For each remaining cluster, collects a few sample page images and sends them to the vision LLM configured in `classification` (§1.4), which proposes a cohesive **Name** (e.g., "Loan Agreements", "Valuation Memos") and **Description** for the group. *(A DocSet name is awkward to change once extraction schemas and generated DGML reference it. If you'd rather not take a single LLM opinion on faith, set `"naming_attempts": 3` in the `classification` section: the name the attempts agree on wins, and each file's `naming_confidence` in the `cluster` payload tells you which groups were unanimous and which were a coin toss.)*
 5. Creates the new DocSets in your workspace and assigns the respective files to them.
 
 Partial success is the contract: if the `classification` config is missing or an LLM call fails, the affected files land in `failed_file_ids` while every other cluster is still assigned — fix the config and re-run.

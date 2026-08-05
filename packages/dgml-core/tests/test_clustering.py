@@ -26,10 +26,13 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from clustering.scenarios.base import UNKNOWN_NOISE_LABEL
+from dgml_core.classification import ClassificationDecision
 from dgml_core.clustering import (
     DEFAULT_INCREMENTAL_NOVELTY_QUANTILE,
     _resolve_mode,
     _with_incremental_novelty_default,
+    clustering,
     clustering_internal,
     load_clustering_overrides,
     load_clustering_preset,
@@ -40,6 +43,8 @@ from dgml_core.docsets import DocSetStore
 from dgml_core.errors import ClusteringConfigInvalid, IncrementalWithoutClusters
 from dgml_core.run_clustering import DocPrediction
 from dgml_core.storage import Workspace
+
+from .conftest import write_classification_config
 
 
 def _dp(cluster_name: str, confidence: float | None = None) -> DocPrediction:
@@ -267,17 +272,14 @@ def test_clustering_internal_all_unusable_skips_clusterer(workspace: Workspace) 
 
 
 def test_clustering_internal_forwards_workspace_overrides(workspace: Workspace) -> None:
-    """The ``clustering`` section of ``<workspace>/config.json`` is loaded
+    """The ``clustering`` section of ``<workspace>/config.toml`` is loaded
     and forwarded to ``run_clustering`` as ``overrides=`` so users can
     override individual settings (encoder, training, …) without copying
     the whole bundled default. ``corpus_dir`` is additionally injected into
     ``encoder_text.extra`` so corpus-fitted text encoders can fit."""
     _seed_file(workspace, "f1")
     _seed_page_image(workspace, "f1")
-    workspace.config_path.write_text(
-        json.dumps({"clustering": {"training": {"epochs": 7}}}),
-        encoding="utf-8",
-    )
+    _write_config(workspace, {"clustering": {"training": {"epochs": 7}}})
 
     with patch(
         "dgml_core.clustering.run_clustering_detailed",
@@ -291,7 +293,7 @@ def test_clustering_internal_forwards_workspace_overrides(workspace: Workspace) 
 
 
 def test_clustering_internal_passes_empty_overrides_when_no_config(workspace: Workspace) -> None:
-    """No config.json ⇒ only the injected ``corpus_dir`` is forwarded
+    """No config.toml ⇒ only the injected ``corpus_dir`` is forwarded
     (bundled defaults otherwise stand), not a different keyword shape that
     would skip the path."""
     _seed_file(workspace, "f1")
@@ -383,14 +385,11 @@ def test_clustering_internal_fresh_does_not_inject_novelty_default(workspace: Wo
 
 
 def test_clustering_internal_incremental_respects_user_gate(workspace: Workspace) -> None:
-    """A user-set gate in config.json wins over the injected default."""
+    """A user-set gate in config.toml wins over the injected default."""
     DocSetStore(workspace).create(name="Contracts")
     _seed_file(workspace, "u1")
     _seed_page_image(workspace, "u1")
-    workspace.config_path.write_text(
-        json.dumps({"clustering": {"scenario": {"threshold_confidence": 0.5}}}),
-        encoding="utf-8",
-    )
+    _write_config(workspace, {"clustering": {"scenario": {"threshold_confidence": 0.5}}})
 
     with patch(
         "dgml_core.clustering.run_clustering_detailed",
@@ -404,23 +403,25 @@ def test_clustering_internal_incremental_respects_user_gate(workspace: Workspace
 
 
 # ---------------------------------------------------------------------------
-# load_clustering_overrides — reading the workspace config.json
+# load_clustering_overrides — reading the workspace config.toml
 # ---------------------------------------------------------------------------
 
 
 def _write_config(workspace: Workspace, payload: dict[str, Any]) -> None:
-    workspace.config_path.write_text(json.dumps(payload), encoding="utf-8")
+    from .conftest import write_config
+
+    write_config(workspace, payload)
 
 
 def test_load_clustering_overrides_returns_empty_when_no_config(workspace: Workspace) -> None:
-    """No config.json at all ⇒ the bundled defaults stand."""
+    """No config.toml at all ⇒ the bundled defaults stand."""
     assert load_clustering_overrides(workspace) == {}
 
 
 def test_load_clustering_overrides_returns_empty_when_no_section(workspace: Workspace) -> None:
-    """A config.json without a ``clustering`` section is treated the same
+    """A config.toml without a ``clustering`` section is treated the same
     as a missing file — bundled defaults stand."""
-    _write_config(workspace, {"classification": {"model": "gemini/gemini-3.1-flash-lite"}})
+    _write_config(workspace, {"classification": {"model": "gemini/gemini-2.5-flash-lite"}})
     assert load_clustering_overrides(workspace) == {}
 
 
@@ -428,7 +429,7 @@ def test_load_clustering_overrides_reads_section(workspace: Workspace) -> None:
     _write_config(
         workspace,
         {
-            "classification": {"model": "gemini/gemini-3.1-flash-lite"},
+            "classification": {"model": "gemini/gemini-2.5-flash-lite"},
             "clustering": {"training": {"epochs": 42}},
         },
     )
@@ -436,20 +437,18 @@ def test_load_clustering_overrides_reads_section(workspace: Workspace) -> None:
 
 
 def test_load_clustering_overrides_section_not_object_raises(workspace: Workspace) -> None:
-    _write_config(workspace, {"clustering": "oops"})
-    with pytest.raises(ClusteringConfigInvalid, match="must be a JSON object"):
+    from dgml_core.errors import CorruptMetadata
+
+    workspace.config_path.write_text('clustering = "oops"\n', encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_clustering_overrides(workspace)
 
 
-def test_load_clustering_overrides_corrupt_json_raises(workspace: Workspace) -> None:
-    workspace.config_path.write_text("{this is not valid json", encoding="utf-8")
-    with pytest.raises(ClusteringConfigInvalid, match="is not valid JSON"):
-        load_clustering_overrides(workspace)
+def test_load_clustering_overrides_corrupt_toml_raises(workspace: Workspace) -> None:
+    from dgml_core.errors import CorruptMetadata
 
-
-def test_load_clustering_overrides_top_level_not_object_raises(workspace: Workspace) -> None:
-    workspace.config_path.write_text("[]", encoding="utf-8")
-    with pytest.raises(ClusteringConfigInvalid, match="must contain a JSON object"):
+    workspace.config_path.write_text("{this is not valid toml", encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_clustering_overrides(workspace)
 
 
@@ -536,3 +535,103 @@ def test_resolve_overrides_path(workspace: Workspace, tmp_path: Path) -> None:
     assert resolve_clustering_overrides(workspace, config=str(cfg)) == {
         "scenario": {"leiden_k_neighbors": 9}
     }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"), [({}, 1), ({"scenario": {"pooling_pages": 4}}, 4)]
+)
+def test_clustering_internal_threads_pooling_pages_to_dataset(
+    workspace: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, Any],
+    expected: int,
+) -> None:
+    """`scenario.pooling_pages` must reach WorkspaceFileDataset(max_pages=) — the wiring
+    that makes multi-page pooling actually take effect through the production path."""
+    _seed_file(workspace, "f1")
+    _seed_page_image(workspace, "f1")
+    captured: dict[str, int | None] = {}
+
+    def _spy(*args: Any, **kwargs: Any) -> WorkspaceFileDataset:
+        captured["max_pages"] = kwargs.get("max_pages")
+        return WorkspaceFileDataset(*args, **kwargs)
+
+    monkeypatch.setattr("dgml_core.clustering.WorkspaceFileDataset", _spy)
+    monkeypatch.setattr(
+        "dgml_core.clustering.resolve_clustering_overrides",
+        lambda workspace, config=None: overrides,
+    )
+    with patch(
+        "dgml_core.clustering.run_clustering_detailed",
+        return_value={"f1": _dp("unknown_0")},
+    ):
+        clustering_internal(workspace)
+
+    assert captured["max_pages"] == expected
+
+
+# ---------------------------------------------------------------------------
+# the clusterer's noise bucket
+# ---------------------------------------------------------------------------
+
+
+def test_clustering_internal_splits_noise_out_of_clusters(workspace: Workspace) -> None:
+    """The density algorithms' noise bucket is not a cluster. It must come
+    back on `unclustered`, never as a cluster name — its members share
+    nothing but the fact that nothing matched them."""
+    for fid in ("real", "noise1", "noise2"):
+        _seed_file(workspace, fid)
+        _seed_page_image(workspace, fid)
+
+    with patch(
+        "dgml_core.clustering.run_clustering_detailed",
+        return_value={
+            "real": _dp("unknown_0"),
+            "noise1": _dp(UNKNOWN_NOISE_LABEL),
+            "noise2": _dp(UNKNOWN_NOISE_LABEL),
+        },
+    ):
+        result = clustering_internal(workspace)
+
+    assert result.clusters == {"real": "unknown_0"}
+    assert sorted(result.unclustered) == ["noise1", "noise2"]
+
+
+def test_clustering_does_not_name_the_noise_bucket_into_a_docset(workspace: Workspace) -> None:
+    """End-to-end regression for the real defect: `"unknown_noise"` is one
+    character away from a genuine `"unknown_<n>"`, so the naming pass used to
+    hand the noise bucket to the LLM and turn a bag of unrelated documents
+    into a DocSet — silently, with an empty `failed_file_ids`. The genuine
+    cluster in the same run must still be named."""
+    write_classification_config(workspace, {"model": "gemini/gemini-3.1-flash-lite"})
+    for fid in ("real", "noise1", "noise2"):
+        _seed_file(workspace, fid)
+        _seed_page_image(workspace, fid)
+
+    decision = ClassificationDecision(decision="new", new_name="Invoices", new_description="")
+    with (
+        patch(
+            "dgml_core.clustering.run_clustering_detailed",
+            return_value={
+                "real": _dp("unknown_0"),
+                "noise1": _dp(UNKNOWN_NOISE_LABEL),
+                "noise2": _dp(UNKNOWN_NOISE_LABEL),
+            },
+        ),
+        patch(
+            "dgml_core.clustering.propose_new_docset_for_files", return_value=decision
+        ) as mock_propose,
+    ):
+        result = clustering(workspace)
+
+    # The noise documents are reported as unassigned — a partial success, the
+    # same channel a failed page render uses — and are absent from `clusters`.
+    assert sorted(result["failed_file_ids"]) == ["noise1", "noise2"]
+    assert result["clusters"] == {"real": "Invoices"}
+    assert result["assignments"].keys() == {"real"}
+
+    # Exactly one DocSet, from the one genuine cluster: the noise bucket was
+    # never even shown to the namer.
+    assert result["n_new_clusters"] == 1
+    assert [d.name for d in DocSetStore(workspace).list_all()] == ["Invoices"]
+    assert [call.args[1] for call in mock_propose.call_args_list] == [["real"]]

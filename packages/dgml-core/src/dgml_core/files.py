@@ -129,9 +129,14 @@ class FileStore:
         *,
         on_conflict: ConflictPolicy = ConflictPolicy.ERROR,
         text_mode: TextMode = TextMode.DIGITAL,
+        dpi: int = DEFAULT_DPI,
         verbose: bool = False,
         debug: bool = False,
     ) -> AddFileResult:
+        # Validated here, alongside the OCR-config check below, so a rejected
+        # add leaves the workspace untouched rather than half-built.
+        if dpi <= 0:
+            raise ValueError(f"dpi must be a positive integer; got {dpi!r}")
         if text_mode in (TextMode.OCR, TextMode.HYBRID):
             # Validate OCR config *before* touching the filesystem so a
             # rejected add leaves the workspace untouched. Hybrid needs OCR
@@ -194,6 +199,7 @@ class FileStore:
             original_path=original_path,
             conflict_kind=("hash" if same_hash else "path" if same_path else None),
             text_mode=text_mode,
+            dpi=dpi,
             verbose=verbose,
             debug=debug,
         )
@@ -236,7 +242,7 @@ class FileStore:
         if family not in load_conversion_config(self.ws):
             raise UnsupportedFileType(
                 f"no converter configured for '{suffix}'; set conversion.{family}.provider "
-                "in config.json (see the translators-pdf package for ready-made converters)"
+                "in config.toml (see the translators-pdf package for ready-made converters)"
             )
 
     def _create_record(
@@ -247,6 +253,7 @@ class FileStore:
         original_path: str,
         conflict_kind: str | None,
         text_mode: TextMode,
+        dpi: int = DEFAULT_DPI,
         verbose: bool = False,
         debug: bool = False,
     ) -> AddFileResult:
@@ -285,12 +292,13 @@ class FileStore:
         # remote store) and all three share it.
         with self.ws.store.materialize(pdf_key) as pdf_path:
             page_count, page_count_error = self._safe_page_count(pdf_path, file_id)
-            page_render_error = self._render_pages(pdf_path, file_id, expected=page_count)
+            page_render_error = self._render_pages(pdf_path, file_id, expected=page_count, dpi=dpi)
             text_extraction_error, text_summary = self._extract_text(
                 pdf_path,
                 file_id,
                 text_mode=text_mode,
                 page_count=page_count,
+                dpi=dpi,
                 verbose=verbose,
                 debug=debug,
             )
@@ -303,7 +311,7 @@ class FileStore:
             added_at=now_iso(),
             page_count=page_count,
             text_mode=text_mode.value,
-            page_image_dpi=DEFAULT_DPI,
+            page_image_dpi=dpi,
             page_image_renderer=RENDERER_NAME,
             pdf_converter=pdf_converter,
         )
@@ -387,13 +395,15 @@ class FileStore:
             )
             return None, message
 
-    def _render_pages(self, pdf_path: Path, file_id: str, *, expected: int | None) -> str | None:
+    def _render_pages(
+        self, pdf_path: Path, file_id: str, *, expected: int | None, dpi: int = DEFAULT_DPI
+    ) -> str | None:
         """Render pages, recording errors. Returns a human-readable error
         message on failure or partial success, or ``None`` on full success."""
         try:
             pages_prefix = self.ws.file_pages_key(file_id)
             with self.ws.store.staged_write(pages_prefix) as pages_dir:
-                rendered = render_pages(pdf_path, pages_dir)
+                rendered = render_pages(pdf_path, pages_dir, dpi=dpi)
         except PageRenderFailed as exc:
             append_recorded_error(
                 self.ws,
@@ -430,6 +440,7 @@ class FileStore:
         *,
         text_mode: TextMode,
         page_count: int | None,
+        dpi: int = DEFAULT_DPI,
         verbose: bool = False,
         debug: bool = False,
     ) -> tuple[str | None, dict[str, Any] | None]:
@@ -443,12 +454,14 @@ class FileStore:
         ``--retry-errors``.
         """
         if text_mode is TextMode.DIGITAL:
-            return self._extract_text_digital(pdf_path, file_id, page_count=page_count)
+            return self._extract_text_digital(pdf_path, file_id, page_count=page_count, dpi=dpi)
         if text_mode is TextMode.OCR:
+            # OCR reads the page images, so its boxes are already in the
+            # render's pixel space — no dpi to pass.
             return self._extract_text_ocr(pdf_path, file_id, page_count=page_count)
         if text_mode is TextMode.HYBRID:
             return self._extract_text_hybrid(
-                pdf_path, file_id, page_count=page_count, verbose=verbose, debug=debug
+                pdf_path, file_id, page_count=page_count, dpi=dpi, verbose=verbose, debug=debug
             )
         return None, None
 
@@ -458,11 +471,12 @@ class FileStore:
         file_id: str,
         *,
         page_count: int | None,
+        dpi: int = DEFAULT_DPI,
     ) -> tuple[str | None, dict[str, Any] | None]:
         text_prefix = self.ws.file_text_key(file_id)
         try:
             with self.ws.store.staged_write(text_prefix) as text_dir:
-                result = extract_text_digital(pdf_path, text_dir, file_id=file_id)
+                result = extract_text_digital(pdf_path, text_dir, file_id=file_id, dpi=dpi)
         except TextExtractionFailed as exc:
             return self._record_text_failure(file_id, str(exc), permanent=True), None
         return self._classify_and_record(result, file_id, page_count, mode_label="digital")
@@ -509,6 +523,7 @@ class FileStore:
         file_id: str,
         *,
         page_count: int | None,
+        dpi: int = DEFAULT_DPI,
         verbose: bool = False,
         debug: bool = False,
     ) -> tuple[str | None, dict[str, Any] | None]:
@@ -533,6 +548,7 @@ class FileStore:
                     config=config,
                     text_extraction_config=text_extraction_config,
                     workspace=self.ws,
+                    dpi=dpi,
                     verbose=verbose,
                     debug=debug,
                 )

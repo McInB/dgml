@@ -22,16 +22,33 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
 from clustering.config.schema import Config
-from clustering.data.datasets import DocumentDataset
+from clustering.data.datasets import DocumentDataset, DocumentRecord
 from clustering.encoders import build_encoder
+from clustering.encoders.base import EncoderOutput
 from clustering.fusion import build_fusion
 from clustering.manifolds import build_manifold
 from clustering.utils.runid import run_id_for
+
+if TYPE_CHECKING:
+    from clustering.consolidation import Adjudicator
+
+# Density-based clusterers (HDBSCAN, leiden, graph_cc, …) emit ``-1`` for
+# points they place in no cluster. Scenarios render that as a *named* bucket
+# so consumers don't have to special-case negative integers in a label
+# string. S1 has no known categories, so its buckets are ``cluster_*``; S2
+# clusters only the novel tail, so its buckets are ``unknown_*``.
+#
+# These are named constants rather than literals because a noise bucket is
+# emphatically **not** an ordinary cluster — it is a bag of mutually
+# unrelated documents — and a consumer that can't tell the two apart will
+# treat it as a category.
+CLUSTER_NOISE_LABEL = "cluster_noise"
+UNKNOWN_NOISE_LABEL = "unknown_noise"
 
 
 @dataclass
@@ -50,6 +67,13 @@ class ScenarioResult:
     scores: torch.Tensor | None = None
     class_names: list[str] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # ── Abstain / review queue ────────────────────────────────────────────
+    # Per-document flag (aligned with ``doc_ids``) marking assignments the
+    # calibration / abstain gate is not confident enough to auto-accept. Empty
+    # — not all-False — when a scenario emits no abstain signal at all, so a
+    # consumer can tell "nothing flagged" from "nothing was ever asked"; treat
+    # a missing or short entry as ``False``.
+    review: list[bool] = field(default_factory=list)
 
 
 class Scenario(ABC):
@@ -108,6 +132,28 @@ class Scenario(ABC):
         self.projector.eval()
 
     # ── Shared pipeline pieces ────────────────────────────────────────────
+    def _encode_images(self, records: list[DocumentRecord]) -> EncoderOutput:
+        """Encode one image per record, optionally mean-pooling the first N pages.
+
+        With ``scenario.pooling_pages == 1`` (default) this is exactly the old
+        ``image_encoder.encode([r.image for r in records])`` — page 1 only. With
+        ``> 1`` it flattens the first ``pooling_pages`` renders of every record
+        into one encode call, then averages each record's page embeddings back
+        into a single ``[D]`` vector. Records with an empty ``page_images`` fall
+        back to ``[image]``. ``tokens`` are dropped under pooling (the pooled
+        vector is what the single-vector fusions consume)."""
+        pool_n = self.config.scenario.pooling_pages
+        if pool_n <= 1:
+            return self.image_encoder.encode([r.image for r in records])
+        per_doc = [list(r.page_images[:pool_n]) or [r.image] for r in records]
+        flat_pooled = self.image_encoder.encode([img for pages in per_doc for img in pages]).pooled
+        rows: list[torch.Tensor] = []
+        offset = 0
+        for pages in per_doc:
+            rows.append(flat_pooled[offset : offset + len(pages)].mean(dim=0))
+            offset += len(pages)
+        return EncoderOutput(pooled=torch.stack(rows, dim=0))
+
     def fused_embeddings(
         self,
         dataset: DocumentDataset,
@@ -134,10 +180,9 @@ class Scenario(ABC):
                 stop = min(start + batch_size, n)
                 records = [dataset[i] for i in range(start, stop)]
                 texts = [r.text or "" for r in records]
-                images = [r.image for r in records]
 
                 text_out = self.text_encoder.encode(texts)
-                image_out = self.image_encoder.encode(images)
+                image_out = self._encode_images(records)
                 fused = self.fusion(text_out, image_out)
 
                 all_fused.append(fused.pooled)
@@ -175,10 +220,11 @@ class Scenario(ABC):
                 stop = min(start + batch_size, n)
                 records = [dataset[i] for i in range(start, stop)]
                 texts = [r.text or r.doc_id for r in records]
-                images = [r.image for r in records]
 
                 text_parts.append(self.text_encoder.encode(texts).pooled)
-                image_parts.append(self.image_encoder.encode(images).pooled)
+                # Same multi-page pooling as fused_embeddings, so fusion is
+                # trained on the exact image representation it is scored on.
+                image_parts.append(self._encode_images(records).pooled)
                 all_ids.extend(r.doc_id for r in records)
                 all_labels.extend(r.label for r in records)
 
@@ -429,4 +475,33 @@ class Scenario(ABC):
             scores=result.scores,
             class_names=list(result.class_names) if result.class_names else None,
             metadata={**result.metadata, "refined": True},
+            # A user correction is itself the review, so the flag is carried
+            # through rather than recomputed — a corrected document keeps its
+            # provenance of having been queued.
+            review=list(result.review),
         )
+
+    def consolidate(
+        self,
+        result: ScenarioResult,
+        unknown_dataset: DocumentDataset,
+        adjudicator: Adjudicator,
+    ) -> ScenarioResult:
+        """LLM adjudication pass over the least-confident assignments.
+
+        Optional, config-gated (``scenario.consolidation``), and never on the
+        hot path: when ``consolidation.enabled`` is false this returns
+        ``result`` unchanged. Otherwise it selects the low-confidence tail,
+        asks ``adjudicator`` to reconsider each selected document against its
+        nearest candidate clusters, and merges the verdicts back through
+        :meth:`refine` — so no new merge machinery is introduced.
+
+        ``adjudicator`` is injected (an
+        :class:`~clustering.consolidation.Adjudicator`) so the LLM call lives
+        in the caller's layer, keeping this framework package LLM-free. The
+        import is deferred to call time because
+        :mod:`clustering.consolidation` imports this module.
+        """
+        from clustering.consolidation import consolidate as _consolidate
+
+        return _consolidate(self, result, unknown_dataset, adjudicator)

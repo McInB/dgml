@@ -63,6 +63,36 @@ def test_extract_text_digital_writes_per_page_json(tmp_path: Path, text_pdf: Pat
     assert "World" in words_p1
 
 
+def test_extract_text_digital_scales_boxes_with_dpi(tmp_path: Path, text_pdf: Path) -> None:
+    """Word boxes live in page-image pixel space, so they must follow the render dpi.
+
+    Halving the dpi has to halve the page dimensions *and* every coordinate. Boxes
+    left in 300-dpi space would sit off the right/bottom edge of a 150-dpi page
+    image, breaking dg:origin grounding and — because the hybrid merge finds
+    overlaps by comparing digital boxes against OCR boxes read from the real
+    image — dropping every digital-only region as assumed-invisible.
+    """
+    at_300 = extract_text_digital(text_pdf, tmp_path / "at300", file_id="f", dpi=300)
+    at_150 = extract_text_digital(text_pdf, tmp_path / "at150", file_id="f", dpi=150)
+    assert at_300.total_words == at_150.total_words
+
+    page_300 = json.loads((tmp_path / "at300" / "page_1.json").read_text())
+    page_150 = json.loads((tmp_path / "at150" / "page_1.json").read_text())
+
+    assert page_150["width"] == round(PAGE_WIDTH_PTS * 150 / 72)
+    assert page_150["height"] == round(PAGE_HEIGHT_PTS * 150 / 72)
+    assert page_150["width"] * 2 == page_300["width"]
+
+    for w300, w150 in zip(page_300["words"], page_150["words"], strict=True):
+        assert w300["t"] == w150["t"]
+        # Rounding to whole pixels allows 1px of slack per coordinate.
+        for c300, c150 in zip(w300["l"], w150["l"], strict=True):
+            assert abs(c300 / 2 - c150) <= 1, (w300["t"], w300["l"], w150["l"])
+        # Every box stays inside its own page.
+        assert w150["l"][2] <= page_150["width"]
+        assert w150["l"][3] <= page_150["height"]
+
+
 def test_extract_text_digital_writes_compact_json(tmp_path: Path, text_pdf: Path) -> None:
     """Per-page JSON must be one-line/no-pretty-print to keep large workspaces small."""
     out_dir = tmp_path / "page_text"
@@ -193,3 +223,45 @@ def test_check_repairs_missing_page_text_for_digital_pdf(
     repaired = [i for i in report.issues if i.kind == "page_text_count_mismatch" and i.repaired]
     assert repaired, report.to_json()
     assert len(list(workspace.file_text_dir(f.record.id).glob(PAGE_TEXT_GLOB))) == 2
+
+
+def test_check_re_extracts_at_the_files_own_dpi(workspace: Workspace, text_pdf: Path) -> None:
+    """Repairs must reproduce the file's geometry, not today's default.
+
+    A file added at 150 dpi has 150-dpi page images on disk. Re-extracting its
+    text at the 300-dpi default would leave page_text/ boxes pointing outside
+    those images — a silent grounding break introduced by the repair itself.
+    """
+    f = FileStore(workspace).add(text_pdf, dpi=150)
+    assert f.record.page_image_dpi == 150
+    text_dir = workspace.file_text_dir(f.record.id)
+    before = json.loads((text_dir / "page_1.json").read_text())
+    assert before["width"] == round(PAGE_WIDTH_PTS * 150 / 72)
+
+    for p in text_dir.glob(PAGE_TEXT_GLOB):
+        p.unlink()
+    check_workspace(workspace)
+
+    after = json.loads((text_dir / "page_1.json").read_text())
+    assert after["width"] == before["width"]
+    assert after["height"] == before["height"]
+    assert after["words"] == before["words"]
+
+
+def test_check_falls_back_to_the_default_dpi_for_legacy_records(
+    workspace: Workspace, text_pdf: Path
+) -> None:
+    """Records written before page_image_dpi existed mean "the default was in force"."""
+    f = FileStore(workspace).add(text_pdf)
+    record_path = workspace.file_json_path(f.record.id)
+    data = json.loads(record_path.read_text())
+    del data["page_image_dpi"]
+    record_path.write_text(json.dumps(data))
+
+    text_dir = workspace.file_text_dir(f.record.id)
+    for p in text_dir.glob(PAGE_TEXT_GLOB):
+        p.unlink()
+    check_workspace(workspace)
+
+    page = json.loads((text_dir / "page_1.json").read_text())
+    assert page["width"] == round(PAGE_WIDTH_PTS * DEFAULT_DPI / 72)

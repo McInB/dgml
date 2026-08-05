@@ -15,7 +15,7 @@
 Source documents (docx, xlsx, …) are converted to PDF before the rest of the
 pipeline, which is PDF-only. Which converter handles each *format family*
 (``docx``, ``xlsx``) is chosen per workspace in the ``conversion`` section of
-``<workspace>/config.json``::
+``<workspace>/config.toml``::
 
     {
       "conversion": {
@@ -55,8 +55,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from .config import load_merged_config
 from .errors import ConversionConfigInvalid, UnsupportedFileType
-from .storage import Workspace, read_config
+from .models_config import ConfigSection
+from .storage import Workspace
 
 # Format families and the source suffixes that belong to each. ``.pdf`` is
 # absent on purpose: it needs no converter. Shared with the add-time ingestion
@@ -252,14 +254,14 @@ def convert_to_pdf_bytes(path: Path, converters: Mapping[str, ConverterConfig]) 
         family_hint = family or "<family>"
         raise UnsupportedFileType(
             f"no converter configured for '{suffix or '<no extension>'}'; set "
-            f"conversion.{family_hint}.provider in config.json (see the translators-pdf "
+            f"conversion.{family_hint}.provider in config.toml (see the translators-pdf "
             f"package for ready-made converters)"
         )
     return make_converter(converters[family]).to_pdf(path)
 
 
 def load_conversion_config(workspace: Workspace) -> dict[str, ConverterConfig]:
-    """Read and validate the ``conversion`` section of ``<workspace>/config.json``.
+    """Read and validate the ``conversion`` section of ``<workspace>/config.toml``.
 
     Returns a mapping of format family (``"docx"``, ``"xlsx"``) to its
     :class:`ConverterConfig`. Only families explicitly configured are present —
@@ -278,27 +280,16 @@ def load_conversion_config(workspace: Workspace) -> dict[str, ConverterConfig]:
     Raises :class:`ConversionConfigInvalid` only for a malformed *shape* (the
     section or a family isn't an object, or ``provider`` is missing/blank).
     """
-    if not workspace.config_path.exists():
-        return {}
-
-    try:
-        data = read_config(workspace.config_path)
-    except Exception as exc:  # CorruptMetadata and friends
-        raise ConversionConfigInvalid(f"{workspace.config_path} is not valid JSON: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise ConversionConfigInvalid(f"{workspace.config_path} must contain a JSON object")
-
-    section = data.get("conversion")
+    section = load_merged_config(workspace).get(ConfigSection.CONVERSION)
     if section is None:
         return {}
     if not isinstance(section, dict):
-        raise ConversionConfigInvalid("'conversion' must be a JSON object")
+        raise ConversionConfigInvalid("'conversion' must be a table")
 
     configs: dict[str, ConverterConfig] = {}
     for family, family_section in section.items():
         if not isinstance(family_section, dict):
-            raise ConversionConfigInvalid(f"'conversion.{family}' must be a JSON object")
+            raise ConversionConfigInvalid(f"'conversion.{family}' must be a table")
         provider = family_section.get("provider")
         if not isinstance(provider, str) or not provider.strip():
             raise ConversionConfigInvalid(

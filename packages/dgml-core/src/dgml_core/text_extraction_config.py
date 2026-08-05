@@ -14,28 +14,29 @@
 
 Hybrid mode (``--text-mode hybrid``) reconciles digital and OCR word
 streams per page. By default it uses a deterministic Levenshtein/region
-heuristic (see :mod:`dgml.hybrid`). When a workspace declares a
-``text_extraction`` section in ``config.json``, the per-region merge
-decision is delegated to the configured LLM instead — letting it choose
-digital text, OCR text, or a combination (e.g. de-ligaturing, fixing a
-run-together word).
+heuristic (see :mod:`dgml.hybrid`). When the ``text_extraction`` section of
+``config.toml`` sets ``enabled = true``, the per-region merge decision is
+delegated to the configured LLM instead — letting it choose digital text, OCR
+text, or a combination (e.g. de-ligaturing, fixing a run-together word).
 
 This section *tunes the merge within hybrid mode*; it does **not** select
 the text mode. The ``--text-mode`` flag still chooses which extractor
-runs. When the section is absent, :func:`load_text_extraction_config`
-returns ``None`` and hybrid falls back to the heuristic — so existing
-workspaces are unchanged.
+runs.
 
-Config shape (all but ``model`` optional)::
+**``enabled = true`` is the switch** — the section's presence configures the
+feature but does not turn it on. Without it :func:`load_text_extraction_config`
+returns ``None`` and hybrid falls back to the heuristic. See
+:mod:`dgml_core.style_config` for the rationale (shipped-template safety, and
+the warning for a configured-but-disabled section); the two behave identically.
 
-    {
-      "text_extraction": {
-        "model": "ollama_chat/gemma4:latest",
-        "api_base": "http://localhost:11434",
-        "temperature": 0.0,
-        "max_tokens": 4000
-      }
-    }
+Config shape (``model`` falls back to the ``[models].standard`` tier)::
+
+    [text_extraction]
+    enabled = true
+    model = "ollama_chat/gemma4:latest"
+    api_base = "http://localhost:11434"
+    temperature = 0.0
+    max_tokens = 4000
 
 API key resolution mirrors :mod:`dgml.classification`: literal
 ``api_key`` > env-name lookup via ``api_key_env`` > litellm's per-provider
@@ -47,9 +48,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 
-from .errors import AuthError, CorruptMetadata, TextExtractionConfigInvalid
-from .storage import Workspace, read_config
+from .config import load_merged_config
+from .errors import AuthError, TextExtractionConfigInvalid
+from .models_config import ConfigSection, Tier, resolve_tiered_model, section_enabled
+from .storage import Workspace
 
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_MAX_TOKENS = 4000
@@ -75,68 +79,46 @@ class TextExtractionConfig:
 
 
 def load_text_extraction_config(workspace: Workspace) -> TextExtractionConfig | None:
-    """Read and validate the ``text_extraction`` section of ``config.json``.
+    """Read and validate the ``text_extraction`` section of the merged config.
 
-    Returns ``None`` when no config file exists or no ``text_extraction``
-    section is present — hybrid mode then uses its heuristic merge. Raises
-    :class:`TextExtractionConfigInvalid` when the section exists but is
-    malformed.
+    Returns ``None`` unless the section sets ``enabled = true`` — hybrid mode then
+    uses its heuristic merge. The section's presence configures the feature, it
+    does not switch it on. When enabled, ``model`` may be omitted to fall back to
+    the ``[models].standard`` tier. Raises :class:`TextExtractionConfigInvalid`
+    when malformed.
     """
-    if not workspace.config_path.exists():
-        return None
-
-    try:
-        data = read_config(workspace.config_path)
-    except CorruptMetadata as exc:
-        raise TextExtractionConfigInvalid(
-            f"{workspace.config_path} is not valid JSON: {exc}"
-        ) from exc
-
-    if not isinstance(data, dict):
-        raise TextExtractionConfigInvalid(f"{workspace.config_path} must contain a JSON object")
-
-    section = data.get("text_extraction")
+    merged = load_merged_config(workspace)
+    section = merged.get(ConfigSection.TEXT_EXTRACTION)
     if section is None:
         return None
     if not isinstance(section, dict):
-        raise TextExtractionConfigInvalid("'text_extraction' must be a JSON object")
+        raise TextExtractionConfigInvalid("'text_extraction' must be a table")
+    sec: dict[str, Any] = section
 
-    model = section.get("model")
-    if not isinstance(model, str) or not model.strip():
-        raise TextExtractionConfigInvalid(
-            "'text_extraction.model' must be a non-empty string (e.g. 'ollama_chat/gemma4:latest')"
-        )
+    # Nothing below this line may run for a disabled section — see the matching
+    # comment in `style_config.load_style_config` for why.
+    if not section_enabled(
+        sec, section_name=ConfigSection.TEXT_EXTRACTION, invalid=TextExtractionConfigInvalid
+    ):
+        return None
 
-    api_base = section.get("api_base")
-    if api_base is not None and (not isinstance(api_base, str) or not api_base):
-        raise TextExtractionConfigInvalid(
-            "'text_extraction.api_base' must be a non-empty string if set"
-        )
+    # Enabled but no model → invalid (the tier only supplies a model for an
+    # enabled feature; it does not turn the feature on).
+    rm = resolve_tiered_model(
+        merged,
+        section_name=ConfigSection.TEXT_EXTRACTION,
+        tier=Tier.STANDARD,
+        invalid=TextExtractionConfigInvalid,
+        missing=TextExtractionConfigInvalid,
+    )
 
-    api_key = section.get("api_key")
-    if api_key is not None and (not isinstance(api_key, str) or not api_key):
-        raise TextExtractionConfigInvalid(
-            "'text_extraction.api_key' must be a non-empty string if set"
-        )
-
-    api_key_env = section.get("api_key_env")
-    if api_key_env is not None and (not isinstance(api_key_env, str) or not api_key_env):
-        raise TextExtractionConfigInvalid(
-            "'text_extraction.api_key_env' must be a non-empty env var name if set"
-        )
-
-    if api_key is not None and api_key_env is not None:
-        raise TextExtractionConfigInvalid(
-            "set at most one of 'text_extraction.api_key' / 'text_extraction.api_key_env', not both"
-        )
-
-    temperature = section.get("temperature", DEFAULT_TEMPERATURE)
+    temperature = sec.get("temperature", DEFAULT_TEMPERATURE)
     if temperature is not None and (
         not isinstance(temperature, int | float) or isinstance(temperature, bool)
     ):
         raise TextExtractionConfigInvalid("'text_extraction.temperature' must be a number if set")
 
-    max_tokens = section.get("max_tokens", DEFAULT_MAX_TOKENS)
+    max_tokens = sec.get("max_tokens", DEFAULT_MAX_TOKENS)
     if max_tokens is not None and (
         not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1
     ):
@@ -145,10 +127,10 @@ def load_text_extraction_config(workspace: Workspace) -> TextExtractionConfig | 
         )
 
     return TextExtractionConfig(
-        model=model,
-        api_base=api_base,
-        api_key=api_key,
-        api_key_env=api_key_env,
+        model=rm.model,
+        api_base=rm.api_base,
+        api_key=rm.api_key,
+        api_key_env=rm.api_key_env,
         temperature=float(temperature) if temperature is not None else None,
         max_tokens=max_tokens,
     )
@@ -171,7 +153,7 @@ def resolve_api_key(config: TextExtractionConfig) -> str | None:
     if not key:
         raise AuthError(
             f"environment variable ${config.api_key_env} is not set "
-            "(referenced by text_extraction.api_key_env in config.json)"
+            "(referenced by text_extraction.api_key_env in the config)"
         )
     return key
 

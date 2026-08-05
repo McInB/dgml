@@ -68,8 +68,11 @@ def test_load_ocr_config_no_config_raises_off_darwin(
 def test_load_ocr_config_no_ocr_section_defaults_to_macos_on_darwin(
     workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # `[other]` is an *unknown* section, dropped by `extra="ignore"` before it
+    # reaches the merged mapping — distinct from a bare `[ocr]` (covered below),
+    # which now arrives as an empty table.
     monkeypatch.setattr(sys, "platform", "darwin")
-    workspace.config_path.write_text(json.dumps({"other": {}}), encoding="utf-8")
+    workspace.config_path.write_text("[other]\n", encoding="utf-8")
     with pytest.warns(UserWarning, match="defaulting to the on-device macOS"):
         cfg = load_ocr_config(workspace)
     assert cfg.provider is OcrProviderName.MACOS
@@ -79,14 +82,41 @@ def test_load_ocr_config_no_ocr_section_raises_off_darwin(
     workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
-    workspace.config_path.write_text(json.dumps({"other": {}}), encoding="utf-8")
+    workspace.config_path.write_text("[other]\n", encoding="utf-8")
     with pytest.raises(OcrConfigMissing):
         load_ocr_config(workspace)
 
 
-def test_load_ocr_config_invalid_json(workspace: Workspace) -> None:
-    workspace.config_path.write_text("{ not valid json", encoding="utf-8")
-    with pytest.raises(OcrConfigInvalid):
+def test_load_ocr_config_bare_section_defaults_to_macos_on_darwin(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare `[ocr]` is the same as no section at all, not a misconfiguration.
+
+    Unlike `style` / `text_extraction`, this section's presence carries no
+    meaning — `provider` selects the backend. `dgml init` ships a commented-out
+    `# [ocr]` block, so uncommenting only the header must not hard-fail.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    workspace.config_path.write_text("[ocr]\n", encoding="utf-8")
+    with pytest.warns(UserWarning, match="defaulting to the on-device macOS"):
+        cfg = load_ocr_config(workspace)
+    assert cfg.provider is OcrProviderName.MACOS
+
+
+def test_load_ocr_config_bare_section_raises_off_darwin(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    workspace.config_path.write_text("[ocr]\n", encoding="utf-8")
+    with pytest.raises(OcrConfigMissing):
+        load_ocr_config(workspace)
+
+
+def test_load_ocr_config_invalid_toml(workspace: Workspace) -> None:
+    from dgml_core.errors import CorruptMetadata
+
+    workspace.config_path.write_text("{ not valid toml", encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_ocr_config(workspace)
 
 
@@ -118,7 +148,7 @@ def test_load_ocr_config_azure_no_key_env(workspace: Workspace) -> None:
 
 def test_load_ocr_config_azure_literal_api_key(workspace: Workspace) -> None:
     """A literal api_key in config is accepted (developers may put keys
-    directly in workspace config.json — it isn't checked in)."""
+    directly in workspace config.toml — it isn't checked in)."""
     write_ocr_config(
         workspace,
         {
@@ -205,15 +235,15 @@ def test_load_ocr_config_aws_rejects_azure_fields(workspace: Workspace) -> None:
 
 
 def test_load_ocr_config_rejects_duplicate_provider_key(workspace: Workspace) -> None:
-    """A hand-edited config with two `provider` keys would silently
-    resolve to the last one under plain json.loads. Our duplicate-key
-    rejection at the read_json layer surfaces it as OcrConfigInvalid
-    (via CorruptMetadata)."""
+    """A hand-edited config with two `provider` keys is a TOML parse error
+    (TOML rejects duplicate keys natively), surfaced as CorruptMetadata."""
+    from dgml_core.errors import CorruptMetadata
+
     workspace.config_path.write_text(
-        '{"ocr": {"provider": "azure", "provider": "aws", "region": "us-east-1"}}',
+        '[ocr]\nprovider = "azure"\nprovider = "aws"\nregion = "us-east-1"\n',
         encoding="utf-8",
     )
-    with pytest.raises(OcrConfigInvalid, match="duplicate key"):
+    with pytest.raises(CorruptMetadata):
         load_ocr_config(workspace)
 
 

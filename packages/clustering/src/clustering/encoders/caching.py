@@ -26,7 +26,8 @@ uncached.
   field that changes the output vector (``name``, ``model_id``,
   ``embedding_dim``, ``multi_vector``, ``doc_prefix``, ``extra`` …) is in
   the config, so a config change lands in a fresh namespace instead of
-  serving stale vectors.
+  serving stale vectors. Credentials are the one exclusion — see
+  :data:`_SECRET_EXTRA_KEYS`.
 * **input hash** — a content hash of each item (text bytes / image
   pixels). Content-keying means re-ingests and renames reuse vectors, and
   identical pages dedupe across documents.
@@ -52,6 +53,14 @@ from PIL import Image
 from clustering.config.schema import EncoderConfig
 from clustering.encoders.base import Encoder, EncoderOutput
 
+# ``extra`` keys holding a credential rather than a model setting, excluded
+# from ``encoder_fingerprint``: a key does not change the vectors a model
+# returns, so letting it namespace the cache would orphan every embedding the
+# old key paid for the moment it is rotated. Deliberately narrow — the other
+# ``extra`` fields stay in the digest, because telling "cannot change the
+# output" apart from "probably does not" is guesswork per encoder.
+_SECRET_EXTRA_KEYS = frozenset({"api_key"})
+
 
 def encoder_fingerprint(cfg: EncoderConfig) -> str:
     """Stable, output-determining digest of an encoder config.
@@ -60,8 +69,16 @@ def encoder_fingerprint(cfg: EncoderConfig) -> str:
     configs that differ in any field — even ``extra`` — get distinct
     cache namespaces. Prefixed with the encoder name for human-readable
     cache directories.
+
+    Credentials in ``extra`` (:data:`_SECRET_EXTRA_KEYS`) are dropped first.
+    That is a no-op for every config without one, so caches already on disk
+    keep the fingerprint they were written under.
     """
-    payload = json.dumps(cfg.model_dump(mode="json"), sort_keys=True).encode("utf-8")
+    dumped = cfg.model_dump(mode="json")
+    extra = dumped.get("extra")
+    if isinstance(extra, dict) and _SECRET_EXTRA_KEYS & extra.keys():
+        dumped["extra"] = {k: v for k, v in extra.items() if k not in _SECRET_EXTRA_KEYS}
+    payload = json.dumps(dumped, sort_keys=True).encode("utf-8")
     digest = hashlib.sha256(payload).hexdigest()[:16]
     return f"{cfg.name}-{digest}"
 

@@ -31,8 +31,11 @@ from dgml_core.errors import (
 from dgml_core.extraction_schema import parse_rnc
 from dgml_core.extraction_xml import dgml_xml_to_values
 from dgml_core.grounded import (
+    _SCHEMA_TREE_MAX_DEPTH,
     DEFAULT_MAX_TOOL_ITERS,
     GroundedConfig,
+    _field_node_schema,
+    _submit_schema_tool,
     extract_values,
     generate_schema,
     get_page_words,
@@ -67,10 +70,9 @@ title =
 
 
 def _write_grounded_config(workspace: Workspace, section: dict[str, object]) -> None:
-    workspace.config_path.write_text(
-        json.dumps({"grounded": section}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    from .conftest import write_config
+
+    write_config(workspace, {"grounded": section})
 
 
 def _seed_file(
@@ -187,31 +189,65 @@ def test_load_config_missing_when_no_config_file(workspace: Workspace) -> None:
 
 
 def test_load_config_missing_when_no_grounded_section(workspace: Workspace) -> None:
-    workspace.config_path.write_text(json.dumps({"ocr": {}}), encoding="utf-8")
+    # No [grounded] section and no [models] tiers → nothing resolves the models.
+    workspace.config_path.write_text("[ocr]\n", encoding="utf-8")
     with pytest.raises(GroundedConfigMissing):
         load_grounded_config(workspace)
 
 
-def test_load_config_invalid_when_not_object(workspace: Workspace) -> None:
-    workspace.config_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
-    with pytest.raises(GroundedConfigInvalid):
+def test_load_config_invalid_when_malformed_toml(workspace: Workspace) -> None:
+    from dgml_core.errors import CorruptMetadata
+
+    workspace.config_path.write_text("this is = not = valid toml", encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_grounded_config(workspace)
 
 
 def test_load_config_invalid_when_grounded_not_object(workspace: Workspace) -> None:
-    workspace.config_path.write_text(json.dumps({"grounded": "azure"}), encoding="utf-8")
-    with pytest.raises(GroundedConfigInvalid):
+    from dgml_core.errors import CorruptMetadata
+
+    workspace.config_path.write_text('grounded = "azure"\n', encoding="utf-8")
+    with pytest.raises(CorruptMetadata):
         load_grounded_config(workspace)
 
 
-def test_load_config_rejects_missing_models(workspace: Workspace) -> None:
+def test_load_config_missing_model_without_tier(workspace: Workspace) -> None:
+    # One model set on the section, the other neither overridden nor tiered.
     _write_grounded_config(workspace, {"values_model": DEFAULT_VALUES_MODEL})
-    with pytest.raises(GroundedConfigInvalid):
+    with pytest.raises(GroundedConfigMissing):
         load_grounded_config(workspace)
 
     _write_grounded_config(workspace, {"schema_model": DEFAULT_SCHEMA_MODEL})
-    with pytest.raises(GroundedConfigInvalid):
+    with pytest.raises(GroundedConfigMissing):
         load_grounded_config(workspace)
+
+
+def test_load_config_models_from_tiers(workspace: Workspace) -> None:
+    # No [grounded] section: schema ← expert tier, values ← advanced tier.
+    from .conftest import write_config
+
+    write_config(
+        workspace,
+        {"models": {"advanced": "gemini/gemini-2.5-pro", "expert": "anthropic/claude-opus-4-8"}},
+    )
+    config = load_grounded_config(workspace)
+    assert config.schema_model == "anthropic/claude-opus-4-8"
+    assert config.values_model == "gemini/gemini-2.5-pro"
+
+
+def test_load_config_section_overrides_tier(workspace: Workspace) -> None:
+    from .conftest import write_config
+
+    write_config(
+        workspace,
+        {
+            "models": {"advanced": "gemini/gemini-2.5-pro", "expert": "anthropic/claude-opus-4-8"},
+            "grounded": {"values_model": "openai/gpt-5"},
+        },
+    )
+    config = load_grounded_config(workspace)
+    assert config.schema_model == "anthropic/claude-opus-4-8"  # tier
+    assert config.values_model == "openai/gpt-5"  # override wins
 
 
 def test_load_config_rejects_non_positive_max_iters(workspace: Workspace) -> None:
@@ -402,6 +438,91 @@ def test_generate_schema_invalid_field_tree_errors(workspace: Workspace) -> None
     with patch("litellm.completion", return_value=response):
         with pytest.raises(SchemaGenerationFailed):
             generate_schema(workspace, ["f1aaaaaaaaaa"], config=config, docset_name="D")
+
+
+def test_submit_schema_tool_declares_the_node_shape() -> None:
+    """The field-tree item must be a *populated* object schema.
+
+    A bare ``{"type": "object"}`` is a closed, empty object: providers that
+    constrain-decode tool arguments (Gemini) then return ``{"fields": [{}, …]}``
+    and generation dies in the parser with "missing a non-empty 'name'". Assert
+    the declared keys are exactly the ones ``_field_node_to_tag`` reads, so the
+    two can't drift.
+    """
+    item = _submit_schema_tool()["function"]["parameters"]["properties"]["fields"]["items"]
+    # Assert it is the wired-up builder, so the node schema can't be improved
+    # while the tool quietly keeps handing out something else.
+    assert item == _field_node_schema(_SCHEMA_TREE_MAX_DEPTH)
+    assert set(item["properties"]) == {
+        "name",
+        "kind",
+        "datatype",
+        "description",
+        "example",
+        "prompt",
+        "fields",
+        "item",
+    }
+    assert item["required"] == ["name", "kind"]
+    assert item["properties"]["kind"]["enum"] == ["field", "container", "collection"]
+    assert "text" in item["properties"]["datatype"]["enum"]
+
+
+def test_field_node_schema_bottoms_out_at_leaves() -> None:
+    """At the deepest level there is no ``fields``/``item`` slot left, so a
+    container could only be childless — narrow ``kind`` to a leaf instead."""
+    floor = _field_node_schema(0)
+    assert floor["properties"]["kind"]["enum"] == ["field"]
+    assert "fields" not in floor["properties"] and "item" not in floor["properties"]
+
+    nested = _field_node_schema(1)
+    assert nested["properties"]["fields"]["items"] == floor
+    # Nesting is inlined, not $ref'd — provider adapters resolve $ref inconsistently.
+    assert "$ref" not in json.dumps(nested)
+
+
+def test_declared_datatype_enum_can_express_every_accepted_datatype() -> None:
+    """``datatype`` is an enum, so a constrained decoder can only emit what it
+    lists. ``_normalize_datatype`` also accepts ``"string"``, ``""`` and
+    ``xsd:``-prefixed spellings — assert each of those normalizes to a value the
+    enum *can* express, i.e. the narrowing costs redundant spellings, not types.
+    """
+    from dgml_core.extraction_schema import FIELD_DATATYPES, _normalize_datatype
+
+    enum = _field_node_schema(0)["properties"]["datatype"]["enum"]
+    aliases = ["", "string", "text", *(f"xsd:{d}" for d in sorted(FIELD_DATATYPES))]
+    for alias in aliases:
+        normalized = _normalize_datatype(alias, tag_name="X")
+        # None is the untyped default, whose canonical enum spelling is "text".
+        assert ("text" if normalized is None else normalized) in enum, alias
+
+
+def test_declared_schema_accepts_a_collection_inside_a_collection() -> None:
+    """A collection's ``item`` is a wrapper the parser flattens, so it must not
+    cost a depth level: otherwise the prompt's recommended style (describe a
+    collection via an explicit ``item``) bottoms out early and a nested
+    collection comes back childless — which the parser renders as an empty
+    element instead of failing.
+    """
+    node = _submit_schema_tool()["function"]["parameters"]["properties"]["fields"]["items"]
+    # Walk the declared schema along `collection.item -> fields[] -> collection.item
+    # -> fields[]` — the shape of an invoice whose line items each carry charges.
+    # Every hop has to exist, or a constrained decoder cannot emit that tree.
+    inner_item = node["properties"]["item"]
+    inner_child = inner_item["properties"]["fields"]["items"]
+    nested_item = inner_child["properties"]["item"]
+    assert nested_item["properties"]["fields"]["items"]["properties"]["name"]
+
+    # `item` inside `item` is what bounds the recursion — it must not be declared.
+    assert "item" not in inner_item["properties"]
+
+
+def test_submit_schema_tool_stays_within_geminis_decoder_budget() -> None:
+    """Gemini rejects an over-large constrained-decoding schema with "too many
+    states for serving". Measured against gemini-2.5-pro: the current schema
+    (~13 KB) is served, one more level of depth (~27 KB) is not. Guard the size
+    here so raising the depth fails in CI rather than in front of a user."""
+    assert len(json.dumps(_submit_schema_tool())) < 20_000
 
 
 def test_generate_schema_provider_exception_wrapped(workspace: Workspace) -> None:

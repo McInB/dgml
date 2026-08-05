@@ -14,7 +14,7 @@
 
 OCR providers return no font facts, so the deterministic ``dg:style`` path
 (pdfminer → ``page_text`` → grounding) produces nothing for ``--text-mode ocr``
-files. When a workspace opts in via the ``style`` section of ``config.json``
+files. When a workspace opts in via the ``style`` section of ``config.toml``
 (see :mod:`dgml.style_config`), this module fills that gap with a vision model:
 each page image is shown to the model alongside the grounded text snippets that
 landed on it, and the model returns observed CSS per snippet. Every returned
@@ -39,7 +39,6 @@ from .pages import PAGE_FILENAME_TEMPLATE
 from .storage import Workspace
 from .style import ALLOWED, merge_styles, validate_style
 from .usage import OPERATION_STYLE_ANNOTATE
-from .utils import image_to_data_url
 
 # How many grounded snippets to show per page request — a soft bound so a dense
 # page doesn't blow up the prompt; excess snippets are simply left unstyled.
@@ -66,7 +65,7 @@ def annotate_style_from_image(
     Each page is one vision call, which records its own ``usage.jsonl`` row
     (labelled ``style_annotate``, gated on ``debug``) from the recording context
     carried on the per-page :class:`~dgml_core.llm.LLMConfig`."""
-    by_page: dict[int, list[Any]] = {}
+    by_page: dict[int, list[tuple[Any, str]]] = {}
     for el in root.iter():
         if not isinstance(el.tag, str):
             continue
@@ -75,7 +74,7 @@ def annotate_style_from_image(
             continue
         text = " ".join("".join(el.itertext()).split())
         if text:
-            by_page.setdefault(page, []).append(el)
+            by_page.setdefault(page, []).append((el, text))
 
     styled = 0
     pages_key = workspace.file_pages_key(file_id)
@@ -83,8 +82,8 @@ def annotate_style_from_image(
         image_key = f"{pages_key}/{PAGE_FILENAME_TEMPLATE % page}"
         if not workspace.store.blob_exists(image_key):
             continue
-        snippets = [" ".join("".join(el.itertext()).split()) for el in elements]
-        snippets = snippets[:_MAX_SNIPPETS_PER_PAGE]
+        elements = elements[:_MAX_SNIPPETS_PER_PAGE]
+        snippets = [text for _, text in elements]
         # One call per page → let `llm.call` record one row per page via the
         # recording context on the config (gated on --debug in the call layer).
         page_config = replace(
@@ -101,7 +100,7 @@ def annotate_style_from_image(
         for idx, css in result.items():
             if not 0 <= idx < len(snippets):
                 continue
-            el = elements[idx]
+            el = elements[idx][0]
             merged = merge_styles(el.get(style_attr), validate_style(css))
             if merged and merged != el.get(style_attr):
                 el.set(style_attr, merged)
@@ -127,10 +126,9 @@ def _request_styles(
 ) -> dict[int, str]:
     """Ask the model for observed CSS per snippet against the page image.
     Returns ``{snippet_index: css_string}`` (possibly empty)."""
-    user_content: list[dict[str, Any]] = [
-        {"type": "text", "text": _build_prompt(snippets)},
-        {"type": "image_url", "image_url": {"url": image_to_data_url(image_bytes)}},
-    ]
+    user_content = llm.build_user_content(
+        instruction_text=_build_prompt(snippets), images=[image_bytes]
+    )
     raw = llm.call(config, system_prompt=_SYSTEM_PROMPT, user_content=user_content)
     return _parse_styles(raw)
 

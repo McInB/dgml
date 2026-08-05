@@ -40,6 +40,7 @@ EncoderName = Literal[
     "gte",
     "stella",
     "jina",
+    "gemini",
     "tfidf",
     "dit",
     "vit",
@@ -154,12 +155,170 @@ class ManifoldConfig(_StrictModel):
         return self
 
 
+# ── Confidence calibration + abstain ──────────────────────────────────────
+class CalibrationConfig(_StrictModel):
+    """Post-hoc calibration of the reported confidence, and when to abstain.
+
+    Off by default (``method="none"``, no thresholds) so the ordinal
+    softmax-peak signal is reported unchanged and nothing is flagged.
+    ``temperature`` / ``platt`` are fit on the labeled support set by
+    leave-one-out, so only the scenarios that *have* labels can use them (S3 /
+    S5); the unlabeled scenarios stay ordinal without erroring. ``coverage``
+    adds a distribution-free split-conformal abstain gate; ``abstain_threshold``
+    is an absolute floor that works with or without a fitted calibrator.
+
+    Neither gate changes a document's predicted category — they only decide
+    whether a human should confirm it.
+    """
+
+    method: Literal["none", "temperature", "platt"] = "none"
+    coverage: float | None = None
+    """Target coverage in (0, 1) for the conformal abstain gate. ``None`` off.
+
+    A review *budget*: at most ``1 - coverage`` of a batch is flagged. Not a
+    probability that a kept assignment is correct.
+    """
+    abstain_threshold: float | None = None
+    """Absolute calibrated-confidence floor in [0, 1]; below it ⇒ review."""
+
+    @model_validator(mode="after")
+    def _check_ranges(self) -> CalibrationConfig:
+        # Both are caught here so a typo'd operating point fails at config load
+        # rather than partway through a run (or worse, silently clamped).
+        if self.coverage is not None and not 0.0 < self.coverage < 1.0:
+            raise ValueError(f"calibration.coverage must be in (0, 1); got {self.coverage}.")
+        if self.abstain_threshold is not None and not 0.0 <= self.abstain_threshold <= 1.0:
+            raise ValueError(
+                f"calibration.abstain_threshold must be in [0, 1]; got {self.abstain_threshold}."
+            )
+        return self
+
+
+# ── LLM consolidation of the low-confidence tail ────────────────────────────
+class ConsolidationSelectorConfig(_StrictModel):
+    """Which assignments enter the LLM adjudication tail.
+
+    A document is selected iff the active ``strategy`` flags it, plus — when
+    ``include_noise`` — any noise / unassigned document. The union is capped at
+    ``max_docs``, least-confident first, so the LLM bill is bounded no matter
+    how uncertain a run turns out to be.
+
+    Each strategy requires its own knob, and a strategy whose knob is unset is
+    a config error rather than a silent fall-back to ``quantile`` — picking a
+    selection rule and quietly getting a different one is the kind of thing you
+    only notice from the bill.
+    """
+
+    strategy: Literal["quantile", "confidence", "margin", "noise"] = "quantile"
+    quantile: float = 0.10
+    """Bottom fraction by confidence to select, for ``quantile``."""
+    confidence_threshold: float | None = None
+    """Select assignments with confidence below this, for ``confidence``."""
+    margin_threshold: float | None = None
+    """Select assignments whose top1-top2 score gap is below this band, for
+    ``margin``. Needs per-class scores; on a scenario that emits none the
+    strategy degrades to ``quantile`` and says so in the run metadata."""
+    max_docs: int = 200
+    """Hard cap on adjudicated documents — the LLM cost ceiling."""
+    include_noise: bool = True
+    """Also adjudicate noise / unassigned (``*_noise`` / ``None``) documents."""
+
+    @model_validator(mode="after")
+    def _check_strategy_knobs(self) -> ConsolidationSelectorConfig:
+        if not 0.0 <= self.quantile <= 1.0:
+            raise ValueError(
+                f"consolidation.selector.quantile must be in [0, 1]; got {self.quantile}."
+            )
+        if self.max_docs < 0:
+            raise ValueError(f"consolidation.selector.max_docs must be >= 0; got {self.max_docs}.")
+        if self.confidence_threshold is not None and not 0.0 <= self.confidence_threshold <= 1.0:
+            raise ValueError(
+                "consolidation.selector.confidence_threshold must be in [0, 1]; "
+                f"got {self.confidence_threshold}."
+            )
+        if self.margin_threshold is not None and not 0.0 <= self.margin_threshold <= 1.0:
+            raise ValueError(
+                "consolidation.selector.margin_threshold must be in [0, 1]; "
+                f"got {self.margin_threshold}."
+            )
+        if self.strategy == "confidence" and self.confidence_threshold is None:
+            raise ValueError(
+                "consolidation.selector.strategy='confidence' needs confidence_threshold to be set."
+            )
+        if self.strategy == "margin" and self.margin_threshold is None:
+            raise ValueError(
+                "consolidation.selector.strategy='margin' needs margin_threshold to be set."
+            )
+        if self.strategy == "noise" and not self.include_noise:
+            raise ValueError(
+                "consolidation.selector.strategy='noise' with include_noise=false "
+                "selects nothing at all."
+            )
+        return self
+
+
+class ConsolidationConfig(_StrictModel):
+    """An optional LLM adjudication pass over the least-confident assignments.
+
+    Off by default and never on the hot path. When enabled, the selector picks
+    the low-confidence tail, an LLM reconsiders each selected document against
+    its ``candidates_k`` nearest clusters, and the verdicts are merged back
+    through the scenario's :meth:`~clustering.scenarios.base.Scenario.refine`
+    hook. Cost scales with how uncertain the run was, not with corpus size.
+    """
+
+    enabled: bool = False
+    selector: ConsolidationSelectorConfig = Field(default_factory=ConsolidationSelectorConfig)
+    candidates_k: int = 3
+    """Nearest existing clusters offered to the LLM per adjudicated document."""
+    mode: Literal["reassign", "repartition", "auto"] = "reassign"
+    """``reassign``: one candidate-pick decision per document. ``repartition``:
+    re-cluster a contested subset as a batch. ``auto``: let the adjudicator
+    choose per region."""
+    batch_size: int = 40
+    """Repartition batch size."""
+    model: str | None = None
+    """Adjudication model. ``None`` ⇒ reuse the workspace classification model."""
+    apply: Literal["suggest", "auto"] = "suggest"
+    """``suggest``: record verdicts and flag the documents for review, labels
+    unchanged. ``auto``: write the reassignments into the result. ``suggest``
+    is the default because an LLM overruling the embedding partition is a
+    change a human should see before it lands."""
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> ConsolidationConfig:
+        if self.candidates_k < 1:
+            raise ValueError(f"consolidation.candidates_k must be >= 1; got {self.candidates_k}.")
+        if self.batch_size < 1:
+            raise ValueError(f"consolidation.batch_size must be >= 1; got {self.batch_size}.")
+        return self
+
+
 # ── Scenario ──────────────────────────────────────────────────────────────
 class ScenarioConfig(_StrictModel):
     name: ScenarioName
     k_clusters: int | None = None
     n_shots: int | None = None
     known_categories: list[str] | None = None
+    # ── Name+support prototype blend (S5) ─────────────────────────────────
+    name_prototype_blend: float | None = None
+    """Blend weight ``alpha`` in [0, 1] mixing the encoded category-*name* prototype
+    with the labelled-support mean prototype in S5:
+    ``proto = normalize(alpha*name + (1-alpha)*support)``. ``None``/``0.0`` = today's
+    behaviour (support mean only). The name prototype is a strong prior when support
+    is thin: measured gains are largest at low shot counts (K=1-2: +0.02 to +0.09
+    accuracy across claudio/discovery1/discovery2) and taper as K grows, so a value
+    around 0.4-0.6 helps few-shot S5 without hurting many-shot. Requires descriptive
+    category names to pay off."""
+    # ── Multi-page image pooling ──────────────────────────────────────────
+    pooling_pages: int = 1
+    """How many leading page renders to mean-pool on the image side. ``1``
+    (default) = today's behaviour: page 1 only. ``>1`` embeds the first N pages
+    and averages them, which helps corpora whose first page is an ambiguous
+    cover (measured +0.10 S5 accuracy on discovery2's multi-page contracts at
+    N=4) but *hurts* form-like corpora whose page 1 is the discriminative header
+    (claudio -0.14) — so it is opt-in and defaults off. Text is unaffected (it
+    already concatenates every page)."""
     # ── Unknown-bucket gating (S2 / S3) ───────────────────────────────────
     # All three thresholds compose: a document is routed to the "unknown"
     # bucket iff ANY active threshold says so. Leave them all ``None`` to
@@ -324,6 +483,44 @@ class ScenarioConfig(_StrictModel):
         "umap",
     ] = "none"
     reduce_dim: int = 0
+
+    # ── Ordinal confidence temperature (S1) ───────────────────────────────
+    confidence_temperature: float | Literal["auto"] = "auto"
+    """Softmax temperature for the S1 unsupervised ordinal confidence signal.
+
+    ``"auto"`` (default) scales it to the median inter-centroid distance so
+    confidences spread across ``[1/C, 1]`` instead of saturating at ``1.0``
+    when clusters are well separated (e.g. after a UMAP reduction) — which is
+    what makes the column rankable instead of a column of ties. A positive
+    float pins an explicit temperature (``1.0`` = the raw softmax-peak,
+    pre-rescaling behavior)."""
+
+    # ── Confidence calibration + abstain ──────────────────────────────────
+    calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
+    # ── LLM consolidation of the low-confidence tail ──────────────────────
+    consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
+
+    @model_validator(mode="after")
+    def _check_confidence_temperature(self) -> ScenarioConfig:
+        t = self.confidence_temperature
+        # Caught here rather than in ``cluster_confidence`` so a bad value is a
+        # config error up front, not a failure partway through a long run.
+        if not isinstance(t, str) and t <= 0.0:
+            raise ValueError(f"confidence_temperature must be > 0 or 'auto'; got {t}.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_name_prototype_blend(self) -> ScenarioConfig:
+        a = self.name_prototype_blend
+        if a is not None and not (0.0 <= a <= 1.0):
+            raise ValueError(f"name_prototype_blend must be in [0, 1]; got {a}.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_pooling_pages(self) -> ScenarioConfig:
+        if self.pooling_pages < 1:
+            raise ValueError(f"pooling_pages must be >= 1; got {self.pooling_pages}.")
+        return self
 
 
 # ── Corpus ────────────────────────────────────────────────────────────────

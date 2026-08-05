@@ -41,8 +41,17 @@ DocumentDataset
 ```
 
 - **Encoders** (`clustering.encoders`) — text: `st_minilm`, `e5`, `bge`,
-  `gte`, `stella`, `jina`; image: `dit`, `vit`, `donut`;
+  `gte`, `stella`, `jina`, `gemini`; image: `dit`, `vit`, `donut`;
   multimodal: `qwen_vl`, `qwen3_vl_embedding`; plus `dummy` for tests.
+  All but `gemini` run locally. `gemini` calls a hosted embedding API, so it
+  needs a key (`GEMINI_API_KEY`), bills per token, and puts a network
+  round-trip on the critical path — one request per `extra.batch_size`
+  documents, retried with backoff on 429s and 5xx. It also cuts each document
+  to roughly `4 × max_length` characters: the model documents a 2048-token
+  limit but accepts more, so choosing the window here is what makes a run
+  reproducible and its cost predictable. Budget for it before pointing it at a
+  corpus, and leave the embedding cache on (`Config.cache_dir`) so a re-run
+  doesn't pay twice.
 - **Fusion** (`clustering.fusion`) — `none`, `concat_norm`, `late_concat`,
   `cross_attention`, `gated`.
 - **Manifolds** (`clustering.manifolds`) — `euclidean`, `spherical`,
@@ -102,6 +111,11 @@ A record carries the document's id, an optional ground-truth label (use
 (empty string if you don't have it yet), and an optional thumbnail path.
 Subclass `DocumentDataset` and implement `__len__` / `__getitem__`:
 
+> If your documents are already in a DGML workspace, don't write this —
+> `dgml_core.dataset.WorkspaceFileDataset` reads the page renders and page
+> text `dgml file add` produced. The example below is for documents that
+> live outside a workspace.
+
 ```python
 from pathlib import Path
 from PIL import Image
@@ -126,7 +140,7 @@ class FolderDataset(DocumentDataset):
             doc_id=doc_id,
             label=self.labels.get(doc_id),       # None when unlabeled
             image=Image.open(path).convert("RGB"),
-            text="",                              # fill in once OCR runs
+            text="",                              # image-only run; see below
             thumbnail_path=None,
         )
 
@@ -134,11 +148,16 @@ class FolderDataset(DocumentDataset):
 my_dataset = FolderDataset(Path("./pages"))
 ```
 
-For PDFs, render the first page to a PIL image inside `__getitem__`
-(Ghostscript via the workspace's PDF tooling, or `pdf2image` from the
-`dgml[generation]` extra). Keep `__getitem__` lazy — the pipeline reads
-records in batches, so loading everything up front wastes memory at the
-low-thousand-document scale this package targets.
+`text=""` only works for a run whose text encoder is unused — with any
+text encoder configured, every record needs real text, and a
+corpus-fitted one (the `tfidf` default in `dgml_core`) needs it under the
+same view it was fitted on.
+
+For PDFs, render the first page to a PIL image inside `__getitem__` —
+Ghostscript, via `dgml_core.pages.render_pages`, which is what the
+workspace itself uses. Keep `__getitem__` lazy: the pipeline reads records in batches, so
+loading everything up front wastes memory at the low-thousand-document
+scale this package targets.
 
 For S3 / S5, build a second dataset the same way containing your
 labeled support examples (every record must have a non-`None` `label`)

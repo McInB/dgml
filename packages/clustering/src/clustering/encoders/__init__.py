@@ -26,6 +26,7 @@ from __future__ import annotations
 # st_minilm, e5, bge, gte, stella, jina.
 from clustering.encoders import (
     dummy,  # noqa: F401  (registers "dummy")
+    gemini,  # noqa: F401  (registers "gemini")
     image,  # noqa: F401  (registers "dit", "vit", "donut")
     lexical,  # noqa: F401  (registers "tfidf")
     qwen3_vl_embedding,  # noqa: F401  (registers "qwen3_vl_embedding")

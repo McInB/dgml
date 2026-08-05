@@ -87,6 +87,20 @@ class LLMClusteringResult:
     :func:`dgml_core.clustering.clustering` flow can create the DocSet
     directly instead of issuing a second naming call.
 
+    ``confidences`` maps each successfully-grouped ``file_id`` to the model's
+    *self-reported* confidence that the grouping is right, in ``[0, 1]``, or
+    ``None`` when the model omitted it. Confidence is asked for per group, and
+    every member of a group inherits it: the model is judging whether these
+    documents are the same type, which is a property of the group, not of one
+    file within it. This fills in the ``confidence`` column the embedding path
+    already carries on
+    :class:`~dgml_core.run_clustering.DocPrediction`, which the LLM method has
+    so far reported as all-``None``.
+
+    It is an ordinal self-report, not a calibrated probability — usable for
+    ranking which groups to review first, not as a threshold. It is free: the
+    field rides along in the single call that was already being made.
+
     ``failed_file_ids`` lists files that were not placed in any cluster:
     those with no rendered page image, those over the ``max_files`` cap, and
     any the model omitted from every group.
@@ -95,6 +109,7 @@ class LLMClusteringResult:
     clusters: dict[str, str]
     proposals: dict[str, ClassificationDecision] = field(default_factory=dict)
     failed_file_ids: list[str] = field(default_factory=list)
+    confidences: dict[str, float | None] = field(default_factory=dict)
 
 
 def llm_cluster_files(
@@ -171,6 +186,7 @@ def llm_cluster_files(
     llm_config = LLMConfig(
         model=config.model,
         api_key=api_key,
+        api_base=config.api_base,
         max_tokens=None,
         # Greedy decoding: clustering should be as reproducible as possible, so
         # the same corpus yields the same partition run-to-run. Without this the
@@ -217,6 +233,7 @@ def _assemble_result(
     # model that answers with "1" / "doc1" / "Document 1" still resolves.
     by_number = {label.split("_", 1)[1]: fid for label, fid in labels.items()}
     clusters: dict[str, str] = {}
+    confidences: dict[str, float | None] = {}
     proposals: dict[str, ClassificationDecision] = {}
     assigned: set[str] = set()
     new_index = 0
@@ -249,12 +266,14 @@ def _assemble_result(
             decision = _new_group_decision(group)
             cluster_name = f"unknown_{new_index}"
 
+        group_conf = _group_confidence(group)
         committed = 0
         for member in members:
             fid = _resolve_member(member, labels, by_number)
             if fid is None or fid in assigned:
                 continue
             clusters[fid] = cluster_name
+            confidences[fid] = group_conf
             assigned.add(fid)
             committed += 1
 
@@ -280,7 +299,36 @@ def _assemble_result(
     for fid in pre_failed:
         if fid not in failed:
             failed.append(fid)
-    return LLMClusteringResult(clusters=clusters, proposals=proposals, failed_file_ids=failed)
+    return LLMClusteringResult(
+        clusters=clusters,
+        proposals=proposals,
+        failed_file_ids=failed,
+        confidences=confidences,
+    )
+
+
+def _group_confidence(group: dict[str, Any]) -> float | None:
+    """The model's self-reported confidence for one group, or ``None``.
+
+    Accepts any number in ``[0, 1]``, including a bare int (models routinely
+    answer a flat ``1`` rather than ``1.0``), and clamps out-of-range values
+    rather than discarding them — a model that says ``1.5`` is expressing
+    certainty, not garbage.
+
+    Returns ``None`` for a missing, non-numeric, or NaN value. The field is
+    optional in the tool schema and lite models often omit it; ``None`` says
+    "no signal", which is honest, where a substituted default would put a
+    number downstream consumers would read as a judgement.
+    """
+    raw = group.get("confidence")
+    # ``bool`` is an ``int`` subclass, so exclude it explicitly — otherwise a
+    # model answering ``true`` would be recorded as full confidence.
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    if value != value:  # NaN, which would poison every comparison downstream
+        return None
+    return max(0.0, min(1.0, value))
 
 
 def _resolve_member(member: Any, labels: dict[str, str], by_number: dict[str, str]) -> str | None:
@@ -434,6 +482,18 @@ def _group_documents_tool(docsets: list[DocSet]) -> dict[str, Any]:
             "description": (
                 "For a NEW document type: 3-7 concrete, type-discriminating "
                 "questions answerable from the first pages."
+            ),
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": (
+                "How confident you are, from 0.0 to 1.0, that these documents "
+                "really are the same document type and belong together (and, "
+                "when assigning to an existing DocSet, that they match it). "
+                "Use low values for mixed or borderline groups so they can be "
+                "reviewed first."
             ),
         },
     }

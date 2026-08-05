@@ -28,10 +28,10 @@ The workspace root is picked in this order:
 
 Setup — the minimum is a **single** command:
 
-1. `dgml workspace create [path] --organization <org>` — creates the workspace (`docsets/` + `files/`), records its identity in `workspace.json`, and (if no shared `local_config.json` exists yet) seeds one from the bundled template and copies it to `config.json`. The optional positional `path` is where to create it (`dgml workspace create ./ws …`); omit it to use the resolved root (global `--workspace` → `$DGML_HOME` → `./dgml-workspace`). `--organization` is **required** and is embedded in this workspace's docset namespace URIs (`http://dgml.io/<org>/<DocSetSlug>`); pass an optional `--name` for a human-readable label (defaults to the workspace directory name). When it seeds the config, the response carries `local_config_created: true` and a `next_action` telling you to edit the models/OCR endpoint (there are **no** default models — an unconfigured model is a hard error, never a silent paid call).
-2. `dgml init` (optional, run first) — only when you want to review/edit the shared `local_config.json` **before** creating any workspace. It creates the peer `local_config.json` from the template and nothing else.
+1. `dgml init [--provider <anthropic|google|mixed>]` — **run once per machine.** Writes the user-level `~/.config/dgml/config.toml` with a `[models]` block. Omit `--provider` to auto-detect from the API-key env vars that are set (`ANTHROPIC_API_KEY` / `GEMINI_API_KEY`); pass `--force` to overwrite an existing file (backs it up first). There are **no** default models — an unconfigured model is a hard error, never a silent paid call.
+2. `dgml workspace create [path] --organization <org>` — creates the workspace (`docsets/` + `files/`), records its identity in `workspace.json`. It does **not** touch the user config; if the config is missing it still creates the workspace and warns on stderr to run `dgml init`. The optional positional `path` is where to create it (`dgml workspace create ./ws …`); omit it to use the resolved root (global `--workspace` → `$DGML_HOME` → `./dgml-workspace`). `--organization` is **required** and is embedded in this workspace's docset namespace URIs (`http://dgml.io/<org>/<DocSetSlug>`); pass an optional `--name` for a human-readable label.
 
-Configure once, create many: sibling workspaces reuse the same `local_config.json`. After editing it, re-run `dgml workspace create --organization <org> --force` to re-sync it into an existing workspace. Any command other than `init` / `workspace create` on an uninitialized workspace fails with `WORKSPACE_NOT_INITIALIZED`.
+Configure once per machine: every workspace inherits `~/.config/dgml/config.toml`. Models are set via the `[models]` tiers (`light`/`standard`/`advanced`/`expert`); per-task sections override a tier. A workspace can override per key via its own `<workspace>/config.toml`, and env vars (`DGML_MODELS__ADVANCED=…`) override on top. Any command other than `init` / `workspace create` on an uninitialized workspace fails with `WORKSPACE_NOT_INITIALIZED`.
 
 ## Output contract — parse it with `jq`
 
@@ -62,7 +62,7 @@ uv run dgml docset add-file "$fid" --docset "$ds"
 ### One-shot: add a PDF and let an LLM pick (or create) its DocSet
 
 When the user has the `classification` section configured in
-`<workspace>/config.json`, `--auto-classify` replaces the three-step
+`<workspace>/config.toml`, `--auto-classify` replaces the three-step
 add → choose-docset → assign dance with a single call. The CLI runs a vision LLM against the
 file's rendered page images, then either calls `docset add-file` against
 the best-fitting existing DocSet or creates a new DocSet and assigns
@@ -162,7 +162,7 @@ summing to `total`) is the quick health read; report it to the user.
 
 Variants:
 - **Add to an existing DocSet:** skip the `docset create` step; pass its known ID as `$ds`. Find it with `uv run dgml docset list | jq -r '.docsets[] | select(.name=="…") | .id'`.
-- **Auto-route heterogeneous PDFs into DocSets**: drop the `docset create` step and the `docset add-file` loop; pass `--auto-classify` to `file add` instead. Each file lands in the best-fitting existing DocSet, or in a new one the LLM proposes — and DocSets created mid-run are visible to later files in the same batch, so similar PDFs cluster. Requires `classification` config in `<workspace>/config.json`; see the one-shot example above. Read each file's `.results[].classification` block for the outcome.
+- **Auto-route heterogeneous PDFs into DocSets**: drop the `docset create` step and the `docset add-file` loop; pass `--auto-classify` to `file add` instead. Each file lands in the best-fitting existing DocSet, or in a new one the LLM proposes — and DocSets created mid-run are visible to later files in the same batch, so similar PDFs cluster. Requires `classification` config in `<workspace>/config.toml`; see the one-shot example above. Read each file's `.results[].classification` block for the outcome.
 - **Recurse into subdirectories:** add `--recursive`.
 - **Hidden errors:** a PDF that fails to parse, render, or extract digital text still produces an entry — `soft_failed` (the `page_*`/`text_extraction_error` fields are set on its `file` entry) or `hard_failed` (the entry has an `error` object and no `file`). `dgml check` afterward is the authoritative whole-workspace health signal.
 
@@ -186,14 +186,14 @@ find "$DIR" -type f -iname '*.pdf' -print0 |
 
 ### Office documents (docx/xlsx)
 
-`file add` accepts not just `.pdf` but convertible sources — `.docx`/`.doc`/`.xlsx`/`.xls` — **when a converter is configured** for that format family in `<workspace>/config.json`. The source is converted to PDF at add time, then ingested exactly like a PDF (same `page_images/`, `page_text/`, generation). With no converter configured for a non-PDF format, the add fails with `UNSUPPORTED_FILE_TYPE` — there is no default. Ready-made converters ship in the `translators-pdf` package (LibreOffice, Aspose.Words, an xlsx island-renderer, a generic command runner); or point a family at your own class. Minimal config:
+`file add` accepts not just `.pdf` but convertible sources — `.docx`/`.doc`/`.xlsx`/`.xls` — **when a converter is configured** for that format family in `<workspace>/config.toml`. The source is converted to PDF at add time, then ingested exactly like a PDF (same `page_images/`, `page_text/`, generation). With no converter configured for a non-PDF format, the add fails with `UNSUPPORTED_FILE_TYPE` — there is no default. Ready-made converters ship in the `translators-pdf` package (LibreOffice, Aspose.Words, an xlsx island-renderer, a generic command runner); or point a family at your own class. Minimal config:
 
-```jsonc
-// <workspace>/config.json
-{ "conversion": {
-    "docx": { "provider": "translators_pdf.libreoffice:LibreOfficeConverter" },
-    "xlsx": { "provider": "translators_pdf.xlsx:XlsxIslandsConverter" }
-} }
+```toml
+# <workspace>/config.toml
+[conversion.docx]
+provider = "translators_pdf.libreoffice:LibreOfficeConverter"
+[conversion.xlsx]
+provider = "translators_pdf.xlsx:XlsxIslandsConverter"
 ```
 
 Install the providers you reference: `pip install translators-pdf` (LibreOffice needs `soffice` on PATH; `pip install translators-pdf[xlsx]` for the xlsx renderer). A convertible source that can't be converted (missing binary/SDK) is a *soft* fail — the File record is created with `conversion_error` set, like `page_render_error`. See [conversion.md](../../../docs/conversion.md).
@@ -204,22 +204,19 @@ Install the providers you reference: `pip install translators-pdf` (LibreOffice 
 
 A PDF with no extractable digital text (e.g. a scan) still gets a File record — the failure is *soft*. The response payload has `text_extraction_error` set, a permanent error is recorded, and `dgml check` reports `text_extraction_failed_permanent` until `--retry-errors` clears it. Always look at `text_extraction_error` after `file add`, the same way you look at `page_render_error`.
 
-`--text-mode ocr` runs the cloud provider configured in `<workspace>/config.json` (Azure Document Intelligence or AWS Textract). Requires the corresponding extra installed: `pip install dgml[azure]` or `pip install dgml[aws]`. Without a config the command fails with `OCR_CONFIG_MISSING` before any record is created. See [storage-layout.md](../../../docs/storage-layout.md) for the config schema. Secrets live in env vars, never in `config.json`.
+`--text-mode ocr` runs the cloud provider configured in `<workspace>/config.toml` (Azure Document Intelligence or AWS Textract). Requires the corresponding extra installed: `pip install dgml[azure]` or `pip install dgml[aws]`. Without a config the command fails with `OCR_CONFIG_MISSING` before any record is created. See [storage-layout.md](../../../docs/storage-layout.md) for the config schema. Secrets live in env vars, never in `config.toml`.
 
-`--text-mode hybrid` runs digital extraction and OCR per page, then merges them by grouping words that cover the same region into overlap clusters (boxes overlap on IoU > 0.5 *or* one box mostly contained in the other, so split/merge tokenization resolves as a unit). Each cluster is resolved as a whole: OCR-only clusters are kept; digital-only clusters are assumed invisible to the human eye (hidden form layers, white-on-white, off-page text) and **dropped**; mixed clusters compare the two sides' concatenated text by dash-normalized Levenshtein distance — if they agree (distance ≤ 2) **digital wins** (its characters come straight from the PDF font, which is more reliable than OCR even when OCR's tokenization is finer); if they disagree OCR wins as the authority on what's visible. A page whose digital text is mostly unresolved glyphs (pdfminer `(cid:N)` sentinels) falls back to OCR entirely. Default is silent — add the global `--verbose` flag (`uv run dgml --verbose file add … --text-mode hybrid`) to surface per-page warnings and the merge summary on stderr. Needs the same `ocr` workspace config as `--text-mode ocr` (validated up front — missing config returns `OCR_CONFIG_MISSING` before any record is created). Use it when neither pure digital nor pure OCR is good enough on its own (e.g. PDFs with embedded text plus scanned form fields). Optionally, an LLM can make the per-cluster merge decision instead of the Levenshtein heuristic — add a `text_extraction` section to `config.json` (e.g. a local Ollama model); see [storage-layout.md](../../../docs/storage-layout.md). It's opt-in, and any LLM failure falls back to the heuristic per page.
+`--text-mode hybrid` runs digital extraction and OCR per page, then merges them by grouping words that cover the same region into overlap clusters (boxes overlap on IoU > 0.5 *or* one box mostly contained in the other, so split/merge tokenization resolves as a unit). Each cluster is resolved as a whole: OCR-only clusters are kept; digital-only clusters are assumed invisible to the human eye (hidden form layers, white-on-white, off-page text) and **dropped**; mixed clusters compare the two sides' concatenated text by dash-normalized Levenshtein distance — if they agree (distance ≤ 2) **digital wins** (its characters come straight from the PDF font, which is more reliable than OCR even when OCR's tokenization is finer); if they disagree OCR wins as the authority on what's visible. A page whose digital text is mostly unresolved glyphs (pdfminer `(cid:N)` sentinels) falls back to OCR entirely. Default is silent — add the global `--verbose` flag (`uv run dgml --verbose file add … --text-mode hybrid`) to surface per-page warnings and the merge summary on stderr. Needs the same `ocr` workspace config as `--text-mode ocr` (validated up front — missing config returns `OCR_CONFIG_MISSING` before any record is created). Use it when neither pure digital nor pure OCR is good enough on its own (e.g. PDFs with embedded text plus scanned form fields). Optionally, an LLM can make the per-cluster merge decision instead of the Levenshtein heuristic — set `enabled = true` in the `text_extraction` section of `config.toml` (e.g. a local Ollama model); see [storage-layout.md](../../../docs/storage-layout.md). It's opt-in (the section ships with `enabled = false`), and any LLM failure falls back to the heuristic per page.
 
 ### OCR setup recipe
 
 ```bash
 # One-time per workspace: write the provider config.
-cat > "$DGML_HOME/config.json" <<'EOF'
-{
-  "ocr": {
-    "provider": "azure",
-    "endpoint": "https://my-resource.cognitiveservices.azure.com/",
-    "api_key_env": "AZURE_DOCINTEL_KEY"
-  }
-}
+cat > "$DGML_HOME/config.toml" <<'EOF'
+[ocr]
+provider = "azure"
+endpoint = "https://my-resource.cognitiveservices.azure.com/"
+api_key_env = "AZURE_DOCINTEL_KEY"
 EOF
 
 # Once per shell session: export the secret.
@@ -249,13 +246,15 @@ semantic-labeling call assigns concept tags across all of the docset's
 documents at once (`generation.label_model`), and the result is rendered
 deterministically into namespaced `dg:chunk` XML. The labeling vocabulary
 (the "roster") is planned automatically from the documents, or pinned up
-front with `--schema-path` (see below). There is no separate transform
-pass. The pipeline is part of the base `dgml` install and reuses the
-workspace's pre-rendered `page_images/`.
+front with `--schema-path` (see below). Unseeded runs are staged: the largest
+documents label first (a pilot) and their observed evidence — verbatim
+examples, kinds, hierarchy — confirms the vocabulary the rest of the batch
+labels against. There is no separate transform pass. The pipeline is part of
+the base `dgml` install and reuses the workspace's pre-rendered `page_images/`.
 
 **Choose the models — config only, no flags.** The models are not CLI flags:
 `generate` reads them solely from the `generation` section of
-`<workspace>/config.json`, so each is one explicit, visible choice per
+`<workspace>/config.toml`, so each is one explicit, visible choice per
 workspace (matching every other model-consuming command). Both are **required**:
 `model` (per-page transcription) and `label_model` (the
 single batch-wide labeling call — a stronger model here is cheap). Without a
@@ -267,9 +266,9 @@ when observable in the source — `dg:style` (inline CSS for bold/italic/size/
 color/uppercase). For `--text-mode digital`/`hybrid` the style facts come
 deterministically from the PDF glyphs (free, no LLM). For `--text-mode ocr`
 there are no font facts, so `dg:style` is empty unless the workspace opts
-into the image-based path by adding a `style` section to
-`config.json` (`{"style": {"model": "<vision model>"}}` — its presence is the
-switch), which has that model read the page images to infer the same styles
+into the image-based path by setting `enabled = true` in the `style` section of
+`config.toml` (`dgml init` writes `[style] enabled = false`; `model` is optional
+and defaults to the `light` tier), which has that model read the page images to infer the same styles
 **plus `text-align`** (off by default; honored only for OCR files). See
 [storage-layout.md](../../../docs/storage-layout.md).
 
@@ -281,18 +280,15 @@ in config, add all files to one docset, then generate (no per-run flags):
 DIR=/path/to/pdfs
 uv run dgml workspace create --organization Acme
 
-# `workspace create` already seeds config.json (including generation.model /
-# label_model) from the shared local_config.json template. Adjust the models to
-# taste — a cheaper model for the bulk transcription, a stronger one for the
-# single batch-wide labeling call:
-cat > "${DGML_HOME:-./dgml-workspace}/config.json" <<'EOF'
-{
-  "generation": {
-    "model": "anthropic/claude-haiku-4-5",
-    "label_model": "anthropic/claude-sonnet-4-6",
-    "api_key_env": "ANTHROPIC_API_KEY"
-  }
-}
+# `workspace create` already wrote the user-level ~/.config/dgml/config.toml
+# with a [models] block (transcription ← standard tier, labeling ← advanced).
+# To override the models for THIS workspace only, drop a workspace config.toml
+# (it deep-merges over the user config):
+cat > "${DGML_HOME:-./dgml-workspace}/config.toml" <<'EOF'
+[generation]
+model = "anthropic/claude-haiku-4-5"
+label_model = "anthropic/claude-sonnet-4-6"
+api_key_env = "ANTHROPIC_API_KEY"
 EOF
 
 ds=$(uv run dgml docset create --name "Imported PDFs" | jq -r .id)
@@ -302,7 +298,7 @@ for fid in $(jq -r '.results[] | select(.file) | .file.id' <<<"$payload"); do
   uv run dgml docset add-file "$fid" --docset "$ds"
 done
 
-# Models come from config.json — there are no --model/--label-model flags.
+# Models come from config.toml — there are no --model/--label-model flags.
 uv run dgml docset generate "$ds"
 ```
 
@@ -312,11 +308,12 @@ prior run exported — `schema.json` (Schema v1: a `tags` map of concept name �
 `{role, kind, parent_role, …}`) or its RELAX NG Compact render `full-schema.rnc`
 (both land at the docset root; the `.rnc` is the human-friendly editing
 surface and reverses losslessly). The planning pass is skipped and that
-vocabulary is used as-is — its tag hierarchy (`parent_role`) also seeds
-entity-container grouping — and per-document labeling still extends it for
-roles it doesn't cover. Only these exported formats are accepted (not a flat
-`{concept: description}` mapping). The natural loop is "generate once,
-review/curate the schema, then reuse it":
+vocabulary is used as-is with full fidelity — role descriptions, curated
+examples, and kind all feed the labeling prompt, and the tag hierarchy
+(`parent_role`) also seeds entity-container grouping — and per-document
+labeling still extends it for roles it doesn't cover. Only these exported
+formats are accepted (not a flat `{concept: description}` mapping). The
+natural loop is "generate once, review/curate the schema, then reuse it":
 
 ```bash
 # 1) first run plans the vocabulary and exports it to docsets/<id>/schema.json
@@ -369,6 +366,22 @@ no `page_text/` is written but left ungrounded (the `outputs[]` entry has
 sidecar (match rates, largest ungrounded snippets) — `matched_token_pct`
 below the high 90s usually means generation dropped or paraphrased text.
 
+**Labeling failures are visible without `--verbose`.** A misconfigured
+`generation.label_model` is caught two ways. Before any transcription spend, a
+pre-flight check fails the whole run fast — `AUTH_ERROR` if the model's provider
+key is absent (unless `api_base` is set), `GENERATION_CONFIG_INVALID` for a
+malformed model string. A failure that slips past it at runtime (transient
+network error, or a well-formed but nonexistent model id) doesn't discard the
+transcription: the file still converts (`status: converted`, exit 0, unlabeled)
+and its `results[]` entry carries a `label_error: {code:
+"LABEL_MODEL_UNREACHABLE", message}`. So after a `generate`, check for it rather
+than assuming labeled output:
+
+```bash
+uv run dgml docset generate "$ds" \
+  | jq '.results[] | select(.label_error) | {source, label_error}'
+```
+
 **Resume on rerun.** If a file's per-(docset, file) `<stem>.dgml.xml`
 already holds a generated document tree, that file is skipped — re-invoking
 the same command after a crash only re-processes unfinished documents. When
@@ -379,9 +392,10 @@ generate builds its tree and carries the existing `dg:extraction` over
 
 **Growing a docset (add docs later, stay consistent).** Because existing files
 are skipped, adding a document and re-running generates only the new one — and
-by default it's labeled seeded with the docset's existing
-`cache/concept_roster.json`, so its tags stay consistent with the rest (no
-`--schema-path` needed). Every concept is emitted in the `docset:` vocabulary
+by default it's labeled seeded with the docset's own `schema.json` (full
+fidelity: descriptions, observed examples, kind, hierarchy; falls back to the
+flat `cache/concept_roster.json`), so its tags stay consistent with the rest
+(no `--schema-path` needed). Every concept is emitted in the `docset:` vocabulary
 namespace (`dg:` is framework-only), so growing the docset never flips a tag's
 prefix; an already-generated file is still re-rendered deterministically when
 its output otherwise changes as the docset's schema/roster grows (reported under
@@ -390,7 +404,7 @@ new docs in isolation instead.
 
 ```bash
 uv run dgml docset add-file "$ds" "$new_fid"
-uv run dgml docset generate "$ds"   # only the new file; reuses the docset roster
+uv run dgml docset generate "$ds"   # only the new file; reuses the docset schema
 ```
 
 **Output.** Like every other `dgml` command, `docset generate` emits a
@@ -436,7 +450,7 @@ uv run python scripts/ground.py --docset "$ds" [--file "$fid"] [--debug]
 
 Where `docset generate` transcribes a *whole* document, **extraction** pulls a
 defined set of fields and grounds each value to the page. It needs a `grounded`
-section in `<workspace>/config.json` (`schema_model`, `values_model`, optional
+section in `<workspace>/config.toml` (`schema_model`, `values_model`, optional
 API-key env vars) — the LLM is configurable like every other model-using
 command, with per-call `--schema-model` / `--values-model` overrides.
 
@@ -447,7 +461,10 @@ The workflow is generate-schema → extract → get-values:
 
 ```bash
 # 1) Propose a schema from sample PDFs (stored as extraction-schema.rnc). --from-file is
-#    repeatable; omit it to sample every file in the docset.
+#    repeatable; omit it to sample every file in the docset. The model picks an
+#    XSD datatype per leaf, so the generated RNC has typed leaves natively
+#    (xsd:date, xsd:decimal, xsd:integer, …) — dates/amounts/counts come back as
+#    typed dg:value at extraction, not bare text.
 uv run dgml extraction generate-schema "$ds" --from-file "$fid"
 
 #    …or set one yourself. set-schema accepts RNC *or* a grounded-field JSON
@@ -524,7 +541,7 @@ adds file assignments).
 Requires `pip install dgml[clustering]` (pulls in the `dgml-clustering`
 ML stack). Without it the command exits 1 with `MISSING_EXTRA`. The same
 setup as `--auto-classify` is needed whenever any cluster requires a new
-DocSet: a `classification` section in `<workspace>/config.json` and
+DocSet: a `classification` section in `<workspace>/config.toml` and
 `pip install dgml[classification]`. **Partial success is the contract** —
 once the command runs, exit code is always 0; per-cluster failures
 (missing config, LLM error) land in `failed_file_ids`. Always check that
@@ -548,15 +565,31 @@ fi
 
 Algorithm settings (encoders, fusion, manifold, training, scenario) default
 to the bundled config. To tune them, either add a `clustering` section to
-`<workspace>/config.json` (persistent, applies to every run) or pass a
+`<workspace>/config.toml` (persistent, applies to every run) or pass a
 one-off file with `--config PATH`. The `--config` file uses the same field
 schema and **replaces** the workspace section for that run — reach for it to
 A/B configs or drive a GPU encoder on a single run without editing
-`config.json`. A bad path exits 1 with `CLUSTERING_CONFIG_INVALID`.
+`config.toml`. A bad path exits 1 with `CLUSTERING_CONFIG_INVALID`.
 
 ```bash
-# Try a GPU-encoder config on one run without touching config.json
+# Try a GPU-encoder config on one run without touching config.toml
 uv run dgml cluster --config ./clustering_gpu.json
+```
+
+`--method` selects *how* documents are grouped, orthogonal to `--mode`
+(default `embedding`, the statistical pipeline). For a **very small corpus** —
+a handful of documents, where tf-idf/neighbor statistics have too little signal
+and clusters collapse into one bucket — use `--method llm`: it sends every
+document's first pages to the vision LLM in one call and lets it partition *and*
+name the groups (no embedding step, `--config` ignored). It needs the same
+`classification` config as `--auto-classify` (missing config ⇒ every file in
+`failed_file_ids`) and caps one call at 24 files. Prefer `--method auto` when
+the corpus size is unknown: it routes ≤ `--small-corpus-threshold` files
+(default 8) to the LLM and larger corpora to the embedding pipeline.
+
+```bash
+# Let DGML pick the engine by corpus size (LLM for tiny folders, embedding otherwise)
+uv run dgml cluster --method auto
 ```
 
 Sample payload:
@@ -750,7 +783,7 @@ uv run dgml discover "$fid" --docset "$ds" --filter All --samples 3 |
   specific filter (`Values`, `Sections`, `Density`, `Patterns`) to narrow
   down before staking.
 - Semantic filters (`Who`, `When`, `Amounts`, `Definitions`, `Rules`) call
-  the generation LLM configured in `<workspace>/config.json`.  If config is
+  the generation LLM configured in `<workspace>/config.toml`.  If config is
   absent or the call fails, the command warns on stderr and falls back to
   `All` — it does **not** hard-fail.
 - `depth_first` in each sample maps to `dgml node export --leaf <n>` and

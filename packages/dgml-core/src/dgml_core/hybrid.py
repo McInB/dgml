@@ -86,6 +86,7 @@ from typing import Any
 from .errors import TextExtractionFailed
 from .llm import LLMConfig, build_user_content, call
 from .ocr import OcrConfig, _write_page_json, extract_text_ocr
+from .pages import DEFAULT_DPI
 from .prompts import get as prompt
 from .storage import Workspace
 from .text_extraction import (
@@ -150,6 +151,7 @@ def extract_text_hybrid(
     config: OcrConfig,
     text_extraction_config: TextExtractionConfig | None = None,
     workspace: Workspace | None = None,
+    dpi: int = DEFAULT_DPI,
     verbose: bool = False,
     debug: bool = False,
 ) -> ExtractDigitalResult:
@@ -172,7 +174,12 @@ def extract_text_hybrid(
 
         digital_failed = False
         try:
-            extract_text_digital(pdf_path, digital_dir, file_id=file_id)
+            # ``dpi`` matters here and not on the OCR side: OCR reads the page
+            # images themselves, so its boxes are already in their pixel space,
+            # while the digital side converts from PDF points and needs to be
+            # told which space to land in. The per-region overlap merge below
+            # compares the two, so a mismatch would find no overlaps at all.
+            extract_text_digital(pdf_path, digital_dir, file_id=file_id, dpi=dpi)
         except TextExtractionFailed as exc:
             digital_failed = True
             if verbose:

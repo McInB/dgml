@@ -32,6 +32,7 @@ from dgml_core.storage import Workspace
 from .conftest import (
     _write_blank_pdf,
     _write_text_pdf,
+    dump_toml,
     needs_gs,
     write_classification_config,
 )
@@ -39,6 +40,11 @@ from .conftest import (
 
 def _ws_args(ws: Path) -> list[str]:
     return ["--workspace", str(ws)]
+
+
+def _write_ws_config(ws_root: Path, data: dict[str, Any]) -> None:
+    """Write ``<workspace>/config.toml`` (resolution layer 3) from a dict."""
+    Workspace(root=ws_root).config_path.write_text(dump_toml(data) + "\n", encoding="utf-8")
 
 
 def _init_ws(ws: Path) -> None:
@@ -49,9 +55,9 @@ def _init_ws(ws: Path) -> None:
     Workspace(root=ws.resolve()).init()
 
 
-def _dp(cluster_name: str, confidence: float | None = None) -> DocPrediction:
+def _dp(cluster_name: str, confidence: float | None = None, review: bool = False) -> DocPrediction:
     """Shorthand for a mocked ``run_clustering_detailed`` outcome."""
-    return DocPrediction(cluster_name=cluster_name, confidence=confidence)
+    return DocPrediction(cluster_name=cluster_name, confidence=confidence, review=review)
 
 
 def _read_stdout(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
@@ -64,73 +70,97 @@ def _read_stderr(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
     return json.loads(err)  # type: ignore[no-any-return]
 
 
-def test_init_creates_shared_local_config(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """`dgml init` is config-only: it creates the peer local_config.json and does
-    NOT create the workspace dirs or any workspace config.json. A second init is
-    a no-op."""
+def test_init_writes_user_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`dgml init` is config-only: it writes the user-level config.toml (with a
+    [models] block) and does NOT create the workspace dirs. A second init
+    without --force is a no-op."""
+    from dgml_core.storage import user_config_path
+
     ws = tmp_path / "ws"
     rc = main(_ws_args(ws) + ["init"])
     assert rc == 0
     payload = _read_stdout(capsys)
-    assert payload["local_config_created"] is True
-    assert payload["refreshed"] is False
+    assert payload["config_created"] is True
+    assert payload["forced"] is False
+    # Both dummy provider keys are set by the autouse fixture → auto-detect mixed.
+    assert payload["provider"] == "mixed"
+    assert set(payload["detected_keys"]) == {"ANTHROPIC_API_KEY", "GEMINI_API_KEY"}
     assert "next_action" in payload
-    local_config = tmp_path / "local_config.json"
-    assert Path(payload["local_config_path"]) == local_config
-    assert local_config.exists()
-    # No workspace was created.
+    cfg = user_config_path()
+    assert Path(payload["config_path"]) == cfg
+    assert "[models]" in cfg.read_text(encoding="utf-8")
+    # init is config-only: no workspace dirs.
     assert not (ws / "docsets").exists()
-    assert not (ws / "files").exists()
-    assert not (ws / "config.json").exists()
+    assert not (ws / "config.toml").exists()
 
-    # Second init is a no-op.
+    # Second init without --force is a no-op.
     rc = main(_ws_args(ws) + ["init"])
     assert rc == 0
-    assert _read_stdout(capsys)["local_config_created"] is False
+    assert _read_stdout(capsys)["config_created"] is False
 
 
-def test_init_refresh_overwrites_local_config(
+def test_init_provider_flag_forces_table(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    ws = tmp_path / "ws"
-    local_config = tmp_path / "local_config.json"
-    local_config.write_text("{}\n", encoding="utf-8")
+    from dgml_core.storage import user_config_path
 
-    rc = main(_ws_args(ws) + ["init", "--refresh"])
+    rc = main(_ws_args(tmp_path / "ws") + ["init", "--provider", "google"])
+    assert rc == 0
+    assert _read_stdout(capsys)["provider"] == "google"
+    assert "gemini/" in user_config_path().read_text(encoding="utf-8")
+
+
+def test_init_provider_without_force_does_not_clobber(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dgml_core.storage import user_config_path
+
+    ws = tmp_path / "ws"
+    main(_ws_args(ws) + ["init", "--provider", "anthropic"])
+    capsys.readouterr()
+    # Rerun with a different provider but no --force → no-op + a warning.
+    rc = main(_ws_args(ws) + ["init", "--provider", "google"])
     assert rc == 0
     payload = _read_stdout(capsys)
-    assert payload["refreshed"] is True
-    assert payload["local_config_created"] is False
-    # Overwritten from the bundled template (models restored), with a backup.
-    assert "classification" in local_config.read_text(encoding="utf-8")
-    assert (tmp_path / "local_config.json.bak").exists()
+    assert payload["config_created"] is False
+    assert "--force" in payload["next_action"]
+    assert "anthropic/" in user_config_path().read_text(encoding="utf-8")  # unchanged
 
 
-def test_workspace_create_from_local_config(
+def test_init_force_overwrites_with_backup(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`dgml workspace create` creates docsets/ + files/ and copies the peer
-    local_config.json (comments intact) to <workspace>/config.json. A second
-    run does not clobber; --force overwrites."""
+    from dgml_core.storage import user_config_path
+
     ws = tmp_path / "ws"
-    main(_ws_args(ws) + ["init"])  # seed the shared local_config.json
+    main(_ws_args(ws) + ["init", "--provider", "anthropic"])
+    capsys.readouterr()
+    rc = main(_ws_args(ws) + ["init", "--provider", "google", "--force"])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["forced"] is True
+    cfg = user_config_path()
+    assert "gemini/" in cfg.read_text(encoding="utf-8")
+    assert cfg.with_suffix(".toml.bak").exists()
+
+
+def test_workspace_create(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`workspace create` builds docsets/ + files/ + workspace.json. It does not
+    write a per-workspace config.toml (config is user-level now)."""
+    ws = tmp_path / "ws"
+    main(_ws_args(ws) + ["init"])  # write the user config first
     capsys.readouterr()
 
     rc = main(_ws_args(ws) + ["workspace", "create", "--organization", "Acme"])
     assert rc == 0
     payload = _read_stdout(capsys)
     assert payload["initialized"] is True
-    assert payload["config_written"] is True
     assert payload["organization"] == "Acme"
     assert payload["name"] == "ws"  # defaults to the workspace directory name
-    # local_config.json already existed (init ran), so create didn't seed it.
-    assert payload["local_config_created"] is False
-    assert Path(payload["config_path"]) == ws / "config.json"
+    assert payload["config_present"] is True  # user config existed (init ran)
     assert (ws / "docsets").is_dir()
     assert (ws / "files").is_dir()
-    # Identity was persisted for later namespace generation.
+    assert not (ws / "config.toml").exists()  # create writes no per-workspace config
     meta = json.loads((ws / "workspace.json").read_text(encoding="utf-8"))
     # workspace.json also carries the layout revision the workspace was written
     # against, so an older one can be upgraded in place on first use.
@@ -139,26 +169,11 @@ def test_workspace_create_from_local_config(
         "organization": "Acme",
         "schema_version": WORKSPACE_SCHEMA_VERSION,
     }
-    config_text = (ws / "config.json").read_text(encoding="utf-8")
-    assert "//" in config_text  # comments survived the verbatim copy
 
     # An explicit --name overrides the directory-name default.
     rc = main(_ws_args(ws) + ["workspace", "create", "--organization", "Acme", "--name", "My WS"])
     assert rc == 0
     assert _read_stdout(capsys)["name"] == "My WS"
-    assert ws.joinpath("workspace.json").read_text(encoding="utf-8")
-
-    # Second run does not clobber the existing config.json.
-    rc = main(_ws_args(ws) + ["workspace", "create", "--organization", "Acme"])
-    assert rc == 0
-    assert _read_stdout(capsys)["config_written"] is False
-
-    # --force re-syncs the shared config into this workspace.
-    (tmp_path / "local_config.json").write_text('{"grounded": {}}\n', encoding="utf-8")
-    rc = main(_ws_args(ws) + ["workspace", "create", "--organization", "Acme", "--force"])
-    assert rc == 0
-    assert _read_stdout(capsys)["config_written"] is True
-    assert (ws / "config.json").read_text(encoding="utf-8") == '{"grounded": {}}\n'
 
 
 def test_workspace_create_positional_path(
@@ -202,26 +217,29 @@ def test_workspace_create_requires_organization(
     assert exc.value.code != 0
 
 
-def test_workspace_create_without_prior_init_seeds_local_config(
+def test_workspace_create_without_prior_init_warns_but_succeeds(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`workspace create` with no peer local_config.json seeds it from the
-    bundled template (no prior `dgml init` needed), copies it to config.json,
-    creates the dirs, and tells the caller how to edit the config."""
+    """`workspace create` with no prior `dgml init` still creates the workspace
+    (never blocks) and does NOT create the user-level config — it warns on
+    stderr that credentials must be configured."""
+    from dgml_core.storage import user_config_path
+
     ws = tmp_path / "ws"
     rc = main(_ws_args(ws) + ["workspace", "create", "--organization", "Acme"])
     assert rc == 0
-    payload = _read_stdout(capsys)
-    assert payload["local_config_created"] is True
-    assert payload["config_written"] is True
-    assert payload["organization"] == "Acme"
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["config_present"] is False
     assert "next_action" in payload
-    # The shared local_config.json was created as a peer of the workspace.
-    assert (tmp_path / "local_config.json").exists()
+    # Workspace was created regardless.
     assert (ws / "docsets").is_dir()
-    assert (ws / "config.json").exists()
-    # It came from the bundled template (has the model placeholders).
-    assert "classification" in (ws / "config.json").read_text(encoding="utf-8")
+    assert (ws / "files").is_dir()
+    # The user config was NOT created by workspace create.
+    assert not user_config_path().exists()
+    # Warning always on stderr (no --verbose needed).
+    assert "no user-level config found" in captured.err
+    assert "dgml init" in captured.err
 
 
 def test_status_after_workspace_create(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -480,6 +498,36 @@ def test_file_add_text_mode_default_is_digital(
     assert summary["total_words"] >= 4
 
 
+def test_file_add_dpi_flag_is_recorded_and_used(
+    tmp_path: Path, text_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+
+    rc = main(_ws_args(ws) + ["file", "add", str(text_pdf), "--dpi", "150"])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["file"]["page_image_dpi"] == 150
+
+    # page_text/ boxes are in the render's pixel space, so the flag has to reach
+    # digital extraction too — not just the rasterizer.
+    text_dir = ws / "files" / payload["file"]["id"] / "page_text"
+    page = json.loads((text_dir / "page_1.json").read_text())
+    assert page["width"] == round(612 * 150 / 72)
+
+
+def test_file_add_rejects_nonpositive_dpi(tmp_path: Path, text_pdf: Path) -> None:
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    # An argparse usage error (exit 2), raised before the workspace is touched.
+    for bad in ("0", "-150", "notanumber"):
+        with pytest.raises(SystemExit) as exc:
+            main(_ws_args(ws) + ["file", "add", str(text_pdf), "--dpi", bad])
+        assert exc.value.code == 2
+    assert not list((ws / "files").iterdir())
+
+
 @needs_gs
 def test_file_add_conflict_errors_by_default(
     tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
@@ -524,7 +572,7 @@ def test_cluster_assigns_unassigned_files_to_docsets(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
 
     # Empty workspace: no unassigned files → no-op, no LLM or clusterer call.
@@ -576,8 +624,12 @@ def test_cluster_assigns_unassigned_files_to_docsets(
     assert payload["assignments"][fid] == {
         "docset": "Sample Documents",
         "confidence": None,
+        # A single naming attempt (the default) is not an agreement measurement.
+        "naming_confidence": None,
         "is_new": True,
+        "review": False,
     }
+    assert payload["review_queue"] == []
 
     # The new DocSet has the LLM-proposed name and description, and the
     # file is assigned to it.
@@ -605,6 +657,87 @@ def test_cluster_assigns_unassigned_files_to_docsets(
         assert payload["mode"] == "incremental"
         mock_completion.assert_not_called()
         mock_cluster.assert_not_called()
+
+
+@needs_gs
+def test_cluster_reports_confidence_for_a_new_docset(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file placed in a DocSet created this run still carries the clusterer's
+    confidence. Emergent clusters used to be hardcoded to `null` here; the
+    fresh-clustering path scores documents against the cluster centroids, so
+    that score has to survive into `assignments`."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    write_classification_config(
+        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+    )
+    main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
+    fid = _read_stdout(capsys)["file"]["id"]
+
+    response = _tool_response(
+        "create_new_docset",
+        {"name": "Invoices", "description": "billing docs", "key_questions": ["Total?"]},
+    )
+    with (
+        patch("litellm.completion", return_value=response),
+        patch(
+            "dgml_core.clustering.run_clustering_detailed",
+            return_value={fid: _dp("unknown_0", 0.42)},
+        ),
+    ):
+        rc = main(_ws_args(ws) + ["cluster"])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["assignments"][fid] == {
+        "docset": "Invoices",
+        "confidence": 0.42,
+        # Grouping confidence and naming agreement are independent: the cluster
+        # scored 0.42 against its own centroid, while a single naming attempt
+        # (the default) is not an agreement measurement at all.
+        "naming_confidence": None,
+        "is_new": True,
+        "review": False,
+    }
+    # Nothing was asked to be reviewed, so the queue is present but empty —
+    # callers can read the key unconditionally.
+    assert payload["review_queue"] == []
+
+
+@needs_gs
+def test_cluster_flags_a_low_confidence_assignment_for_review(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A flagged assignment still lands in its DocSet — `review` is advisory, not
+    a veto — and the file id also shows up in the top-level `review_queue` so a
+    caller doesn't have to scan every assignment to find the ones to confirm."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    write_classification_config(
+        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+    )
+    main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
+    fid = _read_stdout(capsys)["file"]["id"]
+
+    response = _tool_response(
+        "create_new_docset",
+        {"name": "Invoices", "description": "billing docs", "key_questions": ["Total?"]},
+    )
+    with (
+        patch("litellm.completion", return_value=response),
+        patch(
+            "dgml_core.clustering.run_clustering_detailed",
+            return_value={fid: _dp("unknown_0", 0.11, review=True)},
+        ),
+    ):
+        rc = main(_ws_args(ws) + ["cluster"])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["assignments"][fid]["review"] is True
+    assert payload["assignments"][fid]["docset"] == "Invoices"
+    assert payload["review_queue"] == [fid]
 
 
 @needs_gs
@@ -647,7 +780,7 @@ def test_cluster_config_flag_passes_overrides_to_run_clustering(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
     main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
     fid = _read_stdout(capsys)["file"]["id"]
@@ -683,7 +816,7 @@ def test_cluster_config_flag_missing_file_errors(
     ws = tmp_path / "ws"
     _init_ws(ws)
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
     main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
     capsys.readouterr()
@@ -717,7 +850,7 @@ def test_cluster_config_preset_name_passes_preset_overrides(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
     main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
     fid = _read_stdout(capsys)["file"]["id"]
@@ -773,7 +906,7 @@ def test_cluster_method_llm_routes_to_llm_partitioner(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
     main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
     fid = _read_stdout(capsys)["file"]["id"]
@@ -805,7 +938,7 @@ def test_cluster_method_auto_small_corpus_uses_llm(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
     main(_ws_args(ws) + ["file", "add", str(sample_pdf)])
     fid = _read_stdout(capsys)["file"]["id"]
@@ -839,7 +972,7 @@ def test_cluster_partial_success_when_llm_fails(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
 
     # Existing DocSet "Foo" — mock run_clustering to put one file in "Foo"
@@ -947,7 +1080,7 @@ def test_file_add_auto_classify_creates_new_docset(
     # the LLM is forced to call create_new_docset.
 
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
 
     new_questions = [
@@ -976,7 +1109,7 @@ def test_file_add_auto_classify_creates_new_docset(
     assert cls["docset_name"] == "Receipts"
     assert cls["docset_key_questions"] == new_questions
     assert cls["error"] is None
-    assert cls["model"] == "gemini/gemini-3.1-flash-lite"
+    assert cls["model"] == "gemini/gemini-2.5-flash-lite"
 
     # Persisted: the created DocSet's record carries the key_questions
     # for future classification calls to read.
@@ -1020,7 +1153,7 @@ def test_file_add_auto_classify_assigns_existing_docset(
     ]
 
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
     response = _tool_response("assign_to_existing_docset", {"docset_id": existing_id})
 
@@ -1068,7 +1201,7 @@ def test_file_add_auto_classify_soft_fails_when_llm_errors(
     capsys.readouterr()
 
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
 
     with patch("litellm.completion", side_effect=RuntimeError("API down")):
@@ -1095,7 +1228,7 @@ def test_file_add_auto_classify_skipped_on_duplicate(
     capsys.readouterr()
 
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
 
     with patch("litellm.completion") as mock_completion:
@@ -1139,20 +1272,18 @@ def _init_with_docset(ws: Path, capsys: pytest.CaptureFixture[str], name: str = 
 
     Also writes a ``generation`` config section — ``docset generate`` has no
     code default and no model flags, so it reads both ``model``
-    and ``label_model`` (both required) from config.json.
+    and ``label_model`` (both required) from config.toml.
     """
     _init_ws(ws)
     capsys.readouterr()
-    Workspace(root=ws).config_path.write_text(
-        json.dumps(
-            {
-                "generation": {
-                    "model": "anthropic/claude-haiku-4-5",
-                    "label_model": "anthropic/claude-sonnet-4-6",
-                }
+    _write_ws_config(
+        ws,
+        {
+            "generation": {
+                "model": "anthropic/claude-haiku-4-5",
+                "label_model": "anthropic/claude-sonnet-4-6",
             }
-        ),
-        encoding="utf-8",
+        },
     )
     main(_ws_args(ws) + ["docset", "create", "--name", name])
     return str(_read_stdout(capsys)["id"])
@@ -1196,8 +1327,18 @@ def test_docset_generate_rejects_malformed_style_config(
     fid = _read_stdout(capsys)["file"]["id"]
     main(_ws_args(ws) + ["docset", "add-file", fid, "--docset", did])
     capsys.readouterr()
-    # `style` present but no model -> invalid (presence of the section is the switch).
-    (ws / "config.json").write_text(json.dumps({"style": {"max_tokens": 100}}), encoding="utf-8")
+    # `style` present but no model and no [models].light tier -> invalid
+    # (presence of the section is the switch).
+    _write_ws_config(
+        ws,
+        {
+            "generation": {
+                "model": "anthropic/claude-haiku-4-5",
+                "label_model": "anthropic/claude-sonnet-4-6",
+            },
+            "style": {"enabled": True, "max_tokens": 100},
+        },
+    )
 
     rc = main(_ws_args(ws) + ["docset", "generate", did])
     assert rc == 1
@@ -1221,9 +1362,15 @@ def test_docset_generate_rejects_unset_style_api_key_env(
     main(_ws_args(ws) + ["docset", "add-file", fid, "--docset", did])
     capsys.readouterr()
     monkeypatch.delenv("DGML_STYLE_KEY_MISSING", raising=False)
-    (ws / "config.json").write_text(
-        json.dumps({"style": {"model": "m", "api_key_env": "DGML_STYLE_KEY_MISSING"}}),
-        encoding="utf-8",
+    _write_ws_config(
+        ws,
+        {
+            "generation": {
+                "model": "anthropic/claude-haiku-4-5",
+                "label_model": "anthropic/claude-sonnet-4-6",
+            },
+            "style": {"enabled": True, "model": "m", "api_key_env": "DGML_STYLE_KEY_MISSING"},
+        },
     )
 
     rc = main(_ws_args(ws) + ["docset", "generate", did])
@@ -1280,7 +1427,7 @@ def test_docset_generate_happy_path(
     did = _init_with_docset(ws, capsys)
     # Models come from config — set a distinct label_model to check it threads.
     Workspace(root=ws).config_path.write_text(
-        json.dumps(
+        dump_toml(
             {
                 "generation": {
                     "model": "anthropic/claude-haiku-4-5",
@@ -1378,7 +1525,7 @@ def test_docset_generate_cache_dir_and_debug_threading(
 
 def test_docset_generate_has_no_model_flags() -> None:
     """The model is config-only — there are no --model / --label-model flags, so
-    which model runs is a single per-workspace choice (config.json), matching
+    which model runs is a single per-workspace choice (config.toml), matching
     every other model-consuming command. Passing the removed flags is rejected."""
     from dgml.cli import _build_parser
 
@@ -1395,7 +1542,7 @@ def test_docset_generate_has_no_model_flags() -> None:
 def test_docset_generate_missing_config_errors(
     tmp_path: Path, text_pdf: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """No 'generation' section in config.json → the run fails fast with
+    """No 'generation' section in config.toml → the run fails fast with
     GENERATION_CONFIG_MISSING. There is no code default and no flag override, so
     which model runs is never silent."""
     ws = tmp_path / "ws"
@@ -1421,7 +1568,7 @@ def test_docset_generate_models_from_config(
     ws = tmp_path / "ws"
     did = _init_with_docset(ws, capsys)
     Workspace(root=ws).config_path.write_text(
-        json.dumps(
+        dump_toml(
             {
                 "generation": {
                     "model": "anthropic/claude-haiku-4-5",
@@ -2033,7 +2180,7 @@ def test_file_add_directory_auto_classify_amortizes_docsets(
     _init_ws(ws)
     capsys.readouterr()
     write_classification_config(
-        Workspace(root=ws), {"model": "gemini/gemini-3.1-flash-lite", "max_pages": 1}
+        Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite", "max_pages": 1}
     )
 
     src = tmp_path / "pdfs"
@@ -2202,12 +2349,12 @@ def _generate_with_xml(
         on_output("contract.pdf", xml)
         return {}
 
-    # generate reads the models from config.json's 'generation' section (no flags).
+    # generate reads the models from config.toml's 'generation' section (no flags).
     # Real-provider model strings so the pre-flight check (get_llm_provider)
     # accepts them; convert_batch is mocked, so no call is ever made. The dummy
     # ANTHROPIC_API_KEY from conftest satisfies the pre-flight key check.
     Workspace(root=ws_root).config_path.write_text(
-        json.dumps(
+        dump_toml(
             {
                 "generation": {
                     "model": "anthropic/claude-haiku-4-5",
@@ -2353,7 +2500,7 @@ def test_docset_generate_preflight_rejects_malformed_model(
     ws_root = tmp_path / "ws"
     ds_id = _seed_docset_with_one_file(ws_root, capsys)
     Workspace(root=ws_root).config_path.write_text(
-        json.dumps({"generation": {"model": "::::", "label_model": "anthropic/claude-sonnet-4-6"}}),
+        dump_toml({"generation": {"model": "::::", "label_model": "anthropic/claude-sonnet-4-6"}}),
         encoding="utf-8",
     )
     with patch("dgml_core.generation.convert_batch") as mock_batch:
@@ -2373,7 +2520,7 @@ def test_docset_generate_preflight_rejects_missing_api_key(
     # Undo the conftest dummy key so the provider key is genuinely absent.
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     Workspace(root=ws_root).config_path.write_text(
-        json.dumps(
+        dump_toml(
             {
                 "generation": {
                     "model": "anthropic/claude-haiku-4-5",
@@ -2404,12 +2551,13 @@ def test_docset_generate_preflight_skips_key_check_when_api_base_set(
     _seed_file_for_generate(ws_root, ds_id, "f1aaaaaaaaaa")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     Workspace(root=ws_root).config_path.write_text(
-        json.dumps(
+        dump_toml(
             {
                 "generation": {
                     "model": "anthropic/claude-haiku-4-5",
                     "label_model": "anthropic/claude-sonnet-4-6",
                     "api_base": "http://localhost:8000",
+                    "label_api_base": "http://localhost:8000",
                 }
             }
         ),
@@ -3397,7 +3545,7 @@ VendorName =
 
 def _write_grounded_config(ws: Path) -> None:
     Workspace(root=ws).config_path.write_text(
-        json.dumps(
+        dump_toml(
             {
                 "grounded": {
                     "schema_model": "anthropic/claude-opus-4-7",

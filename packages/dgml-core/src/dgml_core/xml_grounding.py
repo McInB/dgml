@@ -556,11 +556,11 @@ def ground_dgml_xml(
 
     # dg:style policy. The deterministic path derives style from digital glyph
     # facts; OCR files carry none. An OCR file's dg:style therefore comes solely
-    # from the opt-in image-based path below, and only when the workspace
-    # configures a `style` section — so an OCR file with no style config gets no
-    # dg:style at all (matching storage-layout.md / cli-reference.md / SKILL.md).
-    # A digital/hybrid file always may. load_style_config validates the section
-    # on every grounding run (raising StyleConfigInvalid), OCR or not.
+    # from the opt-in image-based path below, and only when the workspace sets
+    # `style.enabled = true` — so an OCR file without it gets no dg:style at all
+    # (matching storage-layout.md / cli-reference.md / SKILL.md). A digital/hybrid
+    # file always may. load_style_config validates an *enabled* section on every
+    # grounding run (raising StyleConfigInvalid), OCR or not.
     from .style_config import load_style_config
 
     is_ocr = _is_ocr_file(workspace, file_id)

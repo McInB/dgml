@@ -14,9 +14,9 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 from dgml_core import DEFAULT_STORAGE_PROVIDER, LocalStore, StorageConfig, StorageService
@@ -52,6 +52,35 @@ class DefaultBridgeStore(LocalStore):
 def default_bridge_store(root: Path) -> DefaultBridgeStore:
     cfg = LocalStore.parse_config(StorageConfig(DEFAULT_STORAGE_PROVIDER, root))
     return DefaultBridgeStore(cfg)
+
+
+def _toml_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return repr(value)
+    if isinstance(value, str):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    raise TypeError(f"unsupported TOML value: {value!r}")
+
+
+def dump_toml(data: dict[str, Any], _prefix: str = "") -> str:
+    """Minimal dict → TOML serializer for tests (scalars + nested tables)."""
+    scalars = {k: v for k, v in data.items() if not isinstance(v, dict)}
+    tables = {k: v for k, v in data.items() if isinstance(v, dict)}
+    lines = [f"{k} = {_toml_scalar(v)}" for k, v in scalars.items()]
+    for key, sub in tables.items():
+        name = f"{_prefix}{key}"
+        lines.append(f"[{name}]")
+        body = dump_toml(sub, f"{name}.")
+        if body:
+            lines.append(body)
+    return "\n".join(lines)
+
+
+def write_config(workspace: Workspace, data: dict[str, Any]) -> None:
+    """Write ``<workspace>/config.toml`` (resolution layer 3) from a dict."""
+    workspace.config_path.write_text(dump_toml(data) + "\n", encoding="utf-8")
 
 
 def _write_blank_pdf(path: Path, pages: int) -> None:
@@ -178,16 +207,13 @@ needs_gs = pytest.mark.skipif(
 
 
 def write_ocr_config(workspace: Workspace, ocr: dict[str, object]) -> None:
-    """Write ``<workspace>/config.json`` with the given ``ocr`` section."""
-    workspace.config_path.write_text(json.dumps({"ocr": ocr}, indent=2) + "\n", encoding="utf-8")
+    """Write ``<workspace>/config.toml`` with the given ``ocr`` section."""
+    write_config(workspace, {"ocr": ocr})
 
 
 def write_classification_config(workspace: Workspace, classification: dict[str, object]) -> None:
-    """Write ``<workspace>/config.json`` with the given ``classification`` section."""
-    workspace.config_path.write_text(
-        json.dumps({"classification": classification}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    """Write ``<workspace>/config.toml`` with the given ``classification`` section."""
+    write_config(workspace, {"classification": classification})
 
 
 def make_fake_png(width: int, height: int, payload: bytes = b"") -> bytes:
@@ -244,3 +270,11 @@ def aws_config(workspace: Workspace) -> Workspace:
         },
     )
     return workspace
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the user-level config (``~/.config/dgml``) at an empty tmp dir so the
+    merged-config loader never reads the developer's real config; only each
+    test's ``<workspace>/config.toml`` is seen."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-home"))

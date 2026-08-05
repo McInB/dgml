@@ -57,7 +57,7 @@ class MacosProvider(OcrProvider):
             raise OcrFailed(
                 "macOS OCR (Apple Vision) is only available on macOS; this platform "
                 f"is {sys.platform!r}. Configure a cloud provider ('aws' or 'azure') "
-                "in the workspace config.json instead."
+                "in the workspace config.toml instead."
             )
         try:
             import Foundation

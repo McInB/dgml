@@ -58,6 +58,7 @@ auto-calibration) for routing out-of-distribution documents to the
 from __future__ import annotations
 
 import logging
+import math
 import warnings
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -65,6 +66,8 @@ from typing import Any, Literal, cast
 import numpy as np
 import torch
 
+from clustering.calibration import Calibrator
+from clustering.config.schema import ScenarioConfig
 from clustering.manifolds.base import ManifoldHead
 
 _log = logging.getLogger(__name__)
@@ -866,8 +869,14 @@ def manifold_leiden(
         embeddings: ``[N, D]`` on-manifold points.
         manifold: Active manifold head — supplies ``pairwise_dist``.
         graph_method: How to build the graph (see above).
-        k_neighbors: ``k`` for the (mutual-)k-NN graphs. Ignored when
-            ``graph_method="radius"``. Clamped to ``[1, N-1]``.
+        k_neighbors: ``k`` for the (mutual-)k-NN graphs, clamped to
+            ``[1, N-1]``. **Not** ignored under ``graph_method="radius"``:
+            with ``radius=None`` and ``r_method="knee"`` it is the ``k``
+            of the k-NN-distance knee, so it still sets the radius — the
+            same role ``graph_cc_k_neighbors`` and ``dbscan_k_neighbors``
+            play for their algorithms, but spelled with the k-NN knob
+            rather than a dedicated one. It *is* ignored when an explicit
+            ``radius`` is given, or under ``r_method="mst_gap"``.
         radius: Explicit radius for the ``radius`` graph mode. If
             ``None``, auto-pick via ``r_method``. Ignored for k-NN
             modes.
@@ -1486,14 +1495,299 @@ def cluster_embeddings(
     )
 
 
+def _auto_temperature(centroids: torch.Tensor, manifold: ManifoldHead) -> float:
+    """Softmax temperature set to the characteristic inter-centroid distance.
+
+    With ``T = 1`` the softmax over negative manifold distances saturates to
+    ~1.0 for *every* document whenever the clusters are well separated — e.g.
+    after a UMAP / t-SNE reduction spreads them far apart — leaving the
+    confidence column with no usable spread to rank on (every document ties at
+    1.0, so a bottom-quantile cut is arbitrary). Scaling ``T`` to the median
+    pairwise centroid distance rescales the logits so the peak softmax lands in
+    ``[1/C, 1]`` with real gradient: boundary documents score distinctly lower
+    than core ones. The *ordering* is unchanged (peak softmax is monotone in the
+    nearest-vs-next distance gap for a fixed ``T``), so this is a rescaling of
+    the ordinal signal, not a change of what "more confident" means.
+
+    Returns ``1.0`` (a no-op) when there are fewer than two centroids, or when
+    the centroids are coincident (degenerate median distance).
+    """
+    c = int(centroids.shape[0])
+    if c < 2:
+        return 1.0
+    dmat = manifold.pairwise_dist(centroids, centroids)  # [C, C]
+    iu = torch.triu_indices(c, c, offset=1)
+    pdist = dmat[iu[0], iu[1]]
+    med = float(pdist.median().item()) if int(pdist.numel()) else 0.0
+    return med if med > 1e-9 else 1.0
+
+
+def _resolve_temperature(
+    temperature: float | Literal["auto"],
+    centroids: torch.Tensor,
+    manifold: ManifoldHead,
+) -> float:
+    """Coerce the ``temperature`` argument to a concrete positive scale.
+
+    ``"auto"`` defers to :func:`_auto_temperature`; a float is validated ``> 0``.
+    """
+    if isinstance(temperature, str):
+        if temperature != "auto":
+            raise ValueError(
+                f"temperature must be a positive float or 'auto'; got {temperature!r}."
+            )
+        return _auto_temperature(centroids, manifold)
+    t = float(temperature)
+    if t <= 0.0:
+        raise ValueError(f"temperature must be > 0; got {temperature!r}.")
+    return t
+
+
+def cluster_scores(
+    embeddings: torch.Tensor,
+    centroids: torch.Tensor,
+    manifold: ManifoldHead,
+    *,
+    temperature: float | Literal["auto"] = 1.0,
+) -> torch.Tensor:
+    """Soft-assignment matrix ``[N, C]``: softmax over negative manifold
+    distances from each document to each centroid.
+
+    This is the row-normalized geometry the ordinal confidence reads (as its
+    per-row peak), and what any margin-style reading (top1 - top2) needs in
+    order to rank documents by how contested their assignment is. Column ``j``
+    corresponds to the cluster whose centroid is ``centroids[j]``.
+    ``temperature`` matches :func:`cluster_confidence` — pass ``"auto"`` to
+    scale it to the inter-centroid separation (see :func:`_auto_temperature`).
+    """
+    temp = _resolve_temperature(temperature, centroids, manifold)
+    d = manifold.pairwise_dist(embeddings, centroids)  # [N, C]
+    return torch.nn.functional.softmax(-d / temp, dim=-1)
+
+
+def cluster_confidence(
+    embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    centroids: torch.Tensor,
+    manifold: ManifoldHead,
+    *,
+    temperature: float | Literal["auto"] = 1.0,
+) -> list[float | None]:
+    """Per-point ordinal confidence for an unsupervised clustering.
+
+    Every algorithm in :func:`cluster_embeddings` returns
+    ``(labels, centroids)`` where the centroids are cluster representatives
+    on the manifold — true Fréchet-mean centroids for ``kmeans`` /
+    ``meanshift`` and on-manifold *medoids* for the density / graph
+    algorithms (``hdbscan``, ``graph_cc``, ``leiden``, ``dbscan``,
+    ``optics``, ``affinity_propagation``). This turns that geometry into a
+    single per-document confidence signal so the unsupervised (S1) path
+    stops handing downstream consumers a column of ``None``.
+
+    The signal is the **peak of the softmax over negative manifold distances
+    to the centroids** — the *same form* as the nearest-prototype confidence
+    :func:`assign_to_prototypes` produces for S2-S5, so a consumer reads
+    "confidence" the same way (higher = more certain) in every scenario.
+    Concretely, for a document with distances ``d_1..d_C`` to the ``C``
+    centroids, ``confidence = max_j softmax(-d / temperature)_j``. Note the
+    *scale* is not identical across scenarios: this path divides by
+    ``confidence_temperature`` (default ``"auto"`` — the median inter-centroid
+    distance), whereas ``assign_to_prototypes`` fixes the temperature at 1.0,
+    so the numbers are comparable *within* a run, not calibrated across
+    scenarios. A document that sits
+    much closer to one centroid than the rest scores near ``1``; one that is
+    roughly equidistant from several scores near ``1/C``. That is a
+    medoid-margin reading on the centroid methods and a boundary ("border")
+    reading on the density / graph methods — a point on a cluster's edge is
+    closer to being reassigned, so its peak softmax is lower.
+
+    **Noise points** (``labels[i] == -1``, emitted by every density / graph
+    algorithm for low-density regions) are the algorithm's own statement that
+    the document does not belong to any cluster, so they are pinned to
+    ``0.0`` regardless of geometry — the honest floor of the scale.
+
+    The score is deliberately *ordinal*, not a calibrated probability:
+    softmax temperature is a free scale and the medoid geometry is only a
+    proxy for HDBSCAN's native membership / GLOSH scores. Temperature/Platt
+    scaling and conformal coverage guarantees are a separate, heavier layer.
+    What this buys today is a real, monotone, per-document signal the novelty
+    gate and any review step can threshold on instead of a null.
+
+    Args:
+        embeddings: ``[N, D]`` points, in the *same* space the clustering ran
+            in (i.e. the reduced Euclidean space when a reducer is active, so
+            distances line up with the returned ``centroids``).
+        labels: ``[N]`` integer cluster ids as returned by
+            :func:`cluster_embeddings` (``-1`` = noise).
+        centroids: ``[C, D]`` cluster representatives (may be empty when the
+            algorithm routed everything to noise).
+        manifold: Active manifold head for the clustering space — supplies
+            ``pairwise_dist``.
+        temperature: Softmax temperature. A positive float flattens the
+            distribution as it grows (lower, more conservative confidences);
+            ``1.0`` matches :func:`assign_to_prototypes`. ``"auto"`` scales the
+            temperature to the inter-centroid separation so the signal has
+            usable spread even when clusters are far apart (see
+            :func:`_auto_temperature`) — the right default for the S1
+            unsupervised path, whose distances live in a UMAP-reduced space.
+
+    Returns:
+        Length-``N`` list of confidences in ``[0, 1]``. Noise points are
+        ``0.0``; when there are no centroids at all every point is ``0.0``.
+        Typed ``float | None`` to slot directly into
+        :attr:`~clustering.scenarios.base.ScenarioResult.confidence`, but in
+        practice every entry is a concrete float.
+    """
+    n = int(embeddings.shape[0])
+    if n == 0:
+        return []
+
+    label_ints = [int(x) for x in labels.tolist()]
+
+    # No surviving clusters — the algorithm called the whole corpus noise.
+    if int(centroids.shape[0]) == 0:
+        return [0.0] * n
+
+    probs = cluster_scores(embeddings, centroids, manifold, temperature=temperature)
+    peak = probs.amax(dim=-1)  # [N]
+    peak_vals = [float(p) for p in peak.tolist()]
+
+    return [0.0 if label_ints[i] < 0 else peak_vals[i] for i in range(n)]
+
+
+def emergent_bucket_k_neighbors(
+    n: int,
+    configured: int,
+    *,
+    graph_method: LeidenGraphMethod = "knn",
+) -> int:
+    """Graph degree to use when clustering an *emergent bucket* of ``n`` docs.
+
+    ``configured`` is the corpus-level ``leiden_k_neighbors``. It is chosen for
+    the size of a whole corpus, but the unknown bucket that S2/S3 hand to the
+    clusterer is a far smaller sub-problem, and at that scale the corpus-level
+    value meets or exceeds ``n``. The k-NN graph is then *complete*, so the
+    neighbourhood structure — the only thing the ``k`` in k-NN contributes —
+    is gone and the partition rests entirely on the RBF edge weights. Those
+    are normalised by the median edge distance, so a bucket whose groups are
+    only weakly separated ends up with near-uniform weights, and modularity's
+    optimum over a near-uniform complete graph is a single community.
+
+    This is an empirical effect, not an identity: a complete graph over two
+    *strongly* separated groups still splits, because the weight contrast
+    survives the normalisation. Weak separation is the case that matters here
+    — the bucket holds what the assignment gate could not confidently place,
+    which selects for exactly that. Measured leave-one-class-out on four
+    internal corpora at the shipped config's degree of 25, the unknown bucket
+    came back as one cluster on 16 of 24 splits.
+
+    Note the collapse is not avoided by clamping to ``n - 1``: that is what
+    :func:`manifold_leiden` already does internally, so an ``n - 1`` ceiling
+    reproduces the uncapped behaviour exactly (measured: zero differences over
+    the same 24 splits). The degree has to come *down*, and sub-linearly — a
+    linear rule pins to its own floor at this scale.
+
+    The result never exceeds ``configured``, so a config that already asks for
+    a small degree passes through untouched — including values below the floor
+    of 2 that the ``sqrt`` term carries for tiny buckets.
+
+    Only ``graph_method="knn"`` is scaled, deliberately:
+
+    - ``"mutual_knn"`` requires *reciprocal* membership, so the edge count
+      falls off far faster than the degree does; scaling it over-fragments
+      buckets that the unscaled degree partitions correctly.
+    - ``"radius"`` does not build a k-NN graph at all, but ``k_neighbors`` is
+      not inert there either — with ``leiden_radius=None`` it feeds the
+      auto-radius knee heuristic, so scaling it silently retunes the radius.
+
+    Neither mode is covered by the measurement above and both have a plausible
+    mechanism for harm, so both pass through unchanged.
+    """
+    if graph_method != "knn":
+        return configured
+    return min(configured, max(2, math.isqrt(max(n, 0))))
+
+
+def cluster_emergent_bucket(
+    embeddings: torch.Tensor,
+    *,
+    scenario: ScenarioConfig,
+    manifold: ManifoldHead,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Cluster the unknown/emergent bucket shared by S2 and S3.
+
+    Both scenarios split their input into documents that matched a known
+    prototype and documents that did not, then partition the leftovers into
+    ``unknown_<i>`` clusters. This is that second step, in one place: it honours
+    ``scenario.cluster_algorithm`` and forwards the algorithm knobs, with the
+    graph degree scaled to the bucket by :func:`emergent_bucket_k_neighbors`.
+
+    ``k`` is still derived as ``max(2, min(8, n))``. Only ``kmeans`` consumes
+    it — every other algorithm derives its own cluster count — and in the 2..8
+    range that formula degenerates to ``k == n``, i.e. one cluster per document.
+    That is a real defect on a ``kmeans`` config and it is deliberately *not*
+    addressed here: no alternative ``k`` rule has yet measured as an improvement
+    across the full corpus set, and guessing one would trade a known bad value
+    for an unmeasured one.
+    """
+    sc = scenario
+    n = int(embeddings.shape[0])
+    return cluster_embeddings(
+        embeddings,
+        manifold=manifold,
+        algorithm=sc.cluster_algorithm,
+        k=max(2, min(8, n)),
+        seed=seed,
+        min_cluster_size=sc.hdbscan_min_cluster_size,
+        min_samples=sc.hdbscan_min_samples,
+        cluster_selection_epsilon=sc.hdbscan_cluster_selection_epsilon,
+        cluster_selection_method=sc.hdbscan_cluster_selection_method,
+        allow_single_cluster=sc.hdbscan_allow_single_cluster,
+        graph_cc_radius=sc.graph_cc_radius,
+        graph_cc_r_method=sc.graph_cc_r_method,
+        graph_cc_k_neighbors=sc.graph_cc_k_neighbors,
+        graph_cc_min_cluster_size=sc.graph_cc_min_cluster_size,
+        leiden_graph_method=sc.leiden_graph_method,
+        leiden_k_neighbors=emergent_bucket_k_neighbors(
+            n, sc.leiden_k_neighbors, graph_method=sc.leiden_graph_method
+        ),
+        leiden_radius=sc.leiden_radius,
+        leiden_r_method=sc.leiden_r_method,
+        leiden_quality=sc.leiden_quality,
+        leiden_resolution=sc.leiden_resolution,
+        leiden_min_cluster_size=sc.leiden_min_cluster_size,
+        leiden_n_iterations=sc.leiden_n_iterations,
+        dbscan_eps=sc.dbscan_eps,
+        dbscan_r_method=sc.dbscan_r_method,
+        dbscan_k_neighbors=sc.dbscan_k_neighbors,
+        dbscan_min_samples=sc.dbscan_min_samples,
+        dbscan_min_cluster_size=sc.dbscan_min_cluster_size,
+        optics_min_samples=sc.optics_min_samples,
+        optics_xi=sc.optics_xi,
+        optics_min_cluster_size=sc.optics_min_cluster_size,
+        affinity_damping=sc.affinity_damping,
+        affinity_preference=sc.affinity_preference,
+        affinity_max_iter=sc.affinity_max_iter,
+        affinity_convergence_iter=sc.affinity_convergence_iter,
+        meanshift_bandwidth=sc.meanshift_bandwidth,
+        meanshift_quantile=sc.meanshift_quantile,
+        meanshift_bin_seeding=sc.meanshift_bin_seeding,
+        meanshift_cluster_all=sc.meanshift_cluster_all,
+    )
+
+
 @dataclass
 class AssignmentResult:
     """Output of :func:`assign_to_prototypes`.
 
-    Carries both the per-document tensors (``labels`` / ``distances`` /
-    ``confidence`` / ``probs``) and the *effective* thresholds that were
-    actually applied — distinct from the user-supplied config values
-    whenever quantile auto-calibration kicks in.
+    Carries the per-document tensors (``labels`` / ``distances`` /
+    ``confidence`` / ``probs``), the *effective* thresholds that were actually
+    applied (distinct from the user-supplied config values whenever quantile
+    auto-calibration kicks in), and — when a
+    :class:`~clustering.calibration.Calibrator` is supplied — the
+    ``calibrated_confidence`` and the per-document ``abstain`` flag that feeds
+    a human review queue.
     """
 
     labels: torch.Tensor  # [N] int (-1 = unassigned)
@@ -1502,6 +1796,15 @@ class AssignmentResult:
     probs: torch.Tensor  # [N, K] softmax over -distance
     effective_threshold: float | None = None
     effective_confidence_threshold: float | None = None
+    # ── Calibration + abstain ────────────────────────────────────────────
+    # ``calibrated_confidence`` equals ``confidence`` when no calibrator was
+    # supplied (i.e. the raw ordinal signal), so a consumer can read this field
+    # unconditionally. ``abstain`` flags documents the gate is not confident
+    # enough to auto-accept — route them to review. ``calibration`` is the
+    # fitted calibrator's provenance dict, or ``None``.
+    calibrated_confidence: torch.Tensor | None = None
+    abstain: torch.Tensor | None = None
+    calibration: dict[str, Any] | None = None
 
 
 def assign_to_prototypes(
@@ -1512,6 +1815,8 @@ def assign_to_prototypes(
     threshold: float | None = None,
     threshold_confidence: float | None = None,
     threshold_quantile: float | None = None,
+    calibrator: Calibrator | None = None,
+    abstain_threshold: float | None = None,
 ) -> AssignmentResult:
     """Nearest-prototype classification with three composable unknown-bucket gates.
 
@@ -1530,6 +1835,13 @@ def assign_to_prototypes(
       (If ``threshold`` is *also* passed, ``threshold_quantile`` overrides
       it — the quantile is treated as a higher-priority calibration.)
 
+    Orthogonal to all three is the **abstain** decision. The gates above decide
+    *novelty* — whether a document belongs to a known class at all — and change
+    its label to ``-1``. Abstention decides *review*: whether a human should
+    look at the assignment before it is trusted. It never changes the predicted
+    label, so a document can be confidently assigned and still be flagged, or
+    routed to the unknown bucket without being flagged.
+
     Args:
         embeddings: ``[N, D]`` on-manifold query points.
         prototypes: ``[K, D]`` on-manifold class prototypes.
@@ -1537,6 +1849,13 @@ def assign_to_prototypes(
         threshold: Absolute distance cutoff (see above).
         threshold_confidence: Confidence floor in ``[0, 1]``.
         threshold_quantile: Distance quantile in ``(0, 1)``.
+        calibrator: Fitted :class:`~clustering.calibration.Calibrator` used to
+            rescale the reported confidence and (if it carries a conformal
+            threshold) decide abstention. ``None`` reports the raw ordinal
+            confidence.
+        abstain_threshold: Absolute floor on the (calibrated) confidence, OR-ed
+            with any conformal gate the calibrator carries. Usable without a
+            calibrator, which is how the unlabeled scenarios abstain.
 
     Returns:
         :class:`AssignmentResult`. ``effective_threshold`` is the distance
@@ -1577,6 +1896,22 @@ def assign_to_prototypes(
     if unassigned is not None:
         labels = torch.where(unassigned, torch.full_like(labels, -1), labels)
 
+    # ── Calibrate the reported confidence, then decide abstention ─────────
+    # Deliberately after the novelty gates and deliberately not feeding back
+    # into ``labels``: this is the review decision, not the routing decision.
+    # With no calibrator the calibrated confidence is just the ordinal softmax
+    # peak, so the field is always readable, and an ``abstain_threshold`` still
+    # applies as a plain floor on it.
+    if calibrator is not None:
+        calibrated_confidence, abstain = calibrator.apply(logits)
+        calibration = calibrator.as_dict()
+    else:
+        calibrated_confidence = confidence.clone() if hasattr(confidence, "clone") else confidence
+        abstain = torch.zeros_like(labels, dtype=torch.bool)
+        calibration = None
+    if abstain_threshold is not None:
+        abstain = _bool_or(abstain, calibrated_confidence < abstain_threshold)
+
     return AssignmentResult(
         labels=labels,
         distances=distances,
@@ -1584,6 +1919,9 @@ def assign_to_prototypes(
         probs=probs,
         effective_threshold=eff_dist,
         effective_confidence_threshold=eff_conf,
+        calibrated_confidence=calibrated_confidence,
+        abstain=abstain,
+        calibration=calibration,
     )
 
 

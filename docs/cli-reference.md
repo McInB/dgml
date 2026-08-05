@@ -44,69 +44,76 @@ or after a command group (`dgml docset --format text list`).
 
 ## Workspace commands
 
-### `dgml init [--refresh]`
-Establish the **shared config** — nothing else. `init` creates the peer
-`local_config.json` (a copy of the bundled default template) in the directory
-that contains the workspace (`<workspace-parent>/local_config.json`; with the
-default `./dgml-workspace` this is `./local_config.json`). It does **not**
-create `docsets/`, `files/`, or any workspace `config.json` — that is
-`dgml workspace create`.
+### `dgml init [--provider PROVIDER] [--force]`
+Establish the **user-level config** — nothing else. `init` writes the
+user-level config with a `[models]` block, choosing its location in this order:
 
-Configure once, create many: every workspace that is a sibling of that
-`local_config.json` inherits it. Edit the file (review the models and the OCR
-endpoint) before running `dgml workspace create`.
+- `$XDG_CONFIG_HOME/dgml/config.toml` when `$XDG_CONFIG_HOME` is set;
+- otherwise `%APPDATA%\dgml\config.toml` on Windows;
+- otherwise `~/.config/dgml/config.toml`.
 
-- **No `local_config.json` yet:** copies the bundled template there and returns
-  `local_config_created: true` with a `next_action` hint.
-- **Already present:** no-op; returns `local_config_created: false`.
-- **`--refresh`:** overwrite `local_config.json` from the bundled template
-  (pull the latest baseline / new knobs). The previous file is copied to
-  `local_config.json.bak` first. Invoking the flag is the consent — no prompt.
+It does **not** create `docsets/`, `files/`, or any workspace config — that is
+`dgml workspace create`. Configure once per machine; every workspace inherits
+this config (see [storage-layout.md](storage-layout.md) for the full resolution
+order).
+
+The `[models]` block names four tiers — `light`, `standard`, `advanced`,
+`expert` — that back the per-task models (classification/style, transcription/
+text-extraction, labeling/value-extraction, schema-generation respectively).
+
+- **`--provider {anthropic,google,mixed}`:** write that provider's
+  default `[models]` table. Omit to **auto-detect** from the API-key env vars
+  that are set (both `ANTHROPIC_API_KEY` + `GEMINI_API_KEY` → `mixed`; one of
+  them → that provider). Only presence is checked, not validity. With no keys, a
+  commented-out `[models]` placeholder is written. (Other providers such as
+  OpenAI are still usable by setting an explicit `<provider>/<model>` in the
+  config; they simply have no curated default table or key auto-detection.)
+- **`--force`:** overwrite an existing `config.toml` (backing it up to
+  `config.toml.bak` first). Without `--force`, a present file is **never**
+  clobbered — a re-run with `--provider` but no `--force` is a no-op whose
+  `next_action` tells you to pass `--force`.
 
 Output (JSON):
 
 ```json
 {
-  "local_config_path": "…/local_config.json",
-  "local_config_created": true,
-  "refreshed": false,
-  "next_action": "edit …/local_config.json then run dgml workspace create"
+  "config_path": "~/.config/dgml/config.toml",
+  "config_created": true,
+  "provider": "mixed",
+  "detected_keys": ["ANTHROPIC_API_KEY", "GEMINI_API_KEY"],
+  "forced": false,
+  "next_action": "dgml workspace create --organization <org>"
 }
 ```
 
-`next_action` is present only when the file was just created. Advisory text
-goes to stderr; stdout stays the JSON contract.
+The human-readable report (detected keys, the `[models]` block with inline
+tier→capability comments, next steps) goes to **stderr**; stdout stays the JSON
+contract. `provider` is `null` when no keys were detected.
 
-`local_config.json` lands in a working directory, so add it to your
-`.gitignore` (this repo already does).
-
-### `dgml workspace create [PATH] --organization ORG [--name NAME] [--force]`
+### `dgml workspace create [PATH] --organization ORG [--name NAME]`
 `PATH` is the optional directory to create the workspace in — pass it to avoid
 the redundant global `--workspace` (`dgml workspace create ./ws …`). When
 omitted, the root resolves in the usual order (global `--workspace` → `$DGML_HOME`
 → `./dgml-workspace`); a `PATH` given here overrides that.
 
-Create a workspace **from the shared config**. Steps:
-1. Seeds the peer `local_config.json` from the bundled template if it does not
-   already exist — so `create` works **without a prior `dgml init`**. (When it
-   is created here, the response carries `local_config_created: true` and a
-   `next_action` telling you how to edit the config; see below.)
-2. Creates `docsets/` and `files/`.
-3. Copies `local_config.json` → `<workspace>/config.json` **verbatim**
-   (comments intact), only if `config.json` does not already exist.
-4. Writes the workspace identity (`name` + `organization`) to
+Steps:
+1. Creates `docsets/` and `files/`.
+2. Writes the workspace identity (`name` + `organization`) to
    `<workspace>/workspace.json`.
 
+Config is owned by `dgml init` and lives at the user level — `workspace create`
+does **not** create or touch it (nor does it write a per-workspace
+`config.toml`; that file is optional and hand-authored only for
+workspace-specific overrides — see [storage-layout.md](storage-layout.md)). If
+the user-level config is **absent**, the workspace is still created (the command
+never blocks) and a warning is printed to **stderr** telling you to run
+`dgml init` and set your API key.
+
 `--organization` is **required**. It is embedded in this workspace's docset
-namespace URIs (`http://dgml.io/<organization>/<DocSetSlug>`), replacing the
-workspace directory name that older releases used there — so pick a stable
+namespace URIs (`http://dgml.io/<organization>/<DocSetSlug>`) — pick a stable
 identifier for your org (changing it later shifts the namespaces of newly
 generated XML). `--name` is optional human-readable identity metadata and
 defaults to the workspace directory name.
-
-`--force` overwrites an existing `config.json` with the current
-`local_config.json` (doubles as "re-sync my edited shared config into this
-workspace"); the overwrite is noted on stderr.
 
 Output (JSON):
 
@@ -116,19 +123,14 @@ Output (JSON):
   "name": "dgml-workspace",
   "organization": "Acme",
   "initialized": true,
-  "config_path": "…/dgml-workspace/config.json",
-  "config_written": true,
-  "local_config_path": "…/local_config.json",
-  "local_config_created": false
+  "config_path": "~/.config/dgml/config.toml",
+  "config_present": true
 }
 ```
 
-`config_written` is `false` when an existing `config.json` was left untouched
-(no `--force`). `local_config_created` is `true` only when this call seeded the
-shared `local_config.json` (no prior `dgml init`); in that case an extra
-`next_action` field is present telling you to edit the models and OCR endpoint
-in `<workspace>/config.json` (or edit the shared `local_config.json` and re-run
-`dgml workspace create --force` to re-sync).
+`config_present` reports whether the user-level config exists. When it is
+`false`, an extra `next_action` field is present and the stderr warning above is
+emitted — but the workspace is created regardless (exit `0`).
 
 ### `dgml status`
 Summary: workspace path, count of docsets, count of files.
@@ -188,13 +190,13 @@ UMAP; for tiny corpora), `light` (CPU-only tf-idf + Leiden/UMAP; the default),
 `medium` (tf-idf text fused with a 2B vision encoder, large CPU / Apple MPS),
 or `heavy` (8B vision encoder alone + Leiden/UMAP, GPU) — or a **path** to a
 standalone clustering config JSON. The JSON holds the same fields as the
-`clustering` section of `<workspace>/config.json` (`encoder_text`,
+`clustering` section of `<workspace>/config.toml` (`encoder_text`,
 `encoder_image`, `fusion`, `manifold`, `training`, `scenario`); it is
 deep-merged over the bundled defaults exactly like the workspace section, and
 **replaces** that section for this run (the two are not combined). An unknown
 preset name, or a path that doesn't exist / isn't valid JSON / isn't a JSON
 object, exits 1 with `CLUSTERING_CONFIG_INVALID`. Use it to A/B configs without
-editing `config.json`, or to move up the CPU → MPS → GPU tiers on a specific
+editing `config.toml`, or to move up the CPU → MPS → GPU tiers on a specific
 run.
 
 `--mode auto|fresh|incremental` selects fresh vs incremental clustering
@@ -269,9 +271,16 @@ successfully named) is still assigned. The command always exits `0`.
   "n_assigned_existing": 2,
   "n_new_clusters": 1,
   "assignments": {
-    "k7q3xb91pmrf": {"docset": "Contracts", "confidence": 0.83, "is_new": false},
-    "abc123def456": {"docset": "Receipts", "confidence": 0.71, "is_new": false}
-  }
+    "k7q3xb91pmrf": {
+      "docset": "Contracts", "confidence": 0.83,
+      "naming_confidence": null, "is_new": false, "review": false
+    },
+    "abc123def456": {
+      "docset": "Receipts", "confidence": 0.71,
+      "naming_confidence": null, "is_new": false, "review": false
+    }
+  },
+  "review_queue": []
 }
 ```
 
@@ -281,17 +290,29 @@ the incremental workflow:
 
 | Field | Meaning |
 |---|---|
-| `clusters` | Map from file id to the DocSet name the file ended up in. Either an existing DocSet's name (the algorithm matched the file to it) or the LLM-proposed name for a newly-created DocSet. Files that failed to assign keep their algorithmic placeholder label (e.g. `"unknown_1"`) here *and* appear in `failed_file_ids`. |
-| `failed_file_ids` | Files whose cluster needed LLM naming and that naming failed (missing config, no page images, provider error, …). Re-run after fixing the underlying cause; assignments are idempotent. |
+| `clusters` | Map from file id to the DocSet name the file ended up in. Either an existing DocSet's name (the algorithm matched the file to it) or the LLM-proposed name for a newly-created DocSet. A file whose cluster was found but whose *naming* failed keeps its algorithmic placeholder label (e.g. `"unknown_1"`) here *and* appears in `failed_file_ids`. A file that was never in a cluster at all — no page image, or the clusterer placed it nowhere — is **absent from this map** and appears only in `failed_file_ids`, so don't assume `clusters` covers every file in the workspace. |
+| `failed_file_ids` | Files that ended up in no DocSet: their cluster needed LLM naming and that naming failed (missing config, no page images, provider error, …), their first page never rendered, or the clusterer put them in no cluster at all. Re-run after fixing the underlying cause; assignments are idempotent. |
 | `skipped` | `true` only when `--skip-existing` was passed and there were no unassigned files (the clusterer never ran); `false` on every actual clustering run. Always present. |
 | `mode` | The effective run mode after resolving `auto` — `"fresh"` or `"incremental"`. |
 | `n_assigned_existing` | Number of files assigned to a DocSet that already existed before this run (the incremental "fit an existing cluster" case). |
 | `n_new_clusters` | Number of new DocSets created this run (emergent clusters that were LLM-named). |
-| `assignments` | Per-file detail: `docset` (final DocSet name), `confidence` (nearest-prototype confidence in `[0, 1]`, or `null` for emergent clusters), and `is_new` (whether the DocSet was created this run). |
+| `assignments` | Per-file detail: `docset` (final DocSet name), `confidence` (in `[0, 1]`, or `null`), `naming_confidence` (see below), `is_new` (whether the DocSet was created this run), and `review`. `confidence` means different things per `method`. Under `embedding` it is the nearest-prototype softmax peak when the file was matched against an existing DocSet, and the clustering-geometry peak (`0.0` for files the algorithm called noise) for files placed by a fresh clustering run. Under `llm` it is the model's self-reported confidence in the group the file was placed in — shared by every file in that group, `null` when the model declined to report one. Neither is a calibrated probability: both are *ordinal* scores, comparable within one run and not across runs, so use them to rank which assignments to review first rather than as a threshold. `review` is `true` when the run wants a human to confirm that assignment; the file is assigned either way, so `review` never changes `docset`. |
+| `review_queue` | The file ids whose `review` flag is set, as a list — the assignments to confirm, without scanning `assignments`. Always present, and always empty unless the clustering config enables calibration (see below). |
+
+`confidence` and `naming_confidence` answer different questions and are
+never interchangeable. `confidence` asks *did this file land in the right
+group*. `naming_confidence` asks *is that group's name right* — it is the
+share of independent naming attempts that agreed on the name a new DocSet was
+created with, in `(0, 1]`. It is `null` for files matched to a DocSet that
+already existed (nothing was named), and `null` on new DocSets too unless
+[`classification.naming_attempts`](#auto-classification) is raised above 1.
+A tightly-grouped cluster can still be badly named, so sort new DocSets by
+`naming_confidence` to see which names were near-unanimous and which were coin
+tosses worth a human look.
 
 LLM naming requires the same workspace setup as `--auto-classify`:
 
-- A `classification` section in `<workspace>/config.json` (see
+- A `classification` section in `<workspace>/config.toml` (see
   "Auto-classification" above).
 - `litellm`, which ships with the base `dgml` install (no extra needed).
 
@@ -306,11 +327,19 @@ for the full incremental ("S3") workflow and the evaluation harness.
 Files whose first-page image is missing (page render failed at ingest)
 are routed into `failed_file_ids` along with LLM-naming failures.
 
+The clustering algorithms are density-based, so they can also decline to
+place a document in any cluster — it looks like neither an existing DocSet
+nor like the other unassigned files. Those documents are **not** grouped
+into a catch-all DocSet (they have nothing in common but the fact that
+nothing matched them); they are reported in `failed_file_ids` too, and are
+absent from `clusters`. Assign them by hand with `docset add-file`, or
+re-run once more of the corpus has been ingested and they have neighbours.
+
 Algorithm settings (encoder, fusion, manifold, training, …) come from
 the bundled
 [clustering_config.json](../packages/dgml-core/src/dgml_core/clustering_config.json).
 Operators can override any subset of them in one of two ways: an optional
-`clustering` section in `<workspace>/config.json` (peer to `classification`),
+`clustering` section in `<workspace>/config.toml` (peer to `classification`),
 or a standalone file passed with `--config PATH` (which replaces that section
 for the run). Both use the same field schema — see the
 [`clustering`](storage-layout.md#clustering-optional) entry in the
@@ -322,7 +351,7 @@ Errors:
 | Code | Cause |
 |---|---|
 | `MISSING_EXTRA` | The `clustering` extra is not installed. |
-| `CLUSTERING_CONFIG_INVALID` | `<workspace>/config.json` has a `clustering` section that isn't a JSON object, or a field inside it failed schema validation (typo, out-of-enum value, etc.). |
+| `CLUSTERING_CONFIG_INVALID` | `<workspace>/config.toml` has a `clustering` section that isn't a JSON object, or a field inside it failed schema validation (typo, out-of-enum value, etc.). |
 
 ## DocSet commands
 
@@ -478,9 +507,9 @@ path derives `font-weight`, `font-style`, `font-size` (an `em` bucket relative t
 the page's modal body size: `0.75em | 1em | 1.25em | 1.5em | 2em`), `color` (any
 CSS named color), and `text-transform: uppercase` (all-caps text).
 `--text-mode ocr` carries no font facts, so `dg:style` is empty there unless the
-workspace opts into the image-based path by adding a `style`
-section to `config.json` (its presence is the switch; it names a vision
-`model` — see [storage-layout.md](storage-layout.md)). That path assesses the
+workspace opts into the image-based path by setting `enabled = true` in the
+`style` section of `config.toml` (the section ships disabled; it optionally
+names a vision `model` — see [storage-layout.md](storage-layout.md)). That path assesses the
 same properties from the page image **plus `text-align`** (which needs the
 rendered layout to judge). It is honored only for OCR files and never competes
 with the deterministic digital/hybrid path. A malformed `style` section fails
@@ -495,13 +524,16 @@ same canonical `pages.render_pages` (ghostscript).
 
 The models are **not** CLI flags — like every other model-consuming command
 (`docset schema generate`, `file extract`, `discover`), `generate` reads them
-solely from the `generation` section of `<workspace>/config.json`, so each is
-one visible, deliberate choice per workspace. There is no code default and both
-`model` and `label_model` are required: a missing
-section or model fails with `GENERATION_CONFIG_MISSING`, a malformed one with
-`GENERATION_CONFIG_INVALID`. See the [`generation` config
-section](storage-layout.md#generation-required-for-dgml-docset-generate) for the
-fields (`model`, `label_model`, `api_key`/`api_key_env`, `api_base`).
+solely from the merged config, so each is one visible, deliberate choice. Each
+model resolves from its per-task field (`generation.model`,
+`generation.label_model`) or, when unset, its `[models]` tier (`standard` for
+transcription, `advanced` for labeling). There is no code default: if neither a
+field nor a tier names a model it fails with `GENERATION_CONFIG_MISSING`, a
+malformed one with `GENERATION_CONFIG_INVALID`. The two models carry independent
+credentials (`api_key`/`api_key_env`/`api_base` for transcription,
+`label_api_key`/`label_api_key_env`/`label_api_base` for labeling) since they may
+name different providers. See the [`generation` config
+section](storage-layout.md#generation-required-for-dgml-docset-generate).
 | `--window-size <n>` | `10` | Pages per transcription window. |
 | `--temperature <f>` | `0.0` | LLM temperature. |
 | `--max-tokens <n>` | `32000` | LLM max output tokens per call. |
@@ -618,7 +650,7 @@ Errors (run-level, error envelope + exit 1):
 |---|---|
 | `DOCSET_NOT_FOUND` | `<docset_id>` does not exist. |
 | `EMPTY_DOCSET` | DocSet exists but has no files assigned. |
-| `GENERATION_CONFIG_MISSING` | No `generation` section (or a missing `model` / `label_model`) in `<workspace>/config.json`. |
+| `GENERATION_CONFIG_MISSING` | A generation model can't be resolved — neither the per-task field (`generation.model` / `generation.label_model`) nor its `[models]` tier (`standard` / `advanced`) is set in the merged config. |
 | `GENERATION_CONFIG_INVALID` | The `generation` section is malformed (bad model string, both `api_key` and `api_key_env` set, etc.). A **pre-flight check** (before any transcription spend) also raises this for a model string with no resolvable provider. |
 | `AUTH_ERROR` | Pre-flight check: the API key for `model` or `label_model`'s provider is absent (and no `api_key` / `api_key_env` set). Skipped when `generation.api_base` is set, since a custom endpoint may authenticate differently. |
 
@@ -655,7 +687,7 @@ Two formats are involved:
   as values-shape JSON on request.
 
 The LLM is configurable like every other model-using command — via the
-`grounded` section of the workspace `config.json` (`schema_model`,
+`grounded` section of the workspace `config.toml` (`schema_model`,
 `values_model`, API keys, `max_tool_iters`), with per-call overrides on the
 commands below.
 
@@ -781,11 +813,11 @@ Errors across the group: `DOCSET_NOT_FOUND`, `FILE_NOT_FOUND`,
 
 ## File commands
 
-### `dgml file add <path> [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--auto-classify]`
+### `dgml file add <path> [--recursive] [--on-conflict POLICY] [--text-mode MODE] [--dpi N] [--auto-classify]`
 
 Add a File. The source is copied into the workspace, hashed, its pages
-are rendered to 300 dpi PNGs via `gs`, and per-page word boxes are
-written to `page_text/` according to `--text-mode`.
+are rendered to PNGs via `gs` (300 dpi by default — see `--dpi`), and
+per-page word boxes are written to `page_text/` according to `--text-mode`.
 
 `<path>` is a `.pdf`, or a convertible source (`.docx`/`.doc`/`.xlsx`/`.xls`)
 when a converter is configured for its format family in the workspace
@@ -812,8 +844,24 @@ ignored when `<path>` is a single file.
 | `--text-mode` | Behavior |
 |---|---|
 | `digital` (default) | Extract digital text from the PDF with `pdfminer.six`. A permanent text-extraction error is recorded for files with no digital text — the File record is still created (soft fail). |
-| `ocr` | Send each rendered page image to the cloud provider configured in `<workspace>/config.json`. Requires the `azure` or `aws` extra (`uv sync --extra azure` / `uv sync --extra aws` from a repo checkout; `pip install dgml[azure]`/`dgml[aws]` once DGML is published to PyPI). See "OCR configuration" below. |
-| `hybrid` | Run `digital` then `ocr` and merge the two per-page results by grouping words covering the same area into overlap regions (boxes overlap on IoU > 0.5 *or* one mostly contained in the other, so split/merge tokenization is resolved as a unit). Each region is resolved as a whole: OCR-only regions are kept; digital-only regions (no overlapping OCR) are assumed invisible to the human eye and dropped; mixed regions compare both sides' concatenated text by dash-normalized Levenshtein distance — if they agree (distance ≤ 2) digital wins (its characters come straight from the PDF font, more reliable than OCR even when OCR's tokenization is finer), and if they disagree OCR wins. A page whose digital text is mostly unresolved glyphs (pdfminer `(cid:N)` sentinels) falls back to OCR entirely. Default is silent — pass the global `--verbose` flag to surface per-page warnings and the merge summary on stderr. Requires the same `ocr` workspace config as `--text-mode ocr`. Optionally, an LLM can make the per-region decision instead of this heuristic — declare a `text_extraction` section in `config.json` (e.g. a local Ollama model); see [storage-layout.md](storage-layout.md#text_extraction-optional). Any LLM failure falls back to the heuristic for that page. |
+| `ocr` | Send each rendered page image to the cloud provider configured in `<workspace>/config.toml`. Requires the `azure` or `aws` extra (`uv sync --extra azure` / `uv sync --extra aws` from a repo checkout; `pip install dgml[azure]`/`dgml[aws]` once DGML is published to PyPI). See "OCR configuration" below. |
+| `hybrid` | Run `digital` then `ocr` and merge the two per-page results by grouping words covering the same area into overlap regions (boxes overlap on IoU > 0.5 *or* one mostly contained in the other, so split/merge tokenization is resolved as a unit). Each region is resolved as a whole: OCR-only regions are kept; digital-only regions (no overlapping OCR) are assumed invisible to the human eye and dropped; mixed regions compare both sides' concatenated text by dash-normalized Levenshtein distance — if they agree (distance ≤ 2) digital wins (its characters come straight from the PDF font, more reliable than OCR even when OCR's tokenization is finer), and if they disagree OCR wins. A page whose digital text is mostly unresolved glyphs (pdfminer `(cid:N)` sentinels) falls back to OCR entirely. Default is silent — pass the global `--verbose` flag to surface per-page warnings and the merge summary on stderr. Requires the same `ocr` workspace config as `--text-mode ocr`. Optionally, an LLM can make the per-region decision instead of this heuristic — declare a `text_extraction` section in `config.toml` (e.g. a local Ollama model); see [storage-layout.md](storage-layout.md#text_extraction-optional). Any LLM failure falls back to the heuristic for that page. |
+
+`--dpi N` sets the resolution page images are rasterized at, in dots per
+inch (default `300`, must be a positive integer — `0` or a negative value is
+an argparse usage error, exit 2, before the workspace is touched). Lower
+values roughly linearly reduce render time and `page_images/` disk use: 150
+is usually ample for OCR and for the clustering vision encoder, which
+downscales anyway. The value is stored on the File as `page_image_dpi`, and
+`dgml check --retry-errors` re-renders and re-extracts at that recorded value
+rather than the current default, so a repair reproduces the file's existing
+geometry.
+
+Note that `--dpi` also governs `page_text/` word boxes, which are expressed
+in **page-image pixel space** (`round(pdf_pts * dpi / 72)`) rather than PDF
+points — so the coordinates in a File added with `--dpi 150` are half those
+of the same File added at 300. Anything consuming `dg:origin` boxes should
+read `page_image_dpi` off the File record rather than assuming 300.
 
 Conflict types recorded in the success payload as `conflict_kind`:
 
@@ -848,14 +896,14 @@ Error codes that can come back on `file add`:
 
 | Code | Cause |
 |---|---|
-| `OCR_CONFIG_MISSING` | `--text-mode ocr` or `--text-mode hybrid` but `<workspace>/config.json` is missing or has no `ocr` section. No record is created. |
-| `OCR_CONFIG_INVALID` | `<workspace>/config.json` has an `ocr` section with invalid fields. No record is created. |
-| `TEXT_EXTRACTION_CONFIG_INVALID` | `--text-mode hybrid` but the optional `text_extraction` section in `<workspace>/config.json` is malformed. No record is created. |
+| `OCR_CONFIG_MISSING` | `--text-mode ocr` or `--text-mode hybrid` but `<workspace>/config.toml` is missing or has no `ocr` section. No record is created. |
+| `OCR_CONFIG_INVALID` | `<workspace>/config.toml` has an `ocr` section with invalid fields. No record is created. |
+| `TEXT_EXTRACTION_CONFIG_INVALID` | `--text-mode hybrid` but the optional `text_extraction` section in `<workspace>/config.toml` is malformed. No record is created. |
 | `UNSUPPORTED_FILE_TYPE` | Path is not a `.pdf` and is not a convertible source with a converter configured for its format family. |
 | `INVALID_PDF` | File does not start with the `%PDF-` magic. |
-| `CONVERSION_CONFIG_INVALID` | The `conversion` section of `<workspace>/config.json` is malformed or names an unresolvable/invalid provider. |
+| `CONVERSION_CONFIG_INVALID` | The `conversion` section of `<workspace>/config.toml` is malformed or names an unresolvable/invalid provider. |
 | `CONFLICT` | Hash- or path-conflict and `--on-conflict error`. |
-| `CLASSIFICATION_CONFIG_MISSING` | `--auto-classify` was passed but `<workspace>/config.json` is missing or has no `classification` section. |
+| `CLASSIFICATION_CONFIG_MISSING` | `--auto-classify` was passed but `<workspace>/config.toml` is missing or has no `classification` section. |
 | `CLASSIFICATION_CONFIG_INVALID` | The `classification` section exists but a required field is missing or malformed. |
 
 The classification config is a precondition for `--auto-classify`, so a
@@ -961,12 +1009,12 @@ whole workspace.
 `--auto-classify` on `dgml file add` uses a configured vision LLM to look at
 the new file's rendered page images and either assign it to an existing
 DocSet or create a new one. Configure the model via the `classification`
-section in `<workspace>/config.json`:
+section in `<workspace>/config.toml`:
 
 ```json
 {
   "classification": {
-    "model": "gemini/gemini-3.1-flash-lite",
+    "model": "gemini/gemini-flash-lite-latest",
     "max_pages": 3,
     "api_key_env": "GEMINI_API_KEY"
   }
@@ -975,9 +1023,10 @@ section in `<workspace>/config.json`:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-3.1-flash-lite`, `anthropic/claude-opus-4-7`, `openai/gpt-4o`. |
+| `model` | yes | `<provider>/<model>` in [litellm](https://docs.litellm.ai/docs/providers) form — e.g. `gemini/gemini-flash-lite-latest`, `anthropic/claude-opus-4-7`, `openai/gpt-4o`. |
 | `max_pages` | no (default `3`) | How many rendered page images (`page_images/page_1.png` …) to send to the LLM. Cap is per-classification cost: 1 is the cheap setting, 4+ is the thorough one. |
-| `api_key` | no | Optional literal API key. Use only on per-developer workspaces (config.json isn't checked in). Mutually exclusive with `api_key_env`. |
+| `naming_attempts` | no (default `1`) | How many independent proposals to request when naming a *newly clustered* DocSet (`dgml cluster`, not per-file `--auto-classify`). At `1` the single proposal is used as-is. At `2`+ the name the plurality of attempts agreed on wins, and that share is reported as the file's `naming_confidence` — a 3-of-3 agreement is safe to accept unreviewed, a 2-1 split is worth a look. Costs tokens linearly, so raise it only for runs where a wrong DocSet name is expensive to undo. |
+| `api_key` | no | Optional literal API key. Use only on per-developer workspaces (config.toml isn't checked in). Mutually exclusive with `api_key_env`. |
 | `api_key_env` | no | Optional name of the env var to read the API key from. Mutually exclusive with `api_key`. When neither is set, litellm uses its built-in per-provider lookup (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …). When `api_key_env` references an unset env var, `AUTH_ERROR` is raised. |
 
 The `litellm` SDK ships in the base install — no extra needed.
@@ -1005,7 +1054,7 @@ The `classification` payload block:
 ```json
 "classification": {
   "performed": true,
-  "model": "gemini/gemini-3.1-flash-lite",
+  "model": "gemini/gemini-flash-lite-latest",
   "decision": "existing",
   "docset_id": "k7q3xb91pmrf",
   "docset_created": false,
@@ -1043,8 +1092,8 @@ and the file is left unassigned.
 ## OCR configuration
 
 When `--text-mode ocr` is used, the provider and its settings come from
-`<workspace>/config.json`. A workspace is per-developer / not checked
-into source control, so secrets *may* live directly in `config.json`
+`<workspace>/config.toml`. A workspace is per-developer / not checked
+into source control, so secrets *may* live directly in `config.toml`
 (`api_key`) — but the safer default is to use `api_key_env` and keep
 the key in an environment variable.
 
@@ -1131,7 +1180,7 @@ patterns your team already uses to populate the environment:
   op run --env-file=.env -- uv run dgml file add scan.pdf --text-mode ocr   # 1Password
   aws-vault exec my-profile -- uv run dgml file add ...                     # aws-vault
   ```
-- **Azure token auth** — omit `api_key_env` from `config.json` entirely
+- **Azure token auth** — omit `api_key_env` from `config.toml` entirely
   and run `az login`. `DefaultAzureCredential` will pick up the session
   with no env vars needed.
 
@@ -1432,7 +1481,7 @@ accepts directly.
 | `density` | Information-dense branches: high token-per-depth, high child type variety, or many leaf descendants. |
 | `patterns` | Tags with the highest structural entropy — most variable child composition. |
 
-**Semantic filters** (require a generation LLM config in `<workspace>/config.json`)
+**Semantic filters** (require a generation LLM config in `<workspace>/config.toml`)
 
 | Filter | Selects tags the LLM categorises as … |
 |---|---|
@@ -1606,7 +1655,8 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | Code | Kind | Meaning |
 |---|---|---|
 | `WORKSPACE_NOT_INITIALIZED` | hard | A command that needs a workspace ran against a directory with no workspace layout (run `dgml workspace create`). |
-| `LOCAL_CONFIG_MISSING` | hard | The peer `local_config.json` is absent when a library caller invokes `Workspace.write_config_from_local` directly. `dgml workspace create` does not raise this — it seeds `local_config.json` from the bundled template instead. |
+| `LEGACY_CONFIG_PRESENT` | hard | A pre-migration `<workspace>/config.toml` is the only config present; the format is now TOML. Run `dgml init` to write `~/.config/dgml/config.toml`, then migrate any settings. |
+| `MODELS_CONFIG_INVALID` | hard | The `[models]` tier block is malformed (a tier is set to a non-string / empty value). |
 | `MISSING_EXTRA` | hard | A command needs an optional extra that isn't installed (e.g. `dgml[clustering]`). |
 | `INVALID_ARGUMENT` | hard | An argument is malformed or empty (e.g. blank `file_id`, unreadable `--proof`). |
 | `INTERNAL_ERROR` | hard | Unexpected exception; the message is a short, single-line `<ExcType>: <msg>` (capped, whitespace collapsed). Pass `--verbose` (or set `DGML_DEBUG=1`) for the full stderr traceback. |
@@ -1624,6 +1674,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `TEXT_EXTRACTION_CONFIG_INVALID` | hard | The optional `text_extraction` (hybrid-merge) config is malformed. |
 | `STYLE_CONFIG_INVALID` | hard | The optional `style` (image-based `dg:style` for OCR files) config section is malformed; fails `generate` up front. |
 | `AUTH_ERROR` | hard / soft | A referenced API-key env var is unset (soft in `classification.error`). |
+| `MODEL_NOT_SUPPORTED` | hard | A configured model id isn't recognized by litellm (misspelling, wrong/absent `provider/` prefix, or unavailable in this litellm version). Checked up front for every LLM call; skipped when that section's `api_base` is set (custom endpoint). |
 | `CLASSIFICATION_CONFIG_MISSING` | hard | `--auto-classify` with no `classification` config. |
 | `CLASSIFICATION_CONFIG_INVALID` | hard | The `classification` config has a missing/invalid field. |
 | `CLASSIFICATION_FAILED` | soft | The classification LLM call failed; lands in `classification.error`. |
@@ -1680,7 +1731,7 @@ Add a file and let the LLM pick (or create) the right DocSet:
 
 ```bash
 dgml init
-# Assumes <workspace>/config.json has a `classification` section and
+# Assumes <workspace>/config.toml has a `classification` section and
 # GEMINI_API_KEY (or the env var named in `classification.api_key_env`)
 # is set in this shell.
 payload=$(dgml file add /tmp/example.pdf --auto-classify)

@@ -30,7 +30,7 @@ from dgml_core.errors import (
     UnsupportedFileType,
 )
 from dgml_core.files import ConflictPolicy, FileStore
-from dgml_core.storage import Workspace, write_json_atomic
+from dgml_core.storage import Workspace
 
 from .conftest import needs_gs
 
@@ -71,7 +71,9 @@ def test_convertible_source_persists_converted_pdf(
 ) -> None:
     """A convertible source is stored as-is and its converted PDF is persisted
     alongside it at ``<stem>.pdf`` (the artifact generation later reuses)."""
-    write_json_atomic(store.ws.config_path, {"conversion": {"docx": {"provider": _STUB_DOCX}}})
+    from .conftest import write_config
+
+    write_config(store.ws, {"conversion": {"docx": {"provider": _STUB_DOCX}}})
     # The PDF-only post-steps need ghostscript / pdfminer; stub them out so the
     # test isolates the conversion-persistence behavior.
     monkeypatch.setattr(FileStore, "_safe_page_count", lambda self, *a, **k: (None, None))
@@ -104,6 +106,36 @@ def test_add_pdf(store: FileStore, sample_pdf: Path) -> None:
     assert result.record.pdf_converter is None
     pages = list(store.ws.file_pages_dir(result.record.id).glob("page_*.png"))
     assert len(pages) == 2
+
+
+@needs_gs
+def test_add_pdf_custom_dpi_is_rendered_and_recorded(store: FileStore, sample_pdf: Path) -> None:
+    result = store.add(sample_pdf, dpi=150)
+    assert result.page_render_error is None
+    assert result.record.page_image_dpi == 150
+    pages = sorted(store.ws.file_pages_dir(result.record.id).glob("page_*.png"))
+    assert len(pages) == 2
+    # The record has to describe the pixels actually on disk, since `dgml check`
+    # reproduces this geometry when it repairs the file later.
+    width, height = _png_size(pages[0])
+    at_300 = store.add(sample_pdf, on_conflict=ConflictPolicy.DUPLICATE)
+    w300, h300 = _png_size(sorted(store.ws.file_pages_dir(at_300.record.id).glob("page_*.png"))[0])
+    assert width < w300 and height < h300
+
+
+def _png_size(png: Path) -> tuple[int, int]:
+    """Width/height from a PNG's IHDR — avoids depending on an image library."""
+    header = png.read_bytes()[16:24]
+    return int.from_bytes(header[:4], "big"), int.from_bytes(header[4:], "big")
+
+
+def test_add_rejects_nonpositive_dpi(store: FileStore, sample_pdf: Path) -> None:
+    # Rejected before anything is written, so a bad flag can't leave a
+    # half-built File behind for `dgml check` to puzzle over.
+    for bad in (0, -300):
+        with pytest.raises(ValueError, match="dpi"):
+            store.add(sample_pdf, dpi=bad)
+    assert not any(store.ws.files_dir.iterdir())
 
 
 @needs_gs

@@ -25,8 +25,8 @@ from typing import ClassVar
 import torch
 
 from clustering.data.datasets import DocumentDataset
-from clustering.scenarios.base import Scenario, ScenarioResult
-from clustering.scenarios.clustering import assign_to_prototypes, cluster_embeddings
+from clustering.scenarios.base import UNKNOWN_NOISE_LABEL, Scenario, ScenarioResult
+from clustering.scenarios.clustering import assign_to_prototypes, cluster_emergent_bucket
 
 
 class S2PartialLabels(Scenario):
@@ -53,6 +53,10 @@ class S2PartialLabels(Scenario):
         # ── Embed corpus + initial assignment with composable gates ──────
         doc_ids, embeddings, true_labels = self.embed(unknown_dataset)
         sc = self.config.scenario
+        # No calibrator here: S2's prototypes come from category *names*, so
+        # there is no labeled support set to fit temperature/Platt/conformal
+        # against. The confidence stays ordinal and the review decision is a
+        # plain floor on it — which is honest about what the number is.
         result = assign_to_prototypes(
             embeddings,
             known_protos,
@@ -60,68 +64,38 @@ class S2PartialLabels(Scenario):
             threshold=sc.threshold,
             threshold_confidence=sc.threshold_confidence,
             threshold_quantile=sc.threshold_quantile,
+            abstain_threshold=sc.calibration.abstain_threshold,
         )
         labels_t, conf_t = result.labels, result.confidence
 
         labels_arr = labels_t.detach().numpy() if hasattr(labels_t, "numpy") else labels_t
         conf_arr = conf_t.detach().numpy() if hasattr(conf_t, "numpy") else conf_t
+        abstain_list = (
+            [bool(x) for x in result.abstain.tolist()] if result.abstain is not None else None
+        )
 
         # ── Cluster the unassigned bucket into emergent categories ───────
         predictions: list[str | None] = [None] * len(doc_ids)
         confidence: list[float | None] = [None] * len(doc_ids)
+        # Only known-category assignments can abstain: a document routed to the
+        # unknown bucket has no assignment to review yet — it is waiting on a
+        # new category, which is a different decision.
+        review: list[bool] = [False] * len(doc_ids)
         unknown_idx = [i for i, li in enumerate(labels_arr.tolist()) if int(li) == -1]
         n_unknown = len(unknown_idx)
 
         if n_unknown >= 2:
             unknown_emb = embeddings[torch.tensor(unknown_idx)]
-            # For k-means we still need an explicit k; for HDBSCAN it's
-            # ignored. The same dispatcher used by S1 keeps the unknown
-            # bucket honouring ``scenario.cluster_algorithm`` end-to-end.
-            k_unknown = max(2, min(8, n_unknown))
-            ulabels_t, _ = cluster_embeddings(
+            ulabels_t, _ = cluster_emergent_bucket(
                 unknown_emb,
+                scenario=sc,
                 manifold=self.manifold,
-                algorithm=sc.cluster_algorithm,
-                k=k_unknown,
                 seed=self.config.seed,
-                min_cluster_size=sc.hdbscan_min_cluster_size,
-                min_samples=sc.hdbscan_min_samples,
-                cluster_selection_epsilon=sc.hdbscan_cluster_selection_epsilon,
-                cluster_selection_method=sc.hdbscan_cluster_selection_method,
-                allow_single_cluster=sc.hdbscan_allow_single_cluster,
-                graph_cc_radius=sc.graph_cc_radius,
-                graph_cc_r_method=sc.graph_cc_r_method,
-                graph_cc_k_neighbors=sc.graph_cc_k_neighbors,
-                graph_cc_min_cluster_size=sc.graph_cc_min_cluster_size,
-                leiden_graph_method=sc.leiden_graph_method,
-                leiden_k_neighbors=sc.leiden_k_neighbors,
-                leiden_radius=sc.leiden_radius,
-                leiden_r_method=sc.leiden_r_method,
-                leiden_quality=sc.leiden_quality,
-                leiden_resolution=sc.leiden_resolution,
-                leiden_min_cluster_size=sc.leiden_min_cluster_size,
-                leiden_n_iterations=sc.leiden_n_iterations,
-                dbscan_eps=sc.dbscan_eps,
-                dbscan_r_method=sc.dbscan_r_method,
-                dbscan_k_neighbors=sc.dbscan_k_neighbors,
-                dbscan_min_samples=sc.dbscan_min_samples,
-                dbscan_min_cluster_size=sc.dbscan_min_cluster_size,
-                optics_min_samples=sc.optics_min_samples,
-                optics_xi=sc.optics_xi,
-                optics_min_cluster_size=sc.optics_min_cluster_size,
-                affinity_damping=sc.affinity_damping,
-                affinity_preference=sc.affinity_preference,
-                affinity_max_iter=sc.affinity_max_iter,
-                affinity_convergence_iter=sc.affinity_convergence_iter,
-                meanshift_bandwidth=sc.meanshift_bandwidth,
-                meanshift_quantile=sc.meanshift_quantile,
-                meanshift_bin_seeding=sc.meanshift_bin_seeding,
-                meanshift_cluster_all=sc.meanshift_cluster_all,
             )
             ulabels_arr = ulabels_t.detach().numpy() if hasattr(ulabels_t, "numpy") else ulabels_t
             for src, dst in zip(ulabels_arr.tolist(), unknown_idx, strict=True):
                 src_i = int(src)
-                predictions[dst] = "unknown_noise" if src_i == -1 else f"unknown_{src_i}"
+                predictions[dst] = UNKNOWN_NOISE_LABEL if src_i == -1 else f"unknown_{src_i}"
                 confidence[dst] = None
         elif n_unknown == 1:
             predictions[unknown_idx[0]] = "unknown_0"
@@ -131,6 +105,8 @@ class S2PartialLabels(Scenario):
             if int(li) != -1:
                 predictions[i] = cats[int(li)]
                 confidence[i] = float(conf_arr[i])
+                if abstain_list is not None:
+                    review[i] = abstain_list[i]
 
         return ScenarioResult(
             run_id=self.run_id,
@@ -140,8 +116,10 @@ class S2PartialLabels(Scenario):
             predictions=predictions,
             confidence=confidence,
             true_labels=true_labels,
+            review=review,
             metadata={
                 "categories": list(cats),
+                "n_review": int(sum(review)),
                 # Echo the user-supplied gate config + the effective
                 # post-calibration values, so `compare_runs` and the UI
                 # can reconstruct the operating point.

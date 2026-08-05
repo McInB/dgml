@@ -47,11 +47,15 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Literal, get_args
 
+from clustering.scenarios.base import UNKNOWN_NOISE_LABEL
+
 from .classification import (
+    ClassificationConfig,
     ClassificationDecision,
     load_classification_config,
     propose_new_docset_for_files,
 )
+from .config import load_merged_config
 from .dataset import WorkspaceFileDataset
 from .docsets import DocSetStore
 from .errors import (
@@ -62,8 +66,9 @@ from .errors import (
     IncrementalWithoutClusters,
 )
 from .llm_clustering import llm_cluster_files
+from .models_config import ConfigSection
 from .run_clustering import resolve_text_settings, run_clustering_detailed
-from .storage import Workspace, read_config, read_json
+from .storage import Workspace, read_json
 from .utils import unassigned_file_ids
 
 # Cap on how many files from a single cluster get sent to the LLM when
@@ -172,7 +177,7 @@ def load_clustering_preset(name: str) -> dict[str, Any]:
     """Load a bundled config preset (``small`` / ``light`` / ``medium`` / ``heavy``).
 
     Returns the preset's overrides dict (same shape as the ``clustering``
-    section of ``<workspace>/config.json``). Raises
+    section of ``<workspace>/config.toml``). Raises
     :class:`ClusteringConfigInvalid` for an unknown preset name.
     """
     if name not in CONFIG_PRESETS:
@@ -196,7 +201,7 @@ def resolve_clustering_overrides(
 
     ``config`` is the raw value of the CLI ``--config`` flag:
 
-    - ``None`` → the ``clustering`` section of ``<workspace>/config.json``
+    - ``None`` → the ``clustering`` section of ``<workspace>/config.toml``
       (:func:`load_clustering_overrides`), or ``{}`` when absent.
     - a preset name (``small`` / ``light`` / ``medium`` / ``heavy``) →
       :func:`load_clustering_preset`.
@@ -216,7 +221,17 @@ class _InternalResult:
 
     clusters: dict[str, str]
     render_skipped: list[str]
+    # Files the clusterer embedded but placed in *no* cluster (the density
+    # algorithms' noise bucket). Kept out of ``clusters`` because they share
+    # no category — only the fact that nothing matched them — so they must
+    # not be named into a DocSet. :func:`clustering` reports them alongside
+    # ``render_skipped`` in ``failed_file_ids``.
+    unclustered: list[str] = field(default_factory=list)
     confidences: dict[str, float | None] = field(default_factory=dict)
+    # Files whose assignment the run wants a human to confirm. Sparse: only
+    # flagged files appear, so an unconfigured run carries an empty dict rather
+    # than one ``False`` per file. Empty unless ``scenario.calibration`` is set.
+    review: dict[str, bool] = field(default_factory=dict)
     mode: str = "fresh"
     method: str = "embedding"
     known_categories: list[str] = field(default_factory=list)
@@ -228,29 +243,19 @@ class _InternalResult:
 
 
 def load_clustering_overrides(workspace: Workspace) -> dict[str, Any]:
-    """Read the ``clustering`` section of ``<workspace>/config.json``.
+    """Read the ``clustering`` section of the merged config.
 
-    Returns ``{}`` when the file doesn't exist or has no ``clustering``
-    section — the bundled defaults in
-    :data:`dgml_core.run_clustering._CONFIG_RESOURCE` stand on their own.
-    Raises :class:`ClusteringConfigInvalid` when the file exists but is
-    malformed (not valid JSON, not a JSON object) or the ``clustering``
-    section itself isn't a JSON object. Field-level validation happens
-    later in :func:`dgml.run_clustering._build_config` after the merge.
+    Returns ``{}`` when no ``clustering`` section is present — the bundled
+    defaults in :data:`dgml_core.run_clustering._CONFIG_RESOURCE` stand on their
+    own. Raises :class:`ClusteringConfigInvalid` when the ``clustering`` section
+    isn't a table. Field-level validation happens later in
+    :func:`dgml.run_clustering._build_config` after the merge.
     """
-    if not workspace.config_path.exists():
-        return {}
-    try:
-        data = read_config(workspace.config_path)
-    except CorruptMetadata as exc:
-        raise ClusteringConfigInvalid(f"{workspace.config_path} is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ClusteringConfigInvalid(f"{workspace.config_path} must contain a JSON object")
-    section = data.get("clustering")
+    section = load_merged_config(workspace).get(ConfigSection.CLUSTERING)
     if section is None:
         return {}
     if not isinstance(section, dict):
-        raise ClusteringConfigInvalid("'clustering' section in config.json must be a JSON object")
+        raise ClusteringConfigInvalid("'clustering' section in the config must be a table")
     return section
 
 
@@ -258,7 +263,7 @@ def load_clustering_config_file(path: Path) -> dict[str, Any]:
     """Read a standalone clustering config JSON file (the CLI ``--config`` flag).
 
     The file is a JSON object holding the same fields the ``clustering``
-    section of ``<workspace>/config.json`` would (e.g. ``encoder_text``,
+    section of ``<workspace>/config.toml`` would (e.g. ``encoder_text``,
     ``scenario``); its contents are used directly as the overrides
     deep-merged over the bundled defaults in
     :data:`dgml_core.run_clustering._CONFIG_RESOURCE`. When supplied it
@@ -314,8 +319,9 @@ def clustering(
     LLM call for a given cluster fails, the files in *that* cluster
     land in ``failed_file_ids`` while every other cluster (matched or
     successfully named) is still assigned. Files whose page rendering
-    failed at ingest time (no ``page_1.png``) also land in
-    ``failed_file_ids``. The function does not raise.
+    failed at ingest time (no ``page_1.png``), and files the clusterer
+    placed in no cluster at all, also land in ``failed_file_ids``. The
+    function does not raise.
 
     Returns a JSON-serializable dict. The first three keys are the core
     contract; the rest are **additive** incremental-workflow fields
@@ -327,11 +333,15 @@ def clustering(
       DocSet name the file landed in — either an existing DocSet's
       name or the new name the LLM proposed. Files that failed to
       assign keep their placeholder label here (and also appear in
-      ``failed_file_ids``).
+      ``failed_file_ids``) — except files that were never in a cluster to
+      begin with (no page image, or the clusterer's noise bucket), which
+      are absent from ``clusters`` entirely.
     - ``failed_file_ids``: file IDs that were not assigned to any
-      DocSet — either because their first-page image was missing or
-      because their cluster needed LLM naming and that naming failed
-      (missing config, no page images, provider error, …).
+      DocSet — because their first-page image was missing, because the
+      clusterer placed them in no cluster (they resemble neither an
+      existing DocSet nor each other), or because their cluster needed
+      LLM naming and that naming failed (missing config, no page images,
+      provider error, …).
     - ``skipped``: ``True`` only when ``skip_existing`` was passed and there
       were no unassigned files (the clusterer never ran); ``False`` on every
       actual clustering run. Always present so callers can read it directly.
@@ -340,17 +350,32 @@ def clustering(
     - ``n_assigned_existing``: number of files assigned to a DocSet that
       already existed before this run (only meaningful for incremental).
     - ``n_new_clusters``: number of *new* DocSets created this run.
-    - ``assignments``: ``{file_id: {"docset", "confidence", "is_new"}}``
-      for every successfully-assigned file — ``confidence`` is the
-      nearest-prototype confidence in ``[0, 1]`` (``null`` for emergent
-      clusters), ``is_new`` flags files that landed in a DocSet created
-      this run.
+    - ``assignments``:
+      ``{file_id: {"docset", "confidence", "is_new", "review"}}``
+      for every successfully-assigned file — ``confidence`` is in ``[0, 1]``
+      and ``is_new`` flags files that landed in a DocSet created this run.
+      What ``confidence`` *means* depends on ``method``. For ``embedding``
+      it is the nearest-prototype confidence for files matched against
+      existing DocSets, and the clustering-geometry confidence (peak softmax
+      over centroid distances) for files placed by a fresh clustering run;
+      ``null`` when the clusterer produced no score. For ``llm`` it is the
+      model's self-reported confidence in the group the file was put in,
+      shared by every member of that group, and ``null`` when the model
+      declined to report one. Neither is a calibrated probability — both are
+      an ordinal ranking over which assignments to review first, comparable
+      within one run only, unless ``clustering.scenario.calibration`` is
+      configured.
+      ``review`` flags an assignment the run wants a human to confirm. It never
+      changes where the file landed: a flagged file is assigned like any other.
+    - ``review_queue``: the ``file_id``s whose ``review`` flag is set, as a
+      list. Always present, and always empty unless the clustering config sets
+      ``scenario.calibration`` (a coverage target or an abstain floor).
 
     ``skip_existing`` makes the whole call a no-op (returns ``skipped: True``,
     empty maps) when every file is already assigned — cheap to use on resume.
 
     ``config`` selects the clustering configuration: ``None`` uses the
-    workspace ``config.json`` ``clustering`` section (bundled defaults when
+    workspace ``config.toml`` ``clustering`` section (bundled defaults when
     absent); a preset name (``small`` / ``light`` / ``medium`` / ``heavy``)
     loads a bundled preset; anything else is treated as a path to a standalone
     config JSON. See :func:`resolve_clustering_overrides`.
@@ -376,6 +401,7 @@ def clustering(
             "n_assigned_existing": 0,
             "n_new_clusters": 0,
             "assignments": {},
+            "review_queue": [],
         }
 
     internal = clustering_internal(
@@ -413,14 +439,23 @@ def clustering(
             assignments[file_id] = {
                 "docset": cluster_name,
                 "confidence": internal.confidences.get(file_id),
+                # Naming agreement is a property of a *proposed* name, so it is
+                # always absent here; the key is still emitted so consumers can
+                # read one shape for every file.
+                "naming_confidence": None,
                 "is_new": False,
+                "review": internal.review.get(file_id, False),
             }
             if extraction_block is not None:
                 assignments[file_id]["extraction"] = extraction_block
         else:
             unmatched.setdefault(cluster_name, []).append(file_id)
 
-    failed_file_ids: list[str] = list(internal.render_skipped)
+    # Two ways a file can come back unassigned: its page never rendered, so
+    # it was never embedded, or it was embedded and the clusterer put it in
+    # no cluster. Both are partial successes, not errors — the run still
+    # exits 0 and reports the rest.
+    failed_file_ids: list[str] = [*internal.render_skipped, *internal.unclustered]
     n_new_clusters = 0
 
     # Pass 2: for each unmatched cluster, obtain a DocSet proposal, create
@@ -473,13 +508,35 @@ def clustering(
                 clusters[file_id] = new_name
                 assignments[file_id] = {
                     "docset": new_name,
-                    "confidence": None,
+                    # Read from the clusterer rather than hardcoded null. An
+                    # emergent cluster has no prototype to measure a distance
+                    # to, but both methods now have something real to say
+                    # here: the fresh-clustering path reports a confidence
+                    # from the clustering geometry itself (peak softmax over
+                    # centroid distances), and the llm method's confidence is
+                    # a judgement about the *group*, which is exactly what an
+                    # emergent cluster is. Files nothing scored still come
+                    # back as ``None``.
+                    "confidence": internal.confidences.get(file_id),
+                    # Orthogonal to the above: how much the *naming* attempts
+                    # agreed on this DocSet's name, when
+                    # `classification.naming_attempts` is raised above 1. A
+                    # tightly-grouped cluster can still be badly named, so the
+                    # two numbers are never interchangeable.
+                    "naming_confidence": decision.confidence,
                     "is_new": True,
+                    "review": internal.review.get(file_id, False),
                 }
 
     n_assigned_existing = sum(
         1 for detail in assignments.values() if detail["docset"] in existing_names
     )
+    # The actionable form of the per-assignment `review` flags: the files a
+    # human should look at, in assignment order. Every one of them is *already*
+    # assigned — this is a "confirm these" list, not a queue of pending work —
+    # so a caller that ignores it loses nothing. Empty unless the workspace
+    # config sets `clustering.scenario.calibration`.
+    review_queue = [fid for fid, detail in assignments.items() if detail["review"]]
     return {
         "clusters": clusters,
         "failed_file_ids": failed_file_ids,
@@ -488,6 +545,7 @@ def clustering(
         "n_assigned_existing": n_assigned_existing,
         "n_new_clusters": n_new_clusters,
         "assignments": assignments,
+        "review_queue": review_queue,
     }
 
 
@@ -504,7 +562,8 @@ def clustering_internal(
     A cluster name is either the name of an existing DocSet (the file is
     judged to belong with that DocSet's existing members) or
     ``"unknown_<n>"`` (a fresh cluster proposed for files that don't fit
-    any existing DocSet).
+    any existing DocSet). Files the clusterer put in *no* cluster don't get
+    a name at all — see :attr:`_InternalResult.unclustered` below.
 
     ``method`` selects the clustering engine (orthogonal to ``mode``):
 
@@ -527,10 +586,16 @@ def clustering_internal(
       Requires at least one DocSet.
     - **auto** ⇒ incremental when DocSets exist, else fresh.
 
-    Files whose first-page image is missing (page rendering failed at
-    ingest time) can't be embedded; they're returned in
-    :attr:`_InternalResult.render_skipped` so the outer :func:`clustering`
-    can route them into ``failed_file_ids``.
+    Two kinds of file come back without a cluster name, and both are
+    reported separately from ``clusters`` so the outer :func:`clustering`
+    can route them into ``failed_file_ids``:
+
+    - :attr:`_InternalResult.render_skipped` — no first-page image (page
+      rendering failed at ingest time), so they were never embedded.
+    - :attr:`_InternalResult.unclustered` — embedded, but the clusterer's
+      density algorithm assigned them to its noise bucket. They are *not*
+      an emergent cluster: they resemble neither an existing DocSet nor
+      one another, so naming them into a DocSet would invent a category.
 
     Returns an :class:`_InternalResult`. Empty workspace ⇒ an empty
     result carrying the resolved ``mode``.
@@ -580,7 +645,7 @@ def clustering_internal(
         )
 
     # Clustering overrides. ``config`` may be a preset name, a path, or None
-    # (workspace config.json section). Missing config/section → empty dict
+    # (workspace config.toml section). Missing config/section → empty dict
     # and the bundled defaults stand. A malformed file/section/preset raises
     # ClusteringConfigInvalid, which the CLI surfaces as an error envelope.
     overrides = resolve_clustering_overrides(workspace, config=config)
@@ -597,7 +662,12 @@ def clustering_internal(
     # assembles record.text under that same view.
     text_view, overrides = resolve_text_settings(workspace.files_dir, overrides)
 
-    dataset = WorkspaceFileDataset(workspace, usable, text_view=text_view)
+    # Load enough page renders for the scenario's image pooling. ``pooling_pages``
+    # defaults to 1 (page-1 only), so this is a no-op unless the caller opted in;
+    # threading it here is what makes the knob actually take effect end-to-end.
+    pooling_pages = int((overrides.get("scenario") or {}).get("pooling_pages") or 1)
+
+    dataset = WorkspaceFileDataset(workspace, usable, text_view=text_view, max_pages=pooling_pages)
 
     # Build a labeled support set from existing DocSet members: for the
     # incremental path, reconstruct each category's prototype from *all*
@@ -622,7 +692,11 @@ def clustering_internal(
 
     if support_file_ids:
         support_dataset = WorkspaceFileDataset(
-            workspace, support_file_ids, labels=support_labels, text_view=text_view
+            workspace,
+            support_file_ids,
+            labels=support_labels,
+            text_view=text_view,
+            max_pages=pooling_pages,
         )
         detailed = run_clustering_detailed(
             dataset,
@@ -631,6 +705,8 @@ def clustering_internal(
             support_dataset=support_dataset,
             overrides=overrides,
             cache_dir=workspace.embedding_cache_dir,
+            classification_config=_adjudication_config(workspace),
+            debug=debug,
         )
     else:
         detailed = run_clustering_detailed(
@@ -638,18 +714,53 @@ def clustering_internal(
             known_categories=known_categories,
             overrides=overrides,
             cache_dir=workspace.embedding_cache_dir,
+            classification_config=_adjudication_config(workspace),
+            debug=debug,
         )
 
-    clusters = {doc_id: pred.cluster_name for doc_id, pred in detailed.items()}
+    # Split off the noise bucket before it can pass for a cluster name. The
+    # density-based algorithms (the default `leiden` among them) return it
+    # for documents they place nowhere, and its members have nothing in
+    # common with each other — so it is the one label that must not become a
+    # DocSet. Its name is only a hair away from a real ``unknown_<n>``.
+    clusters = {
+        doc_id: pred.cluster_name
+        for doc_id, pred in detailed.items()
+        if pred.cluster_name != UNKNOWN_NOISE_LABEL
+    }
+    unclustered = [
+        doc_id for doc_id, pred in detailed.items() if pred.cluster_name == UNKNOWN_NOISE_LABEL
+    ]
     confidences = {doc_id: pred.confidence for doc_id, pred in detailed.items()}
+    review = {doc_id: bool(pred.review) for doc_id, pred in detailed.items() if pred.review}
     return _InternalResult(
         clusters=clusters,
         render_skipped=skipped,
+        unclustered=unclustered,
         confidences=confidences,
+        review=review,
         mode=effective_mode,
         method="embedding",
         known_categories=known_categories,
     )
+
+
+def _adjudication_config(workspace: Workspace) -> ClassificationConfig | None:
+    """The classification config the consolidation pass adjudicates with.
+
+    ``None`` when the workspace has no usable ``classification`` section, which
+    is the common case: consolidation is off by default, and
+    :func:`run_clustering_detailed` ignores this argument unless the resolved
+    clustering config also enables the pass. Resolved unconditionally (rather
+    than behind a second copy of the enabled-check) so the gate lives in exactly
+    one place; failures are swallowed to keep the never-raise clustering
+    contract — a workspace that asks for adjudication but can't reach a model
+    simply doesn't get it.
+    """
+    try:
+        return load_classification_config(workspace)
+    except DgmlError:
+        return None
 
 
 def _resolve_method(method: str, *, n_usable: int, threshold: int) -> str:
@@ -708,7 +819,10 @@ def _llm_cluster_internal(
     return _InternalResult(
         clusters=result.clusters,
         render_skipped=render_skipped,
-        confidences=dict.fromkeys(result.clusters),
+        # Keyed off ``clusters`` rather than taken wholesale, so the confidence
+        # map is guaranteed to cover exactly the assigned files; a group the
+        # model gave no confidence for stays ``None``.
+        confidences={fid: result.confidences.get(fid) for fid in result.clusters},
         mode=effective_mode,
         method="llm",
         known_categories=known_categories,

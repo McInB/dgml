@@ -138,3 +138,49 @@ def test_tfidf_encoder_fits_and_encodes(tmp_path: Path) -> None:
     # Rows are L2-normalized.
     norms = out.pooled.norm(dim=-1)
     assert all(abs(float(n) - 1.0) < 1e-4 for n in norms)
+
+
+def _tfidf_cfg(files: Path) -> EncoderConfig:
+    return EncoderConfig(
+        name="tfidf",
+        model_id="tfidf",
+        embedding_dim=8,
+        extra={"corpus_dir": str(files), "text_view": "full"},
+    )
+
+
+def test_tfidf_encoder_names_ocr_when_the_corpus_has_no_text(tmp_path: Path) -> None:
+    # Scanned PDFs: the files were added fine and have page_text/ on disk, but
+    # every page came back wordless. Distinct from "no page_text at all".
+    files = tmp_path / "files"
+    for i in range(3):
+        _write_page(files / f"scan{i}", 1, [])
+
+    with pytest.raises(ValueError, match="none contain extracted text") as exc:
+        build_encoder(_tfidf_cfg(files))
+    message = str(exc.value)
+    assert "3 files" in message, "says how many were looked at"
+    assert "--text-mode ocr|hybrid" in message, "names the fix, not just the symptom"
+
+
+def test_tfidf_encoder_distinguishes_an_absent_corpus_from_a_wordless_one(tmp_path: Path) -> None:
+    files = tmp_path / "files"
+    files.mkdir(parents=True)
+    with pytest.raises(ValueError, match="found no page_text"):
+        build_encoder(_tfidf_cfg(files))
+
+
+def test_tfidf_encoder_accepts_a_corpus_where_only_some_files_are_wordless(tmp_path: Path) -> None:
+    # A partial OCR gap is not this encoder's problem to refuse — TF-IDF fits
+    # over whatever text exists, and the empty rows simply carry no signal.
+    files = tmp_path / "files"
+    for i, body in enumerate(["rent roll tenant lease"] * 2 + ["balance sheet assets equity"] * 2):
+        _write_page(
+            files / f"doc{i}",
+            1,
+            [_w(tok, 100 + 50 * j, 100, 140 + 50 * j, 115) for j, tok in enumerate(body.split())],
+        )
+    _write_page(files / "scan", 1, [])
+
+    out = build_encoder(_tfidf_cfg(files)).encode(["rent roll tenant"])
+    assert out.pooled.shape == (1, 8)

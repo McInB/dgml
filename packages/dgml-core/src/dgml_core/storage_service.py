@@ -59,7 +59,7 @@ from typing import Any, ClassVar
 
 from .errors import StorageConfigInvalid, StorageProviderUnresolvable
 from .hashing import sha256_file
-from .storage import Workspace, read_config
+from .storage import Workspace
 
 # The bundled default: local disk. Used when ``config.json`` has no ``storage``
 # section. Resolved through the same path as any third-party provider.
@@ -394,32 +394,19 @@ def make_store(config: StorageConfig) -> StorageService:
 
 
 def load_storage_config(workspace: Workspace) -> StorageConfig:
-    """Read and validate the ``storage`` section of ``<workspace>/config.json``.
+    """Return the workspace's storage config — currently always the bundled
+    default (:data:`DEFAULT_STORAGE_PROVIDER`, local disk).
 
-    A missing config file or missing ``storage`` section yields the bundled
-    default (:data:`DEFAULT_STORAGE_PROVIDER`, local disk). Validates only the
-    generic shape — a non-empty string ``provider`` — deferring provider-specific
-    field validation to :meth:`StorageService.parse_config` in :func:`make_store`.
+    STOPGAP (post config.toml migration): this used to parse a ``storage``
+    section out of the per-workspace ``config.json``. Upstream replaced JSON
+    config with the layered TOML model (``load_merged_config``), and reading a
+    ``[storage]`` table back out of it is a deliberate follow-up — see the
+    STORAGE_REROUTE_HANDOFF "storage change" TODO. Nothing writes or reads a
+    storage section today (every workspace is LocalStore), so returning the
+    default is behavior-identical to the pre-merge code while that reader is
+    designed. Provider selection via config is therefore temporarily disabled.
     """
-    root = workspace.root
-    if not workspace.config_path.exists():
-        return StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=root)
-    try:
-        data = read_config(workspace.config_path)
-    except Exception as exc:  # CorruptMetadata and friends
-        raise StorageConfigInvalid(f"{workspace.config_path} is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise StorageConfigInvalid(f"{workspace.config_path} must contain a JSON object")
-    section = data.get("storage")
-    if section is None:
-        return StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=root)
-    if not isinstance(section, dict):
-        raise StorageConfigInvalid("'storage' must be a JSON object")
-    provider = section.get("provider")
-    if not isinstance(provider, str) or not provider.strip():
-        raise StorageConfigInvalid("'storage.provider' must be a non-empty string")
-    options = {k: v for k, v in section.items() if k != "provider"}
-    return StorageConfig(provider=provider, root=root, options=options)
+    return StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=workspace.root)
 
 
 def storage_fingerprint(config: StorageConfig) -> str:

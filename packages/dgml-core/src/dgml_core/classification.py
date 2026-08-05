@@ -14,7 +14,7 @@
 
 When ``dgml file add --auto-classify`` is used, this module:
 
-1. Loads the ``classification`` section of ``<workspace>/config.json``.
+1. Loads the ``classification`` section of ``<workspace>/config.toml``.
 2. Gathers a small number of rendered page images from the new file plus
    the id/name/description of each existing DocSet.
 3. Calls the configured vision LLM via :mod:`litellm`, forcing a choice
@@ -31,24 +31,26 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from .config import load_merged_config
 from .docsets import DocSetStore
 from .errors import (
     AuthError,
     ClassificationConfigInvalid,
     ClassificationConfigMissing,
     ClassificationFailed,
-    CorruptMetadata,
 )
 from .llm import LLMConfig, call_with_tools
 from .models import DocSet
-from .storage import Workspace, read_config
+from .models_config import ConfigSection, Tier, resolve_tiered_model
+from .storage import Workspace
 from .usage import OPERATION_CLASSIFY
 from .utils import gather_file_pages, image_to_data_url
 
 DEFAULT_MAX_PAGES = 3
+DEFAULT_NAMING_ATTEMPTS = 1
 
 _TOOL_ASSIGN = "assign_to_existing_docset"
 _TOOL_CREATE = "create_new_docset"
@@ -78,12 +80,19 @@ class ClassificationConfig:
     ``api_key_env`` > litellm's per-provider default env var
     (``GEMINI_API_KEY`` for ``gemini/...``, etc.). Setting both
     ``api_key`` and ``api_key_env`` is a config error.
+
+    ``naming_attempts`` is the default ``attempts`` for
+    :func:`propose_new_docset_for_files` — how many independent proposals to
+    request before returning the modal one. It costs tokens linearly, so it
+    stays at 1 unless the workspace opts in.
     """
 
     model: str
     max_pages: int = DEFAULT_MAX_PAGES
     api_key: str | None = None
     api_key_env: str | None = None
+    api_base: str | None = None
+    naming_attempts: int = DEFAULT_NAMING_ATTEMPTS
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,12 @@ class ClassificationDecision:
     Exactly one of ``existing_docset_id`` or (``new_name``, ``new_description``,
     ``new_key_questions``) is populated. Validated at construction by
     :func:`classify_file`.
+
+    ``confidence`` is populated only by the multi-attempt path — see
+    :func:`propose_new_docset_for_files` with ``attempts >= 2``. It is the share
+    of independent attempts that landed on the *returned* name, in ``(0, 1]``:
+    an ordinal robustness signal about the naming, not a calibrated probability,
+    and unrelated to how confident the clusterer was about the grouping.
     """
 
     decision: str  # "existing" | "new"
@@ -100,74 +115,47 @@ class ClassificationDecision:
     new_name: str | None = None
     new_description: str | None = None
     new_key_questions: tuple[str, ...] = ()
+    confidence: float | None = None
 
 
 def load_classification_config(workspace: Workspace) -> ClassificationConfig:
-    """Read and validate the ``classification`` section of ``<workspace>/config.json``.
+    """Resolve the classification model (``classification.model`` override →
+    ``[models].light`` tier) and its credentials from the merged config.
 
-    Raises :class:`ClassificationConfigMissing` when no config file or no
-    ``classification`` section is present; :class:`ClassificationConfigInvalid`
-    when the section exists but is malformed.
+    Raises :class:`ClassificationConfigMissing` when neither the override nor a
+    tier names a model; :class:`ClassificationConfigInvalid` when the section is
+    malformed.
     """
-    if not workspace.config_path.exists():
-        raise ClassificationConfigMissing(
-            f"no config.json at {workspace.config_path}; "
-            "auto-classification requires a workspace config with a 'classification' section"
-        )
+    merged = load_merged_config(workspace)
+    rm = resolve_tiered_model(
+        merged,
+        section_name=ConfigSection.CLASSIFICATION,
+        tier=Tier.LIGHT,
+        invalid=ClassificationConfigInvalid,
+        missing=ClassificationConfigMissing,
+    )
 
-    try:
-        data = read_config(workspace.config_path)
-    except CorruptMetadata as exc:
-        raise ClassificationConfigInvalid(
-            f"{workspace.config_path} is not valid JSON: {exc}"
-        ) from exc
-
-    if not isinstance(data, dict):
-        raise ClassificationConfigInvalid(f"{workspace.config_path} must contain a JSON object")
-
-    section = data.get("classification")
-    if section is None:
-        raise ClassificationConfigMissing(
-            f"{workspace.config_path} has no 'classification' section"
-        )
-    if not isinstance(section, dict):
-        raise ClassificationConfigInvalid("'classification' must be a JSON object")
-
-    model = section.get("model")
-    if not isinstance(model, str) or not model.strip():
-        raise ClassificationConfigInvalid(
-            "'classification.model' must be a non-empty string "
-            "(e.g. 'gemini/gemini-3.1-flash-lite')"
-        )
-
-    max_pages_raw = section.get("max_pages", DEFAULT_MAX_PAGES)
+    section = merged.get(ConfigSection.CLASSIFICATION)
+    sec: dict[str, Any] = section if isinstance(section, dict) else {}
+    max_pages_raw = sec.get("max_pages", DEFAULT_MAX_PAGES)
     if not isinstance(max_pages_raw, int) or isinstance(max_pages_raw, bool) or max_pages_raw < 1:
         raise ClassificationConfigInvalid(
             "'classification.max_pages' must be a positive integer if set"
         )
 
-    api_key = section.get("api_key")
-    if api_key is not None and (not isinstance(api_key, str) or not api_key):
+    attempts_raw = sec.get("naming_attempts", DEFAULT_NAMING_ATTEMPTS)
+    if not isinstance(attempts_raw, int) or isinstance(attempts_raw, bool) or attempts_raw < 1:
         raise ClassificationConfigInvalid(
-            "'classification.api_key' must be a non-empty string if set"
-        )
-
-    api_key_env = section.get("api_key_env")
-    if api_key_env is not None and (not isinstance(api_key_env, str) or not api_key_env):
-        raise ClassificationConfigInvalid(
-            "'classification.api_key_env' must be a non-empty env var name if set"
-        )
-
-    if api_key is not None and api_key_env is not None:
-        raise ClassificationConfigInvalid(
-            "set at most one of 'classification.api_key' / 'classification.api_key_env', not both"
+            "'classification.naming_attempts' must be a positive integer if set"
         )
 
     return ClassificationConfig(
-        model=model,
+        model=rm.model,
         max_pages=max_pages_raw,
-        api_key=api_key,
-        api_key_env=api_key_env,
+        api_key=rm.api_key,
+        api_key_env=rm.api_key_env,
+        api_base=rm.api_base,
+        naming_attempts=attempts_raw,
     )
 
 
@@ -215,6 +203,7 @@ def propose_new_docset_for_files(
     *,
     config: ClassificationConfig,
     debug: bool = False,
+    attempts: int | None = None,
 ) -> ClassificationDecision:
     """Ask the configured vision LLM to propose a new DocSet (name,
     description, and key questions) that ``file_ids`` should anchor.
@@ -227,22 +216,83 @@ def propose_new_docset_for_files(
     whole rather than a single example. The caller is responsible for
     capping ``file_ids`` if cost/context is a concern.
 
+    ``attempts`` buys a robustness signal at a linear cost in tokens. When
+    omitted it falls back to ``config.naming_attempts``, so a workspace can turn
+    the signal on for every cluster without any caller passing it; an explicit
+    argument still wins. At ``1`` a single call is made and the decision carries
+    no ``confidence``. With ``attempts >= 2`` the proposal is requested that many
+    times independently, and the **modal** proposal is returned — the one the
+    plurality of attempts agreed on, not whichever came back first — carrying a
+    ``confidence`` equal to that plurality's share. A name three attempts out of
+    three settled on is one you can create without a human looking; a 2-1 split
+    is a coin toss worth surfacing.
+
     Same failure contract as :func:`classify_file`: raises
     :class:`ClassificationFailed` for missing SDK / no page images on
     any of the files / malformed response / provider error, and
     :class:`AuthError` when ``config.api_key_env`` is set but the env
-    var isn't.
+    var isn't. With ``attempts >= 2`` an individual attempt is allowed to fail:
+    agreement is computed over the attempts that succeeded, and the error is
+    re-raised only if *every* attempt failed. Otherwise asking for more opinions
+    would multiply the exposure to one transient provider hiccup, making the
+    robustness feature less robust than not using it.
     """
-    response = _vision_tool_call(
-        workspace,
-        file_ids,
-        config=config,
-        prompt=_build_prompt_new_only(),
-        tools=[_create_new_docset_tool()],
-        debug=debug,
-    )
-    name, args = _extract_single_tool_call(response)
-    return _parse_new_docset_args(name, args)
+    if attempts is None:
+        attempts = config.naming_attempts
+    if attempts < 1:
+        raise ValueError(f"attempts must be at least 1, got {attempts}")
+
+    decisions: list[ClassificationDecision] = []
+    first_error: Exception | None = None
+    for _ in range(attempts):
+        try:
+            response = _vision_tool_call(
+                workspace,
+                file_ids,
+                config=config,
+                prompt=_build_prompt_new_only(),
+                tools=[_create_new_docset_tool()],
+                debug=debug,
+            )
+            name, args = _extract_single_tool_call(response)
+            decisions.append(_parse_new_docset_args(name, args))
+        except (ClassificationFailed, AuthError) as exc:
+            if attempts == 1:
+                raise
+            first_error = first_error or exc
+
+    if not decisions:
+        assert first_error is not None  # attempts >= 1, so we either got one or failed
+        raise first_error
+    if attempts == 1:
+        return decisions[0]
+    return _modal_decision(decisions)
+
+
+def _modal_decision(decisions: list[ClassificationDecision]) -> ClassificationDecision:
+    """The proposal the plurality of ``decisions`` agreed on, plus its share.
+
+    Names are compared case- and whitespace-insensitively, so "PILOT Agreement"
+    and "pilot   agreement" count as agreement. Ties go to the earliest attempt.
+    The share is over the attempts that produced a name — which, since
+    :func:`_parse_new_docset_args` rejects a proposal without one, is every
+    attempt that did not fail outright.
+    """
+    counts: dict[str, int] = {}
+    for decision in decisions:
+        counts[_normalize_name(decision.new_name)] = (
+            counts.get(_normalize_name(decision.new_name), 0) + 1
+        )
+    winner = max(counts, key=lambda key: counts[key])
+    # The *returned* decision has to be one from the winning group, or the
+    # reported confidence would describe a name we didn't return.
+    modal = next(d for d in decisions if _normalize_name(d.new_name) == winner)
+    return replace(modal, confidence=counts[winner] / len(decisions))
+
+
+def _normalize_name(name: str | None) -> str:
+    """A name reduced to what matters for agreement: lowercase, single-spaced."""
+    return " ".join((name or "").lower().split())
 
 
 def _vision_tool_call(
@@ -282,6 +332,7 @@ def _vision_tool_call(
     llm_config = LLMConfig(
         model=config.model,
         api_key=api_key,
+        api_base=config.api_base,
         max_tokens=None,
         workspace=workspace,
         debug=debug,
@@ -319,7 +370,7 @@ def _resolve_api_key(config: ClassificationConfig) -> str | None:
     if not key:
         raise AuthError(
             f"environment variable ${config.api_key_env} is not set "
-            "(referenced by classification.api_key_env in config.json)"
+            "(referenced by classification.api_key_env in the config)"
         )
     return key
 
