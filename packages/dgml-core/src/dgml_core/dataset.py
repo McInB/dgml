@@ -75,13 +75,13 @@ class WorkspaceFileDataset(DocumentDataset):
 
         file_id = self.file_ids[index]
         ws = self.workspace
-        page_keys = ws.store.list_blobs(ws.blob_key(ws.file_pages_dir(file_id)))
+        page_keys = ws.store.list_blobs(ws.file_pages_key(file_id))
         if not page_keys:
             raise FileNotFoundError(f"no rendered page images for file '{file_id}'")
         image = Image.open(io.BytesIO(ws.store.get_blob(page_keys[0]))).convert("RGB")
         # `_build_text` reads `<file_dir>/page_text/*.json`; hand it a materialized
         # copy of the file's artifacts (the real dir on LocalStore, zero-copy).
-        with ws.store.materialize_dir(ws.blob_key(ws.file_dir(file_id))) as file_dir:
+        with ws.store.materialize_dir(ws.file_key(file_id)) as file_dir:
             text = _build_text(file_dir, view=self.text_view)
         return DocumentRecord(
             doc_id=file_id,

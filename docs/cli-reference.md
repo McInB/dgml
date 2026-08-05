@@ -545,8 +545,8 @@ per-item `results`, each carrying a `status`), matching the bulk `file add`:
   "docset_name": "Q2 contracts",
   "summary": { "total": 3, "converted": 2, "skipped": 1, "failed": 0 },
   "rerendered": [],
-  "output_dir": "/ws/docsets/p9pjusnwg50l",
-  "coverage_report": "/ws/docsets/p9pjusnwg50l/coverage_report.json",
+  "output_key": "docsets/p9pjusnwg50l",
+  "coverage_report": "docsets/p9pjusnwg50l/coverage_report.json",
   "results": [
     {"status": "skipped", "file_id": "ab55kdjs93kk", "source": "already-done.pdf", "output": "/ws/docsets/p9pjusnwg50l/files/ab55kdjs93kk/already-done.dgml.xml"},
     {"status": "converted", "file_id": "k7q3xb91pmrf", "source": "contract-a.pdf", "output": "/ws/docsets/p9pjusnwg50l/files/k7q3xb91pmrf/contract-a.dgml.xml", "grounded": true, "matched_token_pct": 99.6, "elements_annotated": 445}
@@ -571,9 +571,11 @@ Three things produce a `failed` entry:
   available without `--verbose`. The full, untruncated error still goes to
   stderr under `--verbose`.
 
-`output_dir` is the docset directory; per-file DGML lands under its
-`files/<file-id>/` subdirectory (see each `results` entry's `output`).
-`coverage_report` is the report path only when a report was actually written;
+`output_key` is the docset's storage key (`docsets/<docset-id>`); per-file DGML
+lands under its `files/<file-id>/` subdirectory (see each `results` entry's
+`output`). Both `output_key` and `coverage_report` are store-native keys, not
+local paths, so the envelope is meaningful whatever backend the workspace uses.
+`coverage_report` is the report key only when a report was actually written;
 it is `null` when `--no-coverage` is set, no file had `page_text/`, or
 `--debug` was not passed (coverage is still computed and its per-file summary
 printed under `--verbose`, but the `coverage_report.json` file is written only

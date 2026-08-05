@@ -286,7 +286,7 @@ def _collect_segments(root: Any) -> list[_TextSeg]:
 
 
 def _list_pages(workspace: Workspace, file_id: str) -> list[int]:
-    prefix = workspace.blob_key(workspace.file_text_dir(file_id))
+    prefix = workspace.file_text_key(file_id)
     pages = sorted(
         int(m.group(1))
         for key in workspace.store.list_blobs(prefix)

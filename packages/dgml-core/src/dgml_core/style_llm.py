@@ -78,9 +78,9 @@ def annotate_style_from_image(
             by_page.setdefault(page, []).append(el)
 
     styled = 0
-    pages_dir = workspace.file_pages_dir(file_id)
+    pages_key = workspace.file_pages_key(file_id)
     for page, elements in by_page.items():
-        image_key = workspace.blob_key(pages_dir / (PAGE_FILENAME_TEMPLATE % page))
+        image_key = f"{pages_key}/{PAGE_FILENAME_TEMPLATE % page}"
         if not workspace.store.blob_exists(image_key):
             continue
         snippets = [" ".join("".join(el.itertext()).split()) for el in elements]

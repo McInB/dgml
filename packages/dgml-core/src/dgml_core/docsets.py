@@ -154,7 +154,7 @@ class DocSetStore:
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
         self._require_docset(docset_id)
-        key = self.ws.blob_key(self.ws.docset_schema_path(docset_id))
+        key = self.ws.docset_schema_key(docset_id)
         try:
             return self.ws.store.get_blob(key).decode("utf-8")
         except FileNotFoundError:
@@ -163,7 +163,7 @@ class DocSetStore:
     def has_schema(self, docset_id: str) -> bool:
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
-        return self.ws.store.blob_exists(self.ws.blob_key(self.ws.docset_schema_path(docset_id)))
+        return self.ws.store.blob_exists(self.ws.docset_schema_key(docset_id))
 
     def set_schema(self, docset_id: str, schema: str) -> str:
         """Write (replace) the docset's extraction schema from RNC text.
@@ -182,7 +182,7 @@ class DocSetStore:
             raise SchemaInvalid("schema must be RNC text")
         validate_rnc(schema)  # raises SchemaInvalid on anything outside the subset
         self.ws.store.put_blob(
-            self.ws.blob_key(self.ws.docset_schema_path(docset_id)),
+            self.ws.docset_schema_key(docset_id),
             schema.encode("utf-8"),
         )
         return schema
@@ -193,7 +193,7 @@ class DocSetStore:
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
         self._require_docset(docset_id)
-        key = self.ws.blob_key(self.ws.docset_schema_path(docset_id))
+        key = self.ws.docset_schema_key(docset_id)
         if not self.ws.store.blob_exists(key):
             return False
         self.ws.store.delete_blob(key)

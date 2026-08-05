@@ -546,7 +546,7 @@ def clustering_internal(
     usable: list[str] = []
     skipped: list[str] = []
     for fid in file_ids:
-        if workspace.store.list_blobs(workspace.blob_key(workspace.file_pages_dir(fid))):
+        if workspace.store.list_blobs(workspace.file_pages_key(fid)):
             usable.append(fid)
         else:
             skipped.append(fid)
@@ -614,7 +614,7 @@ def clustering_internal(
         for fid in docset_store.list_files(docset.id):
             if picked >= MAX_SUPPORT_SAMPLES_PER_DOCSET:
                 break
-            if workspace.store.list_blobs(workspace.blob_key(workspace.file_pages_dir(fid))):
+            if workspace.store.list_blobs(workspace.file_pages_key(fid)):
                 support_file_ids.append(fid)
                 support_labels[fid] = docset.name
                 picked += 1

@@ -311,15 +311,13 @@ def get_page_words(
 # ---- PDF input helpers -----------------------------------------------------
 
 
-def _pdf_path(workspace: Workspace, file_id: str) -> Path:
-    """Find the single ``*.pdf`` under ``files/<file_id>/``."""
-    file_dir = workspace.file_dir(file_id)
-    if not file_dir.exists():
-        raise FileNotFound(f"file '{file_id}' not found at {file_dir}")
-    pdfs = list(file_dir.glob("*.pdf"))
+def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
+    """Return the bytes of the single ``*.pdf`` stored for ``file_id``."""
+    keys = workspace.store.list_blobs(workspace.file_key(file_id))
+    pdfs = [k for k in keys if k.endswith(".pdf")]
     if not pdfs:
-        raise FileNotFound(f"file '{file_id}' has no source PDF in {file_dir}")
-    return pdfs[0]
+        raise FileNotFound(f"file '{file_id}' has no source PDF")
+    return workspace.store.get_blob(pdfs[0])
 
 
 def _pdf_content_block(pdf_bytes: bytes) -> dict[str, Any]:
@@ -374,7 +372,7 @@ def generate_schema(
     # the call before we burn an LLM API request.
     pdf_blocks: list[dict[str, Any]] = []
     for fid in file_ids:
-        pdf_bytes = _pdf_path(workspace, fid).read_bytes()
+        pdf_bytes = _pdf_bytes(workspace, fid)
         pdf_blocks.append(_pdf_content_block(pdf_bytes))
 
     api_key = _resolve_api_key(config.schema_api_key, config.schema_api_key_env)
@@ -540,7 +538,7 @@ def extract_values(
     rnc_schema = store.get_schema(docset_id)  # RNC text; raises SchemaNotFound
     vocab = parse_rnc(rnc_schema)
     schema = rnc_to_json_schema(rnc_schema)
-    pdf_bytes = _pdf_path(workspace, file_id).read_bytes()
+    pdf_bytes = _pdf_bytes(workspace, file_id)
     api_key = _resolve_api_key(config.values_api_key, config.values_api_key_env)
 
     phase1_totals: dict[str, Any] = _empty_totals()
@@ -892,7 +890,7 @@ def _phase3_call_for_page(
     """One litellm call: send the page + ids that need locating, return
     ``{id: [{page_number, bounding_box}, ...]}`` parsed from the model's
     ``submit_locations`` tool call."""
-    image_key = workspace.blob_key(workspace.file_pages_dir(file_id) / f"page_{page_number}.png")
+    image_key = f"{workspace.file_pages_key(file_id)}/page_{page_number}.png"
     if not workspace.store.blob_exists(image_key):
         raise ValuesExtractionFailed(
             f"phase 3: no page image for file '{file_id}' page {page_number}"

@@ -1702,9 +1702,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         # core <stem>.dgml.xml — the single *.dgml.xml blob in the pair's prefix.
         dgml_keys = sorted(
             k
-            for k in ws.store.list_blobs(
-                ws.blob_key(ws.docset_file_dir(args.docset_id, args.file_id))
-            )
+            for k in ws.store.list_blobs(ws.docset_file_key(args.docset_id, args.file_id))
             if k.endswith(".dgml.xml")
         )
         xml = ws.store.get_blob(dgml_keys[0]).decode("utf-8") if dgml_keys else ""
@@ -1928,11 +1926,16 @@ def _generate_payload(
     skipped: list[dict[str, Any]],
     failed: list[dict[str, Any]],
     converted: list[dict[str, Any]],
-    output_dir: Path,
-    coverage_report: Path | None,
+    output_key: str,
+    coverage_report: str | None,
 ) -> dict[str, Any]:
     """The single `docset generate` envelope, built the same way whether or not
-    any file actually needed converting (so the two paths can't drift)."""
+    any file actually needed converting (so the two paths can't drift).
+
+    ``output_key`` is the docset's store key (``docsets/<id>``) — the prefix the
+    per-file DGML lives under — and ``coverage_report`` its report key or None.
+    Both are store-native keys, not local paths, so the envelope is meaningful on
+    any backend."""
     return {
         "docset_id": ds.id,
         "docset_name": ds.name,
@@ -1942,8 +1945,8 @@ def _generate_payload(
             "skipped": len(skipped),
             "failed": len(failed),
         },
-        "output_dir": str(output_dir),
-        "coverage_report": str(coverage_report) if coverage_report is not None else None,
+        "output_key": output_key,
+        "coverage_report": coverage_report,
         "results": skipped + failed + converted,
     }
 
@@ -2049,8 +2052,10 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     # coverage_report.json, cache/, and semantic/ live here. Each file's
     # final .dgml.xml lands in its per-(docset, file) directory (see
     # ws.file_dgml_xml_path) so placement is deterministic and stable.
-    output_dir = ws.docset_dir(args.docset_id)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # The docset's store key (``docsets/<id>``) — the prefix the cache, coverage
+    # report, and per-file DGML live under. Reported to the user and used to
+    # build child keys; no directory is created here (the store owns that).
+    output_key = ws.docset_key(args.docset_id)
 
     # Resolve each assigned file into exactly one bucket so the summary counts
     # always sum to `total`: skipped (already converted), failed (source
@@ -2062,7 +2067,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     # original_filename → list of (file_id, pdf_path, out_xml, page_text_dir).
     # Grouped by filename to detect collisions: convert_batch keys documents by
     # filename, so two files sharing a basename can't both convert in one run.
-    candidates: dict[str, list[tuple[str, Path, Path, str | None]]] = {}
+    candidates: dict[str, list[tuple[str, Path, str | None]]] = {}
     # Already-generated docs, for whole-docset roster reuse + namespacing recompute.
     prior_stems: dict[str, str] = {}  # cache stem → original_filename
     prior_out_paths: dict[str, Path] = {}  # original_filename → existing .dgml.xml
@@ -2073,8 +2078,15 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     for fid in file_ids:
         record = file_store.get(fid)
         name = record.original_filename
-        pdf_path = ws.file_dir(fid) / name
-        if not pdf_path.exists():
+        stem = Path(name).stem
+        # Generation slices the persisted <stem>.pdf, or — for a file added before
+        # conversions were persisted — the original source, converted on demand.
+        # Both are store blobs under the file's prefix; materialized to a real
+        # path for transcription just before convert_batch (below).
+        if not (
+            ws.store.blob_exists(ws.file_source_key(fid, f"{stem}.pdf"))
+            or ws.store.blob_exists(ws.file_source_key(fid, name))
+        ):
             failed_results.append(
                 _file_result(
                     "failed",
@@ -2082,13 +2094,13 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                     name,
                     error={
                         "code": "FILE_NOT_FOUND",
-                        "message": f"source not found at {pdf_path} for file '{fid}'",
+                        "message": f"no source PDF for file '{fid}'",
                     },
                 )
             )
             _diag(f"Source missing for {name} (file '{fid}') — reported as failed")
             continue
-        out_xml = ws.file_dgml_xml_path(args.docset_id, fid, pdf_path.stem)
+        out_xml = ws.file_dgml_xml_path(args.docset_id, fid, stem)
         out_xml_key = ws.blob_key(out_xml)
         if ws.store.blob_exists(out_xml_key) and _has_generated_tree(
             ws.store.get_blob(out_xml_key).decode("utf-8")
@@ -2098,27 +2110,27 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             # `generate`) falls through and gets its tree built; _on_output
             # carries the existing dg:extraction over into the fresh render.
             skipped_results.append(_file_result("skipped", fid, name, output=str(out_xml)))
-            prior_stems[pdf_path.stem] = name
+            prior_stems[stem] = name
             prior_out_paths[name] = out_xml
             name_to_fid[name] = fid  # in case it re-renders below and needs re-grounding
             _diag(f"Skipping {name} (already converted)")
             continue
-        pt_prefix = ws.blob_key(ws.file_text_dir(fid))
+        pt_prefix = ws.file_text_key(fid)
         candidates.setdefault(name, []).append(
-            (fid, pdf_path, out_xml, pt_prefix if ws.store.list_blobs(pt_prefix) else None)
+            (fid, out_xml, pt_prefix if ws.store.list_blobs(pt_prefix) else None)
         )
 
     # Same-basename collision: the typed-block pipeline keys documents by
     # filename, so it can't tell two same-named files apart in one batch.
     # Fail them explicitly instead of silently dropping/misattributing output.
-    pdf_paths: list[Path | str] = []
+    convert_names: list[str] = []
     dgml_xml_paths: dict[str, Path] = {}
     filename_to_fid: dict[str, str] = {}
     page_text_dirs: dict[str, Path] = {}
     page_text_prefixes: dict[str, str] = {}
     for name, group in candidates.items():
         if len(group) > 1:
-            for fid, _pdf, _out, _pref in group:
+            for fid, _out, _pref in group:
                 failed_results.append(
                     _file_result(
                         "failed",
@@ -2136,8 +2148,8 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 )
             _diag(f"Duplicate filename '{name}' across {len(group)} files — reported as failed")
             continue
-        fid, pdf_path, out_xml, pt_pfx = group[0]
-        pdf_paths.append(pdf_path)
+        fid, out_xml, pt_pfx = group[0]
+        convert_names.append(name)
         dgml_xml_paths[name] = out_xml
         filename_to_fid[name] = fid
         name_to_fid[name] = fid
@@ -2148,7 +2160,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     # didn't pass --no-coverage, but the coverage_report.json *file* is an
     # intermediate artifact persisted only under --debug.
     compute_cov = not args.no_coverage
-    cov_path = output_dir / "coverage_report.json" if (compute_cov and args.debug) else None
+    cov_report_key = f"{output_key}/coverage_report.json" if (compute_cov and args.debug) else None
     written: list[dict[str, Any]] = []
     rerendered: list[str] = []
     cov_results: list[dict[str, Any]] = []
@@ -2281,7 +2293,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             )
         )
 
-    if pdf_paths:
+    if convert_names:
         # The cache always exists — it holds functional files the next run
         # reloads (blocks, per-chunk labels, concept_roster.json). --debug only
         # controls whether the extra debug-only artifacts are also written
@@ -2296,10 +2308,8 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             if args.cache_dir:
                 cache_dir = Path(args.cache_dir)
             else:
-                cache_dir = _cache_stack.enter_context(
-                    ws.store.working_dir(ws.blob_key(output_dir / "cache"))
-                )
-            schema_key = ws.blob_key(ws.docset_generation_schema_path(args.docset_id))
+                cache_dir = _cache_stack.enter_context(ws.store.working_dir(f"{output_key}/cache"))
+            schema_key = ws.docset_generation_schema_key(args.docset_id)
             schema_json_local = cache_dir.parent / "schema.json"
             if (
                 not args.cache_dir
@@ -2357,6 +2367,17 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             with contextlib.ExitStack() as pt_stack:
                 for nm, pref in page_text_prefixes.items():
                     page_text_dirs[nm] = pt_stack.enter_context(ws.store.materialize_dir(pref))
+                # Materialize each file's source dir so transcription's path tools
+                # (load_document_as_pdf → ghostscript) get the original + its
+                # persisted sibling <stem>.pdf on disk. LocalStore yields the real
+                # dir (zero-copy); a remote store downloads it for the batch.
+                pdf_paths: list[Path | str] = [
+                    pt_stack.enter_context(
+                        ws.store.materialize_dir(ws.file_key(filename_to_fid[nm]))
+                    )
+                    / nm
+                    for nm in convert_names
+                ]
                 options = ConvertOptions(
                     model=gen_model,
                     label_model=label_model,
@@ -2404,19 +2425,20 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                             error={"code": "GENERATION_FAILED", "message": message},
                         )
                     )
-            if cov_path is not None and cov_results:
+            if cov_report_key is not None and cov_results:
                 # Merge into any existing report so an incremental run keeps the
                 # already-generated docs' coverage instead of overwriting it.
                 existing_docs: list[dict[str, Any]] = []
-                if cov_path.exists():
+                if ws.store.blob_exists(cov_report_key):
                     try:
-                        existing_docs = json.loads(cov_path.read_text(encoding="utf-8")).get(
+                        existing_docs = json.loads(ws.store.get_blob(cov_report_key)).get(
                             "documents", []
                         )
-                    except (OSError, json.JSONDecodeError):
+                    except json.JSONDecodeError:
                         existing_docs = []
-                cov_mod.save_coverage_report(
-                    cov_mod.merge_coverage_documents(existing_docs, cov_results), cov_path
+                merged = cov_mod.merge_coverage_documents(existing_docs, cov_results)
+                ws.store.put_blob(
+                    cov_report_key, cov_mod.dump_coverage_report(merged).encode("utf-8")
                 )
             # Persist schema.json (labeling wrote it next to the cache) as the
             # docset's generation-schema blob — exact bytes, before write_docset_rnc
@@ -2437,10 +2459,10 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     except Exception as exc:
         _diag(f"[schema] full-schema.rnc skipped ({exc})")
 
-    # Report the coverage path only if a report was actually written.
-    coverage_report = cov_path if cov_results else None
+    # Report the coverage report key only if a report was actually written.
+    coverage_report = cov_report_key if cov_results else None
     payload = _generate_payload(
-        ds, len(file_ids), skipped_results, failed_results, written, output_dir, coverage_report
+        ds, len(file_ids), skipped_results, failed_results, written, output_key, coverage_report
     )
     payload["rerendered"] = rerendered
     _emit(payload, fmt)

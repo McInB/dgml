@@ -1295,7 +1295,6 @@ def test_docset_generate_happy_path(
     main(_ws_args(ws) + ["docset", "add-file", fid, "--docset", did])
     capsys.readouterr()
 
-    docset_dir = Workspace(root=ws).docset_dir(did)
     out_xml = Workspace(root=ws).file_dgml_xml_path(did, fid, "with-text")
     fake_xml = "<xml><chunk>hello</chunk></xml>"
 
@@ -1311,7 +1310,7 @@ def test_docset_generate_happy_path(
     payload = _read_generate_stdout(capsys)
     assert payload["docset_id"] == did
     assert payload["summary"] == {"total": 1, "converted": 1, "skipped": 0, "failed": 0}
-    assert payload["output_dir"] == str(docset_dir)
+    assert payload["output_key"] == Workspace(root=ws).docset_key(did)
     assert payload["coverage_report"] is None  # --no-coverage
     (entry,) = payload["results"]
     assert entry["status"] == "converted"

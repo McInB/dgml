@@ -131,9 +131,6 @@ class Workspace:
     def file_json_path(self, file_id: str) -> Path:
         return self.file_dir(file_id) / "file.json"
 
-    def file_errors_path(self, file_id: str) -> Path:
-        return self.file_dir(file_id) / "errors.json"
-
     def file_pages_dir(self, file_id: str) -> Path:
         return self.file_dir(file_id) / "page_images"
 
@@ -150,6 +147,49 @@ class Workspace:
         payload I/O through ``store`` by handing it ``blob_key(some_path)``."""
         return path.relative_to(self.root).as_posix()
 
+    # ---- Store keys for workspace artifacts ----
+    #
+    # A key is the workspace-root-relative POSIX string a blob lives at; callers
+    # hand these straight to ``store`` (``list_blobs`` / ``get_blob`` / …). They
+    # are the store-native address. The parallel ``*_dir`` / ``*_path`` methods
+    # return the *same* location as a local ``Path`` (``root/<key>``), kept for
+    # the handful of filesystem-bound cases — the intentional local source read
+    # and test fixtures — and as the single source of the layout these delegate
+    # to.
+
+    def file_key(self, file_id: str) -> str:
+        return self.blob_key(self.file_dir(file_id))
+
+    def file_source_key(self, file_id: str, filename: str) -> str:
+        return self.blob_key(self.file_dir(file_id) / filename)
+
+    def file_pages_key(self, file_id: str) -> str:
+        return self.blob_key(self.file_pages_dir(file_id))
+
+    def file_text_key(self, file_id: str) -> str:
+        return self.blob_key(self.file_text_dir(file_id))
+
+    def docset_key(self, docset_id: str) -> str:
+        return self.blob_key(self.docset_dir(docset_id))
+
+    def docset_files_key(self, docset_id: str) -> str:
+        return self.blob_key(self.docset_files_dir(docset_id))
+
+    def docset_file_key(self, docset_id: str, file_id: str) -> str:
+        return self.blob_key(self.docset_file_dir(docset_id, file_id))
+
+    def docset_schema_key(self, docset_id: str) -> str:
+        return self.blob_key(self.docset_schema_path(docset_id))
+
+    def docset_generation_schema_key(self, docset_id: str) -> str:
+        return self.blob_key(self.docset_generation_schema_path(docset_id))
+
+    def docset_full_schema_key(self, docset_id: str) -> str:
+        return self.blob_key(self.docset_full_schema_path(docset_id))
+
+    def file_dgml_xml_key(self, docset_id: str, file_id: str, file_stem: str) -> str:
+        return self.blob_key(self.file_dgml_xml_path(docset_id, file_id, file_stem))
+
     def read_page_text(self, file_id: str, page: int) -> dict[str, Any] | None:
         """The per-page word-box JSON for ``page`` of ``file_id`` (a blob),
         read through the store, or ``None`` if it was never extracted.
@@ -158,7 +198,7 @@ class Workspace:
         malformed content raises :class:`~dgml_core.errors.CorruptMetadata`."""
         from .errors import CorruptMetadata
 
-        key = self.blob_key(self.file_text_dir(file_id) / f"page_{page}.json")
+        key = f"{self.file_text_key(file_id)}/page_{page}.json"
         try:
             data = self.store.get_blob(key)
         except FileNotFoundError:

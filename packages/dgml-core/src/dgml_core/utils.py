@@ -33,7 +33,7 @@ def gather_file_pages(workspace: Workspace, file_id: str, max_pages: int) -> lis
     Callers decide what that means in their context (e.g. classification
     soft-fails; a future OCR helper may treat it as a precondition).
     """
-    prefix = workspace.blob_key(workspace.file_pages_dir(file_id))
+    prefix = workspace.file_pages_key(file_id)
     keys = workspace.store.list_blobs(prefix)[:max_pages]
     return [workspace.store.get_blob(k) for k in keys]
 

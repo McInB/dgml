@@ -251,14 +251,13 @@ class FileStore:
         debug: bool = False,
     ) -> AddFileResult:
         file_id = new_id()
-        file_dir = self.ws.file_dir(file_id)
         # The store owns container creation (upload_blob writes the source blob);
         # a fresh new_id never collides, so no directory is created up front.
         # The original source is stored under its own name (a blob). A convertible
         # source is converted to a PDF here (persisted alongside it as
         # `<stem>.pdf` by _ensure_pdf) to drive page rendering / count / text
         # extraction; generation later reuses that same persisted PDF.
-        source_key = self.ws.blob_key(file_dir / source_path.name)
+        source_key = self.ws.file_source_key(file_id, source_path.name)
         self.ws.store.upload_blob(source_key, source_path)
 
         pdf_key, conversion_error, pdf_converter = self._ensure_pdf(source_key, file_id)
@@ -392,7 +391,7 @@ class FileStore:
         """Render pages, recording errors. Returns a human-readable error
         message on failure or partial success, or ``None`` on full success."""
         try:
-            pages_prefix = self.ws.blob_key(self.ws.file_pages_dir(file_id))
+            pages_prefix = self.ws.file_pages_key(file_id)
             with self.ws.store.staged_write(pages_prefix) as pages_dir:
                 rendered = render_pages(pdf_path, pages_dir)
         except PageRenderFailed as exc:
@@ -460,7 +459,7 @@ class FileStore:
         *,
         page_count: int | None,
     ) -> tuple[str | None, dict[str, Any] | None]:
-        text_prefix = self.ws.blob_key(self.ws.file_text_dir(file_id))
+        text_prefix = self.ws.file_text_key(file_id)
         try:
             with self.ws.store.staged_write(text_prefix) as text_dir:
                 result = extract_text_digital(pdf_path, text_dir, file_id=file_id)
@@ -482,8 +481,8 @@ class FileStore:
             # config has to be fixed before retrying.
             return self._record_text_failure(file_id, str(exc), permanent=True), None
 
-        text_prefix = self.ws.blob_key(self.ws.file_text_dir(file_id))
-        pages_prefix = self.ws.blob_key(self.ws.file_pages_dir(file_id))
+        text_prefix = self.ws.file_text_key(file_id)
+        pages_prefix = self.ws.file_pages_key(file_id)
         try:
             with (
                 self.ws.store.materialize_dir(pages_prefix) as pages_dir,
@@ -519,8 +518,8 @@ class FileStore:
         except DgmlError as exc:
             return self._record_text_failure(file_id, str(exc), permanent=True), None
 
-        text_prefix = self.ws.blob_key(self.ws.file_text_dir(file_id))
-        pages_prefix = self.ws.blob_key(self.ws.file_pages_dir(file_id))
+        text_prefix = self.ws.file_text_key(file_id)
+        pages_prefix = self.ws.file_pages_key(file_id)
         try:
             with (
                 self.ws.store.materialize_dir(pages_prefix) as pages_dir,

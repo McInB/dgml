@@ -308,9 +308,9 @@ def write_docset_rnc(ws: Workspace, docset_id: str) -> str | None:
         return None
     docset_data = ws.store.get_doc("docsets", docset_id)
     label = str(docset_data.get("name", docset_id)) if docset_data else docset_id
-    with ws.store.materialize_dir(ws.blob_key(ws.docset_files_dir(docset_id))) as files_dir:
+    with ws.store.materialize_dir(ws.docset_files_key(docset_id)) as files_dir:
         xml_paths = sorted(files_dir.glob("*/*.dgml.xml"))
         rendered = build_rnc(schema_data, xml_paths, label=label)
-    full_key = ws.blob_key(ws.docset_full_schema_path(docset_id))
+    full_key = ws.docset_full_schema_key(docset_id)
     ws.store.put_blob(full_key, rendered.encode("utf-8"))
     return full_key

@@ -183,7 +183,7 @@ def _check_file(
         )
         return
 
-    source_key = ws.blob_key(ws.file_dir(file_id) / original_filename)
+    source_key = ws.file_source_key(file_id, original_filename)
     if not ws.store.blob_exists(source_key):
         report.issues.append(
             Issue(
@@ -210,7 +210,7 @@ def _check_file(
     recorded = load_recorded_errors(ws, file_id)
     permanent_ops = {e.operation for e in recorded if e.permanent}
 
-    pages_prefix = ws.blob_key(ws.file_pages_dir(file_id))
+    pages_prefix = ws.file_pages_key(file_id)
     rendered = len(ws.store.list_blobs(pages_prefix))
 
     expected: int | None
@@ -464,7 +464,7 @@ def _check_text_extraction(
     debug: bool,
     report: CheckReport,
 ) -> None:
-    text_keys = ws.store.list_blobs(ws.blob_key(ws.file_text_dir(file_id)))
+    text_keys = ws.store.list_blobs(ws.file_text_key(file_id))
     corrupt = [k for k in text_keys if not _is_valid_text_json(ws, k)]
     for k in corrupt:
         report.issues.append(
@@ -569,8 +569,8 @@ def _reextract(
     The source PDF is materialized for the extractors, page_text is written into
     a store-backed staging dir, and OCR/hybrid read the file's page images from a
     materialized copy — the same store bridges the file-add path uses."""
-    text_prefix = ws.blob_key(ws.file_text_dir(file_id))
-    pages_prefix = ws.blob_key(ws.file_pages_dir(file_id))
+    text_prefix = ws.file_text_key(file_id)
+    pages_prefix = ws.file_pages_key(file_id)
     with (
         ws.store.materialize(source_key) as pdf_path,
         ws.store.staged_write(text_prefix) as text_dir,
@@ -621,7 +621,7 @@ def _file_present(ws: Workspace, file_id: str) -> bool:
             return True
     except CorruptMetadata:
         return True
-    return bool(ws.store.list_blobs(ws.blob_key(ws.file_dir(file_id))))
+    return bool(ws.store.list_blobs(ws.file_key(file_id)))
 
 
 def _check_docset(ws: Workspace, docset_id: str, *, report: CheckReport) -> None:
@@ -677,7 +677,7 @@ def _check_computed_attribution(
     is owned by the generation/extraction writers, not this check."""
     from .extraction_xml import unattributed_computed_fields
 
-    for key in sorted(ws.store.list_blobs(ws.blob_key(ws.docset_file_dir(docset_id, file_id)))):
+    for key in sorted(ws.store.list_blobs(ws.docset_file_key(docset_id, file_id))):
         if not key.endswith(".dgml.xml"):
             continue
         try:

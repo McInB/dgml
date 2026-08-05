@@ -291,14 +291,14 @@ def collect_file_version(
 
     # Slot 1: the original source document (a .pdf, or the .docx/.xls/… that
     # was converted). Named "source" — the role, not the file format.
-    source_key = ws.blob_key(ws.file_dir(file_id) / record.original_filename)
+    source_key = ws.file_source_key(file_id, record.original_filename)
     if store.blob_exists(source_key):
         refs.append(_binary_ref("source", source_key, store.sha256_blob(source_key)))
 
     # Slot 2: page images, ordered by page number (not lexicographic —
     # 'page_10.png' sorts before 'page_2.png' alphabetically).
     for img_key in sorted(
-        store.list_blobs(ws.blob_key(ws.file_pages_dir(file_id))),
+        store.list_blobs(ws.file_pages_key(file_id)),
         key=lambda k: _page_num(Path(k)),
     ):
         n = _page_num(Path(img_key))
@@ -314,7 +314,7 @@ def collect_file_version(
         # `docset generate`). Hashed as raw bytes, like the extraction schema.
         # schema.json is deliberately not a leaf — the RNC carries every one
         # of its fields as `# Field: value` comments.
-        full_schema_key = ws.blob_key(ws.docset_full_schema_path(docset_id))
+        full_schema_key = ws.docset_full_schema_key(docset_id)
         if store.blob_exists(full_schema_key):
             refs.append(
                 _binary_ref("full_schema", full_schema_key, store.sha256_blob(full_schema_key))
@@ -324,7 +324,7 @@ def collect_file_version(
         # RELAX NG Compact) that governs this file's `dg:extraction`. Hashed as
         # raw bytes — RNC is plain text, neither JSON nor XML. Present only once
         # `extraction set-schema` / `generate-schema` has run for the docset.
-        extraction_schema_key = ws.blob_key(ws.docset_schema_path(docset_id))
+        extraction_schema_key = ws.docset_schema_key(docset_id)
         if store.blob_exists(extraction_schema_key):
             refs.append(
                 _binary_ref(
@@ -335,9 +335,7 @@ def collect_file_version(
             )
 
         # Slot 5: DGML XML output for this file.
-        dgml_xml_key = ws.blob_key(
-            ws.file_dgml_xml_path(docset_id, file_id, Path(record.original_filename).stem)
-        )
+        dgml_xml_key = ws.file_dgml_xml_key(docset_id, file_id, Path(record.original_filename).stem)
         # The one leaf that genuinely needs the bytes: an XML leaf hash is the
         # merkle_root of the parsed tree, not a digest of the file.
         if store.blob_exists(dgml_xml_key):
