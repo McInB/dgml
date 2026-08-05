@@ -487,7 +487,7 @@ uv run dgml extraction set-schema "$ds" --schema-file schema.rnc
 #    --auto-classify / cluster into an existing docset) auto-extracts it —
 #    check the payload's `extraction` block; run `extract` manually only for
 #    files assigned before the schema existed or to re-extract.
-uv run dgml extraction extract "$ds" "$fid" | jq '{mode, tool_calls, field_count, xml_path}'
+uv run dgml extraction extract "$ds" "$fid" | jq '{mode, tool_calls, field_count, xml_key}'
 
 # 3) Read them back. Default is values-shape JSON (projected from dg:extraction);
 #    --as xml returns the whole core DGML document.

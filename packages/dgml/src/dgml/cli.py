@@ -1689,7 +1689,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                 "mode": result.mode,
                 "tool_calls": result.tool_calls,
                 "field_count": len(result.values),
-                "xml_path": str(result.xml_path),
+                "xml_key": result.xml_key,
             },
             fmt,
         )
@@ -2048,10 +2048,10 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         operation=OPERATION_LINKS,
     )
 
-    # The docset directory is always the output base — schema.json,
-    # coverage_report.json, cache/, and semantic/ live here. Each file's
-    # final .dgml.xml lands in its per-(docset, file) directory (see
-    # ws.file_dgml_xml_path) so placement is deterministic and stable.
+    # The docset prefix is always the output base — schema.json,
+    # coverage_report.json, cache/, and semantic/ live under it. Each file's
+    # final .dgml.xml lands at its per-(docset, file) key (see
+    # ws.file_dgml_xml_key) so placement is deterministic and stable.
     # The docset's store key (``docsets/<id>``) — the prefix the cache, coverage
     # report, and per-file DGML live under. Reported to the user and used to
     # build child keys; no directory is created here (the store owns that).
@@ -2064,13 +2064,13 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     # and the run continues (exit 0), matching `dgml cluster`.
     skipped_results: list[dict[str, Any]] = []
     failed_results: list[dict[str, Any]] = []
-    # original_filename → list of (file_id, pdf_path, out_xml, page_text_dir).
+    # original_filename → list of (file_id, out_xml_key, page_text_prefix).
     # Grouped by filename to detect collisions: convert_batch keys documents by
     # filename, so two files sharing a basename can't both convert in one run.
-    candidates: dict[str, list[tuple[str, Path, str | None]]] = {}
+    candidates: dict[str, list[tuple[str, str, str | None]]] = {}
     # Already-generated docs, for whole-docset roster reuse + namespacing recompute.
     prior_stems: dict[str, str] = {}  # cache stem → original_filename
-    prior_out_paths: dict[str, Path] = {}  # original_filename → existing .dgml.xml
+    prior_out_paths: dict[str, str] = {}  # original_filename → existing .dgml.xml key
     # original_filename → file id for grounding (resolves the file's page OCR).
     # Spans candidates *and* re-rendered prior docs; kept separate from
     # filename_to_fid so the failure-reconciliation loop stays candidate-only.
@@ -2100,8 +2100,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             )
             _diag(f"Source missing for {name} (file '{fid}') — reported as failed")
             continue
-        out_xml = ws.file_dgml_xml_path(args.docset_id, fid, stem)
-        out_xml_key = ws.blob_key(out_xml)
+        out_xml_key = ws.file_dgml_xml_key(args.docset_id, fid, stem)
         if ws.store.blob_exists(out_xml_key) and _has_generated_tree(
             ws.store.get_blob(out_xml_key).decode("utf-8")
         ):
@@ -2109,22 +2108,22 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             # extraction-only file (`extraction extract` ran before
             # `generate`) falls through and gets its tree built; _on_output
             # carries the existing dg:extraction over into the fresh render.
-            skipped_results.append(_file_result("skipped", fid, name, output=str(out_xml)))
+            skipped_results.append(_file_result("skipped", fid, name, output=out_xml_key))
             prior_stems[stem] = name
-            prior_out_paths[name] = out_xml
+            prior_out_paths[name] = out_xml_key
             name_to_fid[name] = fid  # in case it re-renders below and needs re-grounding
             _diag(f"Skipping {name} (already converted)")
             continue
         pt_prefix = ws.file_text_key(fid)
         candidates.setdefault(name, []).append(
-            (fid, out_xml, pt_prefix if ws.store.list_blobs(pt_prefix) else None)
+            (fid, out_xml_key, pt_prefix if ws.store.list_blobs(pt_prefix) else None)
         )
 
     # Same-basename collision: the typed-block pipeline keys documents by
     # filename, so it can't tell two same-named files apart in one batch.
     # Fail them explicitly instead of silently dropping/misattributing output.
     convert_names: list[str] = []
-    dgml_xml_paths: dict[str, Path] = {}
+    dgml_xml_keys: dict[str, str] = {}
     filename_to_fid: dict[str, str] = {}
     page_text_dirs: dict[str, Path] = {}
     page_text_prefixes: dict[str, str] = {}
@@ -2148,9 +2147,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 )
             _diag(f"Duplicate filename '{name}' across {len(group)} files — reported as failed")
             continue
-        fid, out_xml, pt_pfx = group[0]
+        fid, out_xml_key, pt_pfx = group[0]
         convert_names.append(name)
-        dgml_xml_paths[name] = out_xml
+        dgml_xml_keys[name] = out_xml_key
         filename_to_fid[name] = fid
         name_to_fid[name] = fid
         if pt_pfx is not None:
@@ -2190,8 +2189,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         _diag(f"[label] {name}: model unreachable ({err.get('message', '')})")
 
     def _on_output(name: str, xml: str) -> None:
-        out_xml = dgml_xml_paths[name]
-        xml_key = ws.blob_key(out_xml)
+        xml_key = dgml_xml_keys[name]
         # A blob already at this key may carry extracted values — an
         # extraction-only file getting its tree now, or a full-extraction
         # file being re-rendered. Capture its dg:extraction before the fresh
@@ -2227,7 +2225,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 ws.store.put_blob(xml_key, gpath.read_bytes())
                 if res.stats_path is not None and res.stats_path.exists():
                     ws.store.put_blob(
-                        ws.blob_key(out_xml.with_name(res.stats_path.name)),
+                        f"{xml_key.rsplit('/', 1)[0]}/{res.stats_path.name}",
                         res.stats_path.read_bytes(),
                     )
         except DgmlError as exc:
@@ -2286,7 +2284,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 "converted",
                 filename_to_fid[name],
                 name,
-                output=str(out_xml),
+                output=xml_key,
                 links=links_added,
                 **grounding,
                 **label_extra,
@@ -2355,10 +2353,8 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             for stem, blocks in load_labeled_docs_from_cache(cache_dir, list(prior_stems)).items():
                 nm = prior_stems[stem]
                 prior_docs[nm] = blocks
-                prior_outputs[nm] = ws.store.get_blob(ws.blob_key(prior_out_paths[nm])).decode(
-                    "utf-8"
-                )
-                dgml_xml_paths[nm] = prior_out_paths[nm]
+                prior_outputs[nm] = ws.store.get_blob(prior_out_paths[nm]).decode("utf-8")
+                dgml_xml_keys[nm] = prior_out_paths[nm]
 
             # Materialize each file's page_text/ into a local dir the pipeline
             # (transcribe gate + coverage) reads. LocalStore yields the real dir

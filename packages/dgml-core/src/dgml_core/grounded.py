@@ -489,7 +489,7 @@ class ExtractionResult:
 
     values: dict[str, Any]
     tool_calls: int
-    xml_path: Path
+    xml_key: str
     mode: str
 
 
@@ -629,8 +629,7 @@ def extract_values(
         # tree (full-extraction), or written as a standalone dg:chunk when no
         # tree exists yet (extraction).
         stem = Path(FileStore(workspace).get(file_id).original_filename).stem
-        xml_path = workspace.file_dgml_xml_path(docset_id, file_id, stem)
-        xml_key = workspace.blob_key(xml_path)
+        xml_key = workspace.file_dgml_xml_key(docset_id, file_id, stem)
         existing = (
             workspace.store.get_blob(xml_key).decode("utf-8")
             if workspace.store.blob_exists(xml_key)
@@ -647,7 +646,7 @@ def extract_values(
         workspace.store.put_blob(xml_key, doc.encode("utf-8"))
         outcome = OUTCOME_OK
         return ExtractionResult(
-            values=final_values, tool_calls=tool_calls_total, xml_path=xml_path, mode=mode
+            values=final_values, tool_calls=tool_calls_total, xml_key=xml_key, mode=mode
         )
     except ValuesExtractionFailed as exc:
         error_msg = str(exc)

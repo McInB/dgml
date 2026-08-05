@@ -152,23 +152,23 @@ def load_subtree_root(ws: Workspace, file_id: str, docset_id: str) -> _Element:
 
     record = FileRecord.from_json(record_data)
     stem = Path(record.original_filename).stem
-    xml_path = ws.file_dgml_xml_path(docset_id, file_id, stem)
-    if not ws.store.blob_exists(ws.blob_key(xml_path)):
+    xml_key = ws.file_dgml_xml_key(docset_id, file_id, stem)
+    if not ws.store.blob_exists(xml_key):
         raise NotFoundError(
             f"no generated DGML XML for file '{file_id}' in docset '{docset_id}' "
-            f"(expected {xml_path})"
+            f"(expected {xml_key})"
         )
 
-    # Prefer grounded variant if present.
-    name = xml_path.name
-    if name.endswith(".xml"):
-        grounded_path = xml_path.with_name(name[: -len(".xml")] + ".grounded.xml")
-    else:
-        grounded_path = xml_path.with_name(name + ".grounded.xml")
-    preferred = grounded_path if ws.store.blob_exists(ws.blob_key(grounded_path)) else xml_path
+    # Prefer the grounded variant (``<stem>.dgml.grounded.xml``) if present.
+    grounded_key = (
+        xml_key[: -len(".xml")] + ".grounded.xml"
+        if xml_key.endswith(".xml")
+        else xml_key + ".grounded.xml"
+    )
+    preferred = grounded_key if ws.store.blob_exists(grounded_key) else xml_key
 
     try:
-        root: _Element = etree.fromstring(ws.store.get_blob(ws.blob_key(preferred)))
+        root: _Element = etree.fromstring(ws.store.get_blob(preferred))
     except etree.XMLSyntaxError as exc:
         raise ValueError(f"{preferred} is not well-formed XML: {exc}") from exc
     return root

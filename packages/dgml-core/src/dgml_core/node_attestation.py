@@ -142,16 +142,16 @@ def load_dgml_root(ws: Workspace, file_id: str, docset_id: str) -> _Element:
         raise DocSetNotFound(f"docset '{docset_id}' not found in workspace")
 
     record = FileRecord.from_json(record_data)
-    xml_path = ws.file_dgml_xml_path(docset_id, file_id, Path(record.original_filename).stem)
-    if not ws.store.blob_exists(ws.blob_key(xml_path)):
+    xml_key = ws.file_dgml_xml_key(docset_id, file_id, Path(record.original_filename).stem)
+    if not ws.store.blob_exists(xml_key):
         raise NotFoundError(
             f"no generated DGML XML for file '{file_id}' in docset '{docset_id}' "
-            f"(expected {xml_path})"
+            f"(expected {xml_key})"
         )
     try:
-        root: _Element = etree.fromstring(ws.store.get_blob(ws.blob_key(xml_path)))
+        root: _Element = etree.fromstring(ws.store.get_blob(xml_key))
     except etree.XMLSyntaxError as exc:
-        raise ValueError(f"{xml_path} is not well-formed XML: {exc}") from exc
+        raise ValueError(f"{xml_key} is not well-formed XML: {exc}") from exc
     return root
 
 

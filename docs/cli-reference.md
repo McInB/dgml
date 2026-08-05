@@ -548,8 +548,8 @@ per-item `results`, each carrying a `status`), matching the bulk `file add`:
   "output_key": "docsets/p9pjusnwg50l",
   "coverage_report": "docsets/p9pjusnwg50l/coverage_report.json",
   "results": [
-    {"status": "skipped", "file_id": "ab55kdjs93kk", "source": "already-done.pdf", "output": "/ws/docsets/p9pjusnwg50l/files/ab55kdjs93kk/already-done.dgml.xml"},
-    {"status": "converted", "file_id": "k7q3xb91pmrf", "source": "contract-a.pdf", "output": "/ws/docsets/p9pjusnwg50l/files/k7q3xb91pmrf/contract-a.dgml.xml", "grounded": true, "matched_token_pct": 99.6, "elements_annotated": 445}
+    {"status": "skipped", "file_id": "ab55kdjs93kk", "source": "already-done.pdf", "output": "docsets/p9pjusnwg50l/files/ab55kdjs93kk/already-done.dgml.xml"},
+    {"status": "converted", "file_id": "k7q3xb91pmrf", "source": "contract-a.pdf", "output": "docsets/p9pjusnwg50l/files/k7q3xb91pmrf/contract-a.dgml.xml", "grounded": true, "matched_token_pct": 99.6, "elements_annotated": 445}
   ]
 }
 ```
@@ -714,7 +714,7 @@ a generated document tree the extraction is added alongside it
   "mode": "full-extraction",
   "tool_calls": 2,
   "field_count": 7,
-  "xml_path": ".../docsets/o8vr8rs488vg/files/5kqt9r5fowno/Invoice 2025.dgml.xml"
+  "xml_key": "docsets/o8vr8rs488vg/files/5kqt9r5fowno/Invoice 2025.dgml.xml"
 }
 ```
 

@@ -1316,7 +1316,7 @@ def test_docset_generate_happy_path(
     assert entry["status"] == "converted"
     assert entry["file_id"] == fid
     assert entry["source"] == "with-text.pdf"
-    assert entry["output"] == str(out_xml)
+    assert entry["output"] == Workspace(root=ws).blob_key(out_xml)
     # Generation grounds each file in place. "hello" doesn't match the real OCR,
     # so 0 elements are annotated, but the file is still grounded (the tree is
     # re-serialized, so it no longer byte-equals fake_xml) and the entry says so.

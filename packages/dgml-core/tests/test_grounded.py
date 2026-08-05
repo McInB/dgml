@@ -624,8 +624,8 @@ def test_extract_values_direct_submit(workspace: Workspace) -> None:
     # Persisted as a dg:extraction element in the file's core <stem>.dgml.xml
     # (no separate file). With no prior document tree, mode is "extraction".
     assert result.mode == "extraction"
-    assert result.xml_path == workspace.file_dgml_xml_path(ds_id, fid, "doc")
-    xml = result.xml_path.read_text(encoding="utf-8")
+    assert result.xml_key == workspace.file_dgml_xml_key(ds_id, fid, "doc")
+    xml = workspace.store.get_blob(result.xml_key).decode("utf-8")
     assert "<dg:extraction>" in xml
     vocab = parse_rnc(DocSetStore(workspace).get_schema(ds_id))
     assert dgml_xml_to_values(xml, vocab=vocab) == result.values
@@ -659,7 +659,7 @@ def test_extract_values_full_extraction_embeds_in_existing_tree(workspace: Works
         result = extract_values(workspace, ds_id, fid, config=config)
 
     assert result.mode == "full-extraction"
-    assert result.xml_path == core
+    assert result.xml_key == workspace.blob_key(core)
     xml = core.read_text(encoding="utf-8")
     assert "the generated document tree" in xml  # tree preserved
     assert xml.count("<dg:extraction>") == 1  # extraction added once
@@ -1297,7 +1297,7 @@ def test_extract_values_computed_field_end_to_end(workspace: Workspace) -> None:
     assert mock_completion.call_count == 1
     assert result.values["word_count"] == phase1_values["word_count"]
 
-    xml = result.xml_path.read_text(encoding="utf-8")
+    xml = workspace.store.get_blob(result.xml_key).decode("utf-8")
     assert 'dg:origin="computed"' in xml
     assert 'xsi:type="integer" dg:value="2"' in xml
     assert 'dg:itemprop="computedFrom"' in xml
