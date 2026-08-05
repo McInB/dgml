@@ -362,28 +362,29 @@ def test_load_storage_config_defaults_to_local(tmp_path: Path) -> None:
     assert cfg.root == ws.root
 
 
-# STOPGAP: the config.toml migration temporarily disabled reading a storage
-# section from config (load_storage_config always returns the default now).
-# Re-enable and rewrite for the TOML `[storage]` table when the deferred
-# "storage change" lands — see STORAGE_REROUTE_HANDOFF.
-_STORAGE_SECTION_DEFERRED = "storage-section reader pending TOML [storage] design"
-
-
-@pytest.mark.skip(reason=_STORAGE_SECTION_DEFERRED)
-def test_load_storage_config_reads_section(tmp_path: Path) -> None:
+def test_load_storage_config_absent_defaults_local(tmp_path: Path) -> None:
+    # No [storage] section → the bundled local-disk default, zero config needed.
     ws = Workspace.resolve(tmp_path)
-    ws.config_path.write_text(
-        '{"storage": {"provider": "my_pkg.store:MyStore", "bucket": "b1"}}', encoding="utf-8"
-    )
+    cfg = load_storage_config(ws)
+    assert cfg.provider == DEFAULT_STORAGE_PROVIDER
+    assert cfg.options == {}
+
+
+def test_load_storage_config_reads_section(tmp_path: Path) -> None:
+    from .conftest import write_config
+
+    ws = Workspace.resolve(tmp_path)
+    write_config(ws, {"storage": {"provider": "my_pkg.store:MyStore", "bucket": "b1"}})
     cfg = load_storage_config(ws)
     assert cfg.provider == "my_pkg.store:MyStore"
     assert cfg.options == {"bucket": "b1"}
 
 
-@pytest.mark.skip(reason=_STORAGE_SECTION_DEFERRED)
 def test_load_storage_config_invalid_provider(tmp_path: Path) -> None:
+    from .conftest import write_config
+
     ws = Workspace.resolve(tmp_path)
-    ws.config_path.write_text('{"storage": {"provider": ""}}', encoding="utf-8")
+    write_config(ws, {"storage": {"provider": ""}})
     with pytest.raises(StorageConfigInvalid):
         load_storage_config(ws)
 

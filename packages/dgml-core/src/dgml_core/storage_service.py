@@ -57,8 +57,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from .config import load_merged_config
 from .errors import StorageConfigInvalid, StorageProviderUnresolvable
 from .hashing import sha256_file
+from .models_config import ConfigSection
 from .storage import Workspace
 
 # The bundled default: local disk. Used when ``config.json`` has no ``storage``
@@ -394,19 +396,34 @@ def make_store(config: StorageConfig) -> StorageService:
 
 
 def load_storage_config(workspace: Workspace) -> StorageConfig:
-    """Return the workspace's storage config — currently always the bundled
-    default (:data:`DEFAULT_STORAGE_PROVIDER`, local disk).
+    """Read and validate the ``[storage]`` section of the workspace config.
 
-    STOPGAP (post config.toml migration): this used to parse a ``storage``
-    section out of the per-workspace ``config.json``. Upstream replaced JSON
-    config with the layered TOML model (``load_merged_config``), and reading a
-    ``[storage]`` table back out of it is a deliberate follow-up — see the
-    STORAGE_REROUTE_HANDOFF "storage change" TODO. Nothing writes or reads a
-    storage section today (every workspace is LocalStore), so returning the
-    default is behavior-identical to the pre-merge code while that reader is
-    designed. Provider selection via config is therefore temporarily disabled.
+    A missing config or missing ``[storage]`` section yields the bundled default
+    (:data:`DEFAULT_STORAGE_PROVIDER`, local disk), so an ordinary workspace runs
+    on local disk with zero config. When present, ``[storage]`` selects a
+    pluggable backend by dotted ``provider`` path, exactly like ``[conversion]``.
+
+    Validates only the *generic shape* — ``provider`` is a non-empty string. It
+    deliberately does **not** import the provider class or run its
+    ``parse_config`` here; provider resolution and field validation happen lazily
+    in :func:`make_store`, so loading the config never imports a backend SDK.
+
+    Raises :class:`StorageConfigInvalid` only for a malformed *shape* (the section
+    isn't a table, or ``provider`` is missing/blank).
     """
-    return StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=workspace.root)
+    root = workspace.root
+    section = load_merged_config(workspace).get(ConfigSection.STORAGE)
+    if section is None:
+        return StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=root)
+    if not isinstance(section, dict):
+        raise StorageConfigInvalid("'storage' must be a table")
+    provider = section.get("provider")
+    if not isinstance(provider, str) or not provider.strip():
+        raise StorageConfigInvalid("'storage.provider' must be a non-empty string")
+    # Keep the section verbatim (minus provider); the class is resolved and these
+    # fields validated lazily, in make_store — see the docstring.
+    options = {k: v for k, v in section.items() if k != "provider"}
+    return StorageConfig(provider=provider, root=root, options=options)
 
 
 def storage_fingerprint(config: StorageConfig) -> str:
