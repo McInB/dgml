@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
 import tempfile
 from collections import Counter
@@ -128,6 +129,38 @@ def strip_fences(text: str) -> str:
 
 SYSTEM_PROMPT = prompt("transcribe_system")
 
+# Generation-compaction flag: when ON, the Pass-A transcription calls request
+# the compact tab-delimited ("TL") line grammar (``transcribe_system_compact``)
+# instead of JSON. OFF (the default) is byte-identical to today — the unchanged
+# ``SYSTEM_PROMPT`` + ``transcribe_window_json``. Reply parsing always sniffs
+# the content (:func:`parse_window_any`), so both modes — and every cached raw
+# artifact — parse the same way regardless of how this is set.
+_COMPACT_GENERATION_ENV = "DGML_COMPACT_GENERATION"
+_COMPACT_GENERATION_TRUE = frozenset({"1", "true", "yes", "on"})
+_COMPACT_GENERATION_FALSE = frozenset({"", "0", "false", "no", "off"})
+
+
+def _generation_compaction_enabled() -> bool:
+    """Resolve ``$DGML_COMPACT_GENERATION`` as a boolean.
+
+    OFF (``False``) — unset, ``""``, ``"0"``, ``"false"``, ``"no"``, ``"off"``
+    (case-insensitive, trimmed) — takes the JSON path, byte-identical to today.
+    ON (``True``) — ``"1"``, ``"true"``, ``"yes"``, ``"on"``. Any other value
+    raises loudly, naming the offending value and the accepted set (resolved
+    once per document, so a typo fails the run rather than silently reverting).
+    """
+    value = os.environ.get(_COMPACT_GENERATION_ENV, "").strip().lower()
+    if value in _COMPACT_GENERATION_TRUE:
+        return True
+    if value in _COMPACT_GENERATION_FALSE:
+        return False
+    on = "/".join(sorted(_COMPACT_GENERATION_TRUE))
+    off = "/".join(sorted(_COMPACT_GENERATION_FALSE - {""}))
+    raise ValueError(
+        f"${_COMPACT_GENERATION_ENV} must be a boolean — "
+        f"on ({on}) or off (unset/{off}) — got {value!r}"
+    )
+
 
 def _heading_breadcrumb(blocks: list[Block]) -> list[str]:
     """The chain of still-open headings (a level stack, like ``build_tree``)."""
@@ -171,7 +204,9 @@ def _window_context(blocks: list[Block], tail_chars: int = 300) -> str:
     return "\n".join(parts)
 
 
-def _window_instruction(first_page: int, last_page: int, total: int, context: str) -> str:
+def _window_instruction(
+    first_page: int, last_page: int, total: int, context: str, compact: bool = False
+) -> str:
     parts = [
         prompt("transcribe_window_header").format(
             first=first_page + 1, last=last_page + 1, total=total
@@ -179,7 +214,7 @@ def _window_instruction(first_page: int, last_page: int, total: int, context: st
     ]
     if context:
         parts.append(prompt("transcribe_window_context").format(context=context))
-    parts.append(prompt("transcribe_window_json"))
+    parts.append(prompt("transcribe_window_compact" if compact else "transcribe_window_json"))
     return "\n\n".join(parts)
 
 
@@ -258,6 +293,144 @@ def _salvage_window_json(raw: str) -> dict[str, Any] | None:
             break  # the truncated trailing object — stop, keep what's complete
         blocks.append(obj)
     return {"continues": "", "blocks": blocks} if blocks else None
+
+
+# Compact ("TL") wire format — sigil-prefixed tab-delimited lines (H/P/I/R/F/O
+# plus a leading C continues-line), the 4-sequence escape set (``\\ \t \n \r``)
+# and ``\*`` for an option whose printed text starts with the checked-marker
+# asterisk. See ``transcribe_system_compact`` in prompts.yaml for the grammar
+# the model is shown.
+_TL_UNESCAPE_RE = re.compile(r"\\([\\tnr*])")
+_TL_UNESCAPE_MAP = {"\\": "\\", "t": "\t", "n": "\n", "r": "\r", "*": "*"}
+_HEADING_SIGIL_RE = re.compile(r"^H(\d*)$")
+
+
+def _tl_unescape(text: str) -> str:
+    """Decode the wire escapes (``\\\\ \\t \\n \\r \\*``); anything else is literal."""
+    return _TL_UNESCAPE_RE.sub(lambda m: _TL_UNESCAPE_MAP[m.group(1)], text)
+
+
+def _tl_field(rest: list[str], i: int) -> str:
+    """Field *i* of a split line, unescaped ('' when absent)."""
+    return _tl_unescape(rest[i]) if i < len(rest) else ""
+
+
+def _tl_tail(rest: list[str], i: int) -> str:
+    """Fields *i*.. re-joined with tabs, then unescaped.
+
+    The free-text field is the LAST field on its line, so a model-emitted
+    unescaped tab inside it is re-joined rather than truncating the text.
+    """
+    return _tl_unescape("\t".join(rest[i:]))
+
+
+def _parse_window_compact(text: str) -> tuple[dict[str, Any], int]:
+    """Decode a tab-delimited Pass-A reply into the JSON-shaped window payload.
+
+    Grammar (fields separated by real tabs; one block per line)::
+
+        C<TAB>text                       — continues-preamble (first line)
+        H<level><TAB>lim<TAB>text        — heading, level 1-6 ("H2")
+        P<TAB>text                       — paragraph
+        I<TAB>lim<TAB>text               — list item
+        R<TAB>cell<TAB>cell…             — table row
+        F<TAB>lim<TAB>label<TAB>value    — label/value form line
+        O<TAB>lim<TAB>label<TAB>value<TAB>opt… — choice group; checked opts
+                                                 prefixed "*" (literal "\\*")
+
+    Per-line tolerant: a malformed line (unknown sigil, a half-written
+    truncation tail) is dropped and counted — the natural analogue of
+    ``_salvage_window_json``, which likewise keeps the complete blocks and
+    drops the partial trailing one. Returns ``(payload, dropped)`` where
+    *payload* is exactly the ``{"continues": str, "blocks": [dict, ...]}``
+    shape that ``parse_block`` (and ``_payload_text`` / ``_window_recall`` /
+    ``_payload_tail`` / ``_merge_payloads``) consume today.
+    """
+    continues = ""
+    blocks: list[dict[str, Any]] = []
+    dropped = 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        sigil, rest = fields[0], fields[1:]
+        heading = _HEADING_SIGIL_RE.match(sigil)
+        if heading is not None:
+            level = int(heading.group(1)) if heading.group(1) else 1
+            blocks.append(
+                {
+                    "structure": "heading",
+                    "level": level,
+                    "lim": _tl_field(rest, 0),
+                    "text": _tl_tail(rest, 1),
+                }
+            )
+        elif sigil == "P":
+            blocks.append({"structure": "p", "text": _tl_tail(rest, 0)})
+        elif sigil == "I":
+            blocks.append(
+                {"structure": "item", "lim": _tl_field(rest, 0), "text": _tl_tail(rest, 1)}
+            )
+        elif sigil == "R":
+            blocks.append({"structure": "row", "cells": [_tl_unescape(c) for c in rest]})
+        elif sigil == "F":
+            blocks.append(
+                {
+                    "structure": "field",
+                    "lim": _tl_field(rest, 0),
+                    "label": _tl_field(rest, 1),
+                    "value": _tl_tail(rest, 2),
+                }
+            )
+        elif sigil == "O":
+            options: list[str] = []
+            checked: list[str] = []
+            for tok in rest[3:]:
+                starred = tok.startswith("*")
+                body = _tl_unescape(tok[1:] if starred else tok)
+                options.append(body)
+                if starred:
+                    checked.append(body)
+            blocks.append(
+                {
+                    "structure": "field",
+                    "lim": _tl_field(rest, 0),
+                    "label": _tl_field(rest, 1),
+                    "value": _tl_field(rest, 2),
+                    "options": options,
+                    "checked": checked,
+                }
+            )
+        elif sigil == "C":
+            continues = _tl_tail(rest, 0)
+        else:
+            dropped += 1
+    return {"continues": continues, "blocks": blocks}, dropped
+
+
+def parse_window_any(raw: str, *, log: Callable[[str], None] = lambda _m: None) -> dict[str, Any]:
+    """Parse a window reply in EITHER wire format, by content sniffing.
+
+    After fence-stripping, a reply starting with ``{`` takes today's JSON path
+    (:func:`_parse_window_json`) unchanged — including raising
+    ``json.JSONDecodeError`` on damaged JSON, so the caller's
+    ``_salvage_window_json`` fallback still runs exactly as before. Anything
+    else decodes as the compact tab-delimited format, which is per-line
+    tolerant and never raises. The CONTENT decides, not
+    ``$DGML_COMPACT_GENERATION``, so cached raw artifacts and mixed-mode runs
+    parse through one entry point.
+    """
+    if strip_fences(raw).lstrip().startswith("{"):
+        return _parse_window_json(raw)
+    # Compact branch: unwrap a fence WITHOUT strip_fences' whole-text strip —
+    # a trailing tab on the final line is an empty trailing cell/value and is
+    # significant (stripping it would shift the last row's column count).
+    match = _JSON_FENCE_RE.search(raw)
+    body = match.group(1) if match else raw
+    payload, dropped = _parse_window_compact(body)
+    if dropped:
+        log(f"compact reply: dropped {dropped} malformed line(s)")
+    return payload
 
 
 def _append_continuation(blocks: list[Block], continuation: str) -> None:
@@ -406,6 +579,11 @@ def transcribe_document(
     windows = document.iter_windows(total, window_size, overlap=0)
     log(f"{doc_name}: {total} pages → {len(windows)} window(s)")
     page_tokens = _page_token_lists(page_text_dir)
+    # Resolved once per document, BEFORE the window loop: a bad
+    # $DGML_COMPACT_GENERATION value must fail loudly, never dissolve into
+    # per-window soft skips.
+    compact = _generation_compaction_enabled()
+    system_prompt = prompt("transcribe_system_compact") if compact else SYSTEM_PROMPT
 
     # One usage row per document, aggregating every window's call (gated on
     # --debug via the config). ``config`` is fresh per document in the pipeline,
@@ -421,7 +599,7 @@ def transcribe_document(
         ) -> tuple[float, str, dict[str, Any]] | None:
             """Gated attempt loop for one page range; best (recall, raw, payload)."""
             pdf_slice = document.slice_pdf(pdf_bytes, pages)
-            instr = _window_instruction(pages[0], pages[-1], total, context)
+            instr = _window_instruction(pages[0], pages[-1], total, context, compact)
             exp = [t for p in pages if p < len(page_tokens) for t in page_tokens[p]]
             n_attempts = 1 + (_GATE_RETRIES if len(exp) >= _GATE_MIN_TOKENS else 0)
             found: tuple[float, str, dict[str, Any]] | None = None
@@ -442,7 +620,7 @@ def transcribe_document(
                     )
                 raw = llm.call_continued(
                     config,
-                    system_prompt=SYSTEM_PROMPT,
+                    system_prompt=system_prompt,
                     user_content=llm.build_user_content(
                         instruction_text=attempt_instr, pdf_bytes=pdf_slice
                     ),
@@ -456,7 +634,7 @@ def transcribe_document(
                     debug=debug,
                 )
                 try:
-                    payload = _parse_window_json(raw)
+                    payload = parse_window_any(raw, log=lambda m: log(f"{doc_name} {wlog}: {m}"))
                 except json.JSONDecodeError as exc:
                     # Continuation should normally close the JSON; if a window
                     # still arrives truncated (e.g. a stream cut the provider
