@@ -25,10 +25,15 @@ from dgml_core.errors import (
     now_iso,
 )
 from dgml_core.files import FileStore
-from dgml_core.pages import PAGE_GLOB
-from dgml_core.storage import Workspace, read_json, write_json_atomic
+from dgml_core.storage import Workspace
 
 from .conftest import needs_gs
+
+
+def _page_pngs(ws: Workspace, file_id: str) -> list[str]:
+    """Rendered page-image blob keys for ``file_id`` — the store analogue of
+    globbing ``page_*.png`` in the workspace's page-images dir."""
+    return [k for k in ws.store.list_blobs(ws.file_pages_key(file_id)) if k.endswith(".png")]
 
 
 @needs_gs
@@ -45,8 +50,7 @@ def test_clean_workspace_passes(workspace: Workspace, text_pdf: Path) -> None:
 @needs_gs
 def test_missing_pdf_detected(workspace: Workspace, sample_pdf: Path) -> None:
     f = FileStore(workspace).add(sample_pdf)
-    pdf = workspace.file_dir(f.record.id) / f.record.original_filename
-    pdf.unlink()
+    workspace.store.delete_blob(workspace.file_source_key(f.record.id, f.record.original_filename))
     report = check_workspace(workspace)
     assert any(i.kind == "missing_pdf" for i in report.issues)
 
@@ -54,8 +58,10 @@ def test_missing_pdf_detected(workspace: Workspace, sample_pdf: Path) -> None:
 @needs_gs
 def test_hash_mismatch_detected(workspace: Workspace, sample_pdf: Path) -> None:
     f = FileStore(workspace).add(sample_pdf)
-    pdf = workspace.file_dir(f.record.id) / f.record.original_filename
-    pdf.write_bytes(b"%PDF-1.4\nbroken-but-still-pdf-magic")
+    workspace.store.put_blob(
+        workspace.file_source_key(f.record.id, f.record.original_filename),
+        b"%PDF-1.4\nbroken-but-still-pdf-magic",
+    )
     report = check_workspace(workspace)
     assert any(i.kind == "hash_mismatch" for i in report.issues)
 
@@ -63,13 +69,11 @@ def test_hash_mismatch_detected(workspace: Workspace, sample_pdf: Path) -> None:
 @needs_gs
 def test_missing_pages_re_rendered(workspace: Workspace, sample_pdf: Path) -> None:
     f = FileStore(workspace).add(sample_pdf)
-    pages = workspace.file_pages_dir(f.record.id)
-    for p in pages.glob(PAGE_GLOB):
-        p.unlink()
+    workspace.store.delete_blobs(f"{workspace.file_pages_key(f.record.id)}/")
     report = check_workspace(workspace)
     repaired = [i for i in report.issues if i.kind == "page_count_mismatch" and i.repaired]
     assert repaired, report.to_json()
-    assert len(list(pages.glob(PAGE_GLOB))) == 2
+    assert len(_page_pngs(workspace, f.record.id)) == 2
 
 
 @needs_gs
@@ -80,10 +84,10 @@ def test_bogus_zero_page_count_with_pages_on_disk_is_consistent(
     be treated as unknown, not as authoritative — so a file with its pages
     intact on disk is NOT flagged as a spurious ``expected 0`` mismatch."""
     f = FileStore(workspace).add(text_pdf)
-    json_path = workspace.file_json_path(f.record.id)
-    data = read_json(json_path)
+    data = workspace.store.get_doc("files", f.record.id)
+    assert data is not None
     data["page_count"] = 0
-    write_json_atomic(json_path, data)
+    workspace.store.put_doc("files", f.record.id, data)
 
     report = check_workspace(workspace)
     assert not [i for i in report.issues if i.kind == "page_count_mismatch"], report.to_json()
@@ -97,26 +101,23 @@ def test_bogus_zero_page_count_re_renders_missing_pages(
     still recover by re-rendering (ghostscript is authoritative) rather than
     silently treating 0 rendered == 0 expected as consistent."""
     f = FileStore(workspace).add(sample_pdf)
-    json_path = workspace.file_json_path(f.record.id)
-    data = read_json(json_path)
+    data = workspace.store.get_doc("files", f.record.id)
+    assert data is not None
     data["page_count"] = 0
-    write_json_atomic(json_path, data)
-    pages = workspace.file_pages_dir(f.record.id)
-    for p in pages.glob(PAGE_GLOB):
-        p.unlink()
+    workspace.store.put_doc("files", f.record.id, data)
+    workspace.store.delete_blobs(f"{workspace.file_pages_key(f.record.id)}/")
 
     report = check_workspace(workspace)
     assert any(i.kind == "page_count_mismatch" and i.repaired for i in report.issues), (
         report.to_json()
     )
-    assert len(list(pages.glob(PAGE_GLOB))) == 2
+    assert len(_page_pngs(workspace, f.record.id)) == 2
 
 
 @needs_gs
 def test_permanent_error_blocks_retry(workspace: Workspace, sample_pdf: Path) -> None:
     f = FileStore(workspace).add(sample_pdf)
-    for p in workspace.file_pages_dir(f.record.id).glob(PAGE_GLOB):
-        p.unlink()
+    workspace.store.delete_blobs(f"{workspace.file_pages_key(f.record.id)}/")
     append_recorded_error(
         workspace,
         f.record.id,
@@ -129,14 +130,13 @@ def test_permanent_error_blocks_retry(workspace: Workspace, sample_pdf: Path) ->
     )
     report = check_workspace(workspace)
     assert any(i.kind == "page_render_failed_permanent" for i in report.issues)
-    assert not list(workspace.file_pages_dir(f.record.id).glob(PAGE_GLOB))
+    assert not _page_pngs(workspace, f.record.id)
 
 
 @needs_gs
 def test_retry_errors_clears_and_retries(workspace: Workspace, sample_pdf: Path) -> None:
     f = FileStore(workspace).add(sample_pdf)
-    for p in workspace.file_pages_dir(f.record.id).glob(PAGE_GLOB):
-        p.unlink()
+    workspace.store.delete_blobs(f"{workspace.file_pages_key(f.record.id)}/")
     append_recorded_error(
         workspace,
         f.record.id,
@@ -148,7 +148,7 @@ def test_retry_errors_clears_and_retries(workspace: Workspace, sample_pdf: Path)
         ),
     )
     report = check_workspace(workspace, retry_errors=True)
-    assert len(list(workspace.file_pages_dir(f.record.id).glob(PAGE_GLOB))) == 2
+    assert len(_page_pngs(workspace, f.record.id)) == 2
     assert load_recorded_errors(workspace, f.record.id) == []
     assert any(i.kind == "page_count_mismatch" and i.repaired for i in report.issues)
 
@@ -176,7 +176,12 @@ def test_corrupt_file_metadata_does_not_crash(workspace: Workspace) -> None:
     """A corrupt file.json must be reported, not crash the whole walk."""
     fid = "corruptfileid"
     workspace.store.put_blob(f"files/{fid}/report.pdf", b"%PDF-1.4\n")  # makes the id visible
-    workspace.file_json_path(fid).write_text("{not valid json")
+    # Inject a corrupt manifest via put_blob (raw bytes), not put_doc — put_doc
+    # only accepts a valid dict, so it cannot write invalid JSON. This asserts a
+    # LocalStore-specific failure mode: the manifest is a JSON file on disk that
+    # get_doc parses, so half-written garbage surfaces as corrupt_metadata. The
+    # key string is the LocalStore layout; the default test store is LocalStore.
+    workspace.store.put_blob(f"files/{fid}/file.json", b"{not valid json")
     report = check_workspace(workspace)
     assert any(
         i.target_type == "file" and i.target_id == fid and i.kind == "corrupt_metadata"
@@ -187,7 +192,9 @@ def test_corrupt_file_metadata_does_not_crash(workspace: Workspace) -> None:
 def test_corrupt_docset_metadata_does_not_crash(workspace: Workspace) -> None:
     did = "corruptdocsetid"
     workspace.store.put_blob(f"docsets/{did}/extraction-schema.rnc", b"start = text\n")
-    workspace.docset_json_path(did).write_text("{not valid json")
+    # Corrupt manifest via put_blob — LocalStore-specific; see
+    # test_corrupt_file_metadata_does_not_crash for the rationale.
+    workspace.store.put_blob(f"docsets/{did}/docset.json", b"{not valid json")
     report = check_workspace(workspace)
     assert any(
         i.target_type == "docset" and i.target_id == did and i.kind == "corrupt_metadata"
@@ -203,7 +210,9 @@ def test_corrupt_metadata_alongside_clean_continues_walk(
     bad = "aaaaaaaaaaaa"
     good = "zzzzzzzzzzzz"
     workspace.store.put_blob(f"files/{bad}/report.pdf", b"%PDF-1.4\n")
-    workspace.file_json_path(bad).write_text("{not json")
+    # Corrupt manifest via put_blob — LocalStore-specific; see
+    # test_corrupt_file_metadata_does_not_crash for the rationale.
+    workspace.store.put_blob(f"files/{bad}/file.json", b"{not json")
     workspace.store.put_blob(f"files/{good}/report.pdf", b"%PDF-1.4\n")  # blob-orphan: no manifest
     report = check_workspace(workspace)
     issues_by_id = {i.target_id: i.kind for i in report.issues if i.target_type == "file"}
@@ -215,13 +224,19 @@ def test_check_no_longer_falls_back_to_any_pdf(workspace: Workspace) -> None:
     """If the named PDF is missing, surface missing_pdf rather than silently
     using a different PDF that happens to be in the directory."""
     fid = "fabfileabcde"
-    workspace.file_dir(fid).mkdir(parents=True)
-    workspace.file_json_path(fid).write_text(
-        '{"id": "fabfileabcde", "original_path": "/tmp/x.pdf",'
-        ' "original_filename": "x.pdf", "sha256": "deadbeef",'
-        ' "added_at": "2026-05-08T00:00:00Z", "page_count": 1}'
+    workspace.store.put_doc(
+        "files",
+        fid,
+        {
+            "id": "fabfileabcde",
+            "original_path": "/tmp/x.pdf",
+            "original_filename": "x.pdf",
+            "sha256": "deadbeef",
+            "added_at": "2026-05-08T00:00:00Z",
+            "page_count": 1,
+        },
     )
-    (workspace.file_dir(fid) / "something_else.pdf").write_bytes(b"%PDF-1.4\n")
+    workspace.store.put_blob(workspace.file_source_key(fid, "something_else.pdf"), b"%PDF-1.4\n")
     report = check_workspace(workspace)
     assert any(i.target_id == fid and i.kind == "missing_pdf" for i in report.issues)
 
@@ -236,14 +251,15 @@ def test_unattributed_computed_field_flagged(workspace: Workspace, text_pdf: Pat
     ds = store.create(name="X")
     store.add_file(ds.id, f.record.id)
 
-    xml_path = workspace.file_dgml_xml_path(ds.id, f.record.id, "doc")
-    xml_path.parent.mkdir(parents=True, exist_ok=True)
-    xml_path.write_text(
-        '<dg:chunk xmlns:dg="http://dgml.io/ns/dg#" xmlns:docset="http://x/ns">'
-        "<dg:extraction>"
-        '<docset:Total dg:origin="computed" dg:value="10">10</docset:Total>'
-        "</dg:extraction></dg:chunk>",
-        encoding="utf-8",
+    xml_key = workspace.file_dgml_xml_key(ds.id, f.record.id, "doc")
+    workspace.store.put_blob(
+        xml_key,
+        (
+            b'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#" xmlns:docset="http://x/ns">'
+            b"<dg:extraction>"
+            b'<docset:Total dg:origin="computed" dg:value="10">10</docset:Total>'
+            b"</dg:extraction></dg:chunk>"
+        ),
     )
     report = check_workspace(workspace)
     flagged = [i for i in report.issues if i.kind == "computed_field_unattributed"]
@@ -251,14 +267,16 @@ def test_unattributed_computed_field_flagged(workspace: Workspace, text_pdf: Pat
     assert "Total" in flagged[0].message
     assert flagged[0].target_id == ds.id
 
-    xml_path.write_text(
-        '<dg:chunk xmlns:dg="http://dgml.io/ns/dg#" xmlns:docset="http://x/ns">'
-        "<dg:extraction>"
-        '<docset:Part xml:id="p1" dg:origin="1 1 2 3 4">4</docset:Part>'
-        '<docset:Total dg:origin="computed" dg:value="10" '
-        'dg:itemprop="computedFrom" dg:href="#p1">10</docset:Total>'
-        "</dg:extraction></dg:chunk>",
-        encoding="utf-8",
+    workspace.store.put_blob(
+        xml_key,
+        (
+            b'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#" xmlns:docset="http://x/ns">'
+            b"<dg:extraction>"
+            b'<docset:Part xml:id="p1" dg:origin="1 1 2 3 4">4</docset:Part>'
+            b'<docset:Total dg:origin="computed" dg:value="10" '
+            b'dg:itemprop="computedFrom" dg:href="#p1">10</docset:Total>'
+            b"</dg:extraction></dg:chunk>"
+        ),
     )
     report = check_workspace(workspace)
     assert not [i for i in report.issues if i.kind == "computed_field_unattributed"]
@@ -287,7 +305,7 @@ def test_reextract_hybrid_threads_debug(
 
     fid = "fid"
     workspace.store.put_blob(f"files/{fid}/doc.pdf", b"%PDF-1.4\n")
-    source_key = workspace.blob_key(workspace.file_dir(fid) / "doc.pdf")
+    source_key = workspace.file_source_key(fid, "doc.pdf")
     _reextract(workspace, source_key, fid, "hybrid", verbose=False, debug=debug)
 
     assert captured["debug"] is debug
