@@ -33,9 +33,8 @@ import json
 from dataclasses import replace
 from typing import Any
 
-from . import llm
+from . import layout, llm
 from .generation.transcribe import strip_fences
-from .pages import PAGE_FILENAME_TEMPLATE
 from .storage import Workspace
 from .style import ALLOWED, merge_styles, validate_style
 from .usage import OPERATION_STYLE_ANNOTATE
@@ -77,9 +76,8 @@ def annotate_style_from_image(
             by_page.setdefault(page, []).append((el, text))
 
     styled = 0
-    pages_key = workspace.file_pages_key(file_id)
     for page, elements in by_page.items():
-        image_key = f"{pages_key}/{PAGE_FILENAME_TEMPLATE % page}"
+        image_key = layout.file_page_image_key(file_id, page)
         if not workspace.store.blob_exists(image_key):
             continue
         elements = elements[:_MAX_SNIPPETS_PER_PAGE]

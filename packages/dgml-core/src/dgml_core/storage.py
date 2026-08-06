@@ -14,12 +14,15 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from . import layout
 
 if TYPE_CHECKING:
     from .storage_service import StorageService
@@ -28,7 +31,7 @@ from .default_config import PROVIDER_MODELS
 
 ENV_VAR = "DGML_HOME"
 DEFAULT_DIR_NAME = "dgml-workspace"
-CONFIG_NAME = "config.toml"
+CONFIG_NAME = layout.CONFIG_FILE
 USER_CONFIG_DIR = "dgml"
 WORKSPACE_META_NAME = "workspace.json"
 
@@ -54,93 +57,87 @@ class Workspace:
             root = (Path.cwd() / DEFAULT_DIR_NAME).resolve()
         return cls(root=root)
 
+    def local_path(self, key: str) -> Path:
+        """The on-disk location a store key would occupy under this root.
+
+        The single filesystem escape hatch: pair it with a
+        :mod:`dgml_core.layout` key builder so a real path and the key naming the
+        same data cannot drift apart. Domain code addresses data by **key**
+        through ``store`` and does not need this; it exists for the few things
+        that genuinely require a path (reading the user's source file, test
+        fixtures that build a tree directly). Meaningful only for a local store."""
+        return self.root / key.rstrip("/")
+
     @property
     def docsets_dir(self) -> Path:
-        return self.root / "docsets"
+        return self.root / layout.DOCSETS_DIR
 
     @property
     def files_dir(self) -> Path:
-        return self.root / "files"
+        return self.root / layout.FILES_DIR
 
     @property
     def embedding_cache_dir(self) -> Path:
         """Where clustering encoders cache content-hashed embeddings so
         re-embedding unchanged files across runs is cheap. Per-workspace and
         safe to delete."""
-        return self.root / ".cache" / "embeddings"
+        return self.root / layout.CACHE_DIR / layout.EMBEDDINGS_DIR
 
     def blob_key(self, path: Path) -> str:
-        """The storage key for a local workspace artifact ``path``.
+        """The store key naming ``path``, the inverse of :meth:`local_path`.
 
-        Blob keys are workspace-root-relative POSIX strings (``files/<id>/…``);
-        ``LocalStore`` maps a key back onto ``root/<key>``, while a remote store
-        treats it as an opaque object key. A general path→key converter (raises
-        ``ValueError`` on a path outside ``root``); most callers instead use the
-        semantic ``*_key`` methods below, which build keys directly."""
-        return path.relative_to(self.root).as_posix()
+        Pure path arithmetic (relative to this root, as POSIX) — it holds no
+        knowledge of the layout itself, so it stays correct as
+        :mod:`dgml_core.layout` evolves. For the filesystem-bound cases that
+        have a real path in hand and need the key for it."""
+        return path.resolve().relative_to(self.root).as_posix()
 
     # ---- Store keys for workspace artifacts ----
     #
     # A key is the workspace-root-relative POSIX string a blob lives at; callers
-    # hand these straight to ``store`` (``list_blobs`` / ``get_blob`` / …). This
-    # is the single source of the on-disk layout: the keys compose from each
-    # other so ``LocalStore`` (and any remote store) round-trips every artifact
-    # by the exact same address.
+    # hand these straight to ``store`` (``list_blobs`` / ``get_blob`` / …). They
+    # are the store-native address. Each one delegates to a
+    # :mod:`dgml_core.layout` builder — layout is the single source of the
+    # on-disk shape, and these are the convenience spelling of it. A
+    # filesystem-bound caller composes ``local_path`` with a ``layout`` key
+    # builder directly.
+    #
+    # ``*_key`` never carries a trailing slash; the ``layout.*_prefix`` builders
+    # do (it is load-bearing for prefix matching in ``list_blobs``), so the
+    # directory-shaped keys below strip it.
 
     def file_key(self, file_id: str) -> str:
-        return f"files/{file_id}"
+        return layout.file_prefix(file_id).rstrip("/")
 
     def file_source_key(self, file_id: str, filename: str) -> str:
-        """The copied-in original source (and, for a convertible source, the
-        derived ``<stem>.pdf``) — a blob under the file's own prefix."""
-        return f"{self.file_key(file_id)}/{filename}"
+        return layout.file_source_key(file_id, filename)
 
     def file_pages_key(self, file_id: str) -> str:
-        return f"{self.file_key(file_id)}/page_images"
+        return layout.file_pages_prefix(file_id).rstrip("/")
 
     def file_text_key(self, file_id: str) -> str:
-        return f"{self.file_key(file_id)}/page_text"
+        return layout.file_text_prefix(file_id).rstrip("/")
 
     def docset_key(self, docset_id: str) -> str:
-        return f"docsets/{docset_id}"
+        return layout.docset_prefix(docset_id).rstrip("/")
 
     def docset_files_key(self, docset_id: str) -> str:
-        return f"{self.docset_key(docset_id)}/files"
+        return layout.docset_files_prefix(docset_id).rstrip("/")
 
     def docset_file_key(self, docset_id: str, file_id: str) -> str:
-        """Per-(docset, file) prefix. Holds the assignment record, the file's
-        core ``<stem>.dgml.xml`` (generated tree and/or dg:extraction), and its
-        ``extraction_stats.json`` sidecar."""
-        return f"{self.docset_files_key(docset_id)}/{file_id}"
+        return layout.docset_pair_prefix(docset_id, file_id).rstrip("/")
 
     def docset_schema_key(self, docset_id: str) -> str:
-        # The grounded *extraction* schema, stored in RELAX NG Compact (the
-        # spec's canonical schema form). Set via `extraction set-schema` /
-        # `extraction generate-schema`, consumed by extract_values. Distinct from
-        # the *generation tag* schema (schema.json) — separate names, never clobber.
-        return f"{self.docset_key(docset_id)}/extraction-schema.rnc"
+        return layout.docset_extraction_schema_key(docset_id)
 
     def docset_generation_schema_key(self, docset_id: str) -> str:
-        # The generation *tag* schema written by `docset generate` (consumed by
-        # convert_batch — the machine exchange format that seeds later runs).
-        return f"{self.docset_key(docset_id)}/schema.json"
+        return layout.docset_generation_schema_key(docset_id)
 
     def docset_full_schema_key(self, docset_id: str) -> str:
-        # schema.json rendered as RELAX NG Compact at the end of `docset generate`
-        # — the *full* (whole-document) schema. Lossless (every field survives as
-        # `# Field: value` comments); shipped in DGMLX bundles and hashed into the
-        # file attestation (slot "full_schema").
-        return f"{self.docset_key(docset_id)}/full-schema.rnc"
+        return layout.docset_full_schema_key(docset_id)
 
     def file_dgml_xml_key(self, docset_id: str, file_id: str, file_stem: str) -> str:
-        """Canonical store key of the DGML XML for one file in a docset:
-        ``docsets/<docset_id>/files/<file_id>/<stem>.dgml.xml``.
-
-        The deterministic per-(docset, file) slot ``dgml docset generate`` writes
-        and file attestation reads. Living under the pair prefix means placement
-        never depends on the original filename being unique within the docset.
-        Pass ``Path(original_filename).stem`` as ``file_stem``."""
-        return f"{self.docset_file_key(docset_id, file_id)}/{file_stem}.dgml.xml"
+        return layout.dgml_xml_key(docset_id, file_id, file_stem)
 
     def read_page_text(self, file_id: str, page: int) -> dict[str, Any] | None:
         """The per-page word-box JSON for ``page`` of ``file_id`` (a blob),
@@ -150,7 +147,7 @@ class Workspace:
         malformed content raises :class:`~dgml_core.errors.CorruptMetadata`."""
         from .errors import CorruptMetadata
 
-        key = f"{self.file_text_key(file_id)}/page_{page}.json"
+        key = layout.file_page_text_key(file_id, page)
         try:
             data = self.store.get_blob(key)
         except FileNotFoundError:
@@ -165,11 +162,11 @@ class Workspace:
         """Optional per-workspace ``config.toml`` (resolution layer 3). Overrides
         keys from the user-level ``~/.config/dgml/config.toml``; absent in the
         common case where the user config suffices."""
-        return self.root / CONFIG_NAME
+        return self.root / layout.CONFIG_FILE
 
     @property
     def usage_log_path(self) -> Path:
-        return self.root / "usage.jsonl"
+        return self.root / layout.USAGE_FILE
 
     @property
     def meta_path(self) -> Path:
@@ -177,45 +174,46 @@ class Workspace:
         ``organization``. Written by ``dgml workspace create``. The
         organization is what docset namespace URIs embed
         (``http://dgml.io/<organization>/<DocSetSlug>``)."""
-        return self.root / WORKSPACE_META_NAME
+        return self.root / layout.WORKSPACE_FILE
 
-    @property
+    @functools.cached_property
     def store(self) -> StorageService:
         """The workspace's storage backend, resolved from the ``storage`` section
-        of ``config.json`` (defaulting to the bundled local-disk store). All
-        workspace data is read/written through this rather than the filesystem
-        directly, so a workspace can live on any pluggable backend."""
+        of the config (defaulting to the bundled local-disk store). All workspace
+        data is read/written through this rather than the filesystem directly, so
+        a workspace can live on any pluggable backend.
+
+        **Cached for the lifetime of this ``Workspace``.** Resolving means reading
+        and merging config, importing the provider module and constructing it —
+        cheap enough on local disk, but a fresh SDK client per call on a remote
+        backend, and this is reached through on the order of a hundred call sites.
+        A workspace's store is a single static choice, so re-deriving it per
+        access bought nothing.
+
+        Caching works on this frozen dataclass because ``cached_property`` writes
+        straight into ``__dict__`` rather than going through ``__setattr__``. It
+        is also a *non-data* descriptor, so a test that replaces the class
+        attribute with a ``property`` still takes precedence over anything already
+        cached."""
         from .storage_service import load_storage_config, make_store
 
         return make_store(load_storage_config(self))
 
-    def unassign(self, docset_id: str, file_id: str) -> None:
-        """Remove a docset↔file assignment and that pair's generated artifacts
-        (the ``dgml.xml`` blob and the extraction-stats document). Composed from
-        native store ops — document deletes + a blob-prefix delete — so it is
-        correct on any backend, not just local disk.
-
-        Ordering is load-bearing. The **authoritative record dies first**, so a
-        crash mid-cascade leaves orphaned bytes (recoverable garbage) rather than
-        an assignment pointing at artifacts that are gone. ``delete_blobs`` runs
-        last for the same reason it does in the file/docset cascades: it is the
-        step that prunes the emptied container on ``LocalStore``.
-        """
-        self.store.delete_doc("assignments", f"{docset_id}/{file_id}")
-        self.store.delete_doc("extraction_stats", f"{docset_id}/{file_id}")
-        self.store.delete_blobs(f"docsets/{docset_id}/files/{file_id}/")
-
     def read_meta(self) -> dict[str, Any]:
         """Return the parsed ``workspace.json`` mapping, or ``{}`` when the file
         is absent (workspaces created before ``workspace.json`` existed)."""
-        data = self.store.get_doc("workspace", "workspace")
+        data = self.store.get_doc(layout.Collection.WORKSPACE, layout.Collection.WORKSPACE)
         return data if isinstance(data, dict) else {}
 
     def write_meta(self, *, name: str, organization: str) -> None:
         """Persist the workspace identity (``name`` + ``organization``) to
         ``workspace.json``. The organization is embedded in docset namespace
         URIs. Backs ``dgml workspace create``."""
-        self.store.put_doc("workspace", "workspace", {"name": name, "organization": organization})
+        self.store.put_doc(
+            layout.Collection.WORKSPACE,
+            layout.Collection.WORKSPACE,
+            {"name": name, "organization": organization},
+        )
 
     @property
     def organization(self) -> str:

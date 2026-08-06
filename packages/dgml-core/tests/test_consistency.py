@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from dgml_core import layout
 from dgml_core.consistency import _reextract, check_workspace
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
@@ -157,9 +158,10 @@ def test_dangling_docset_reference(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     # An assignment to a file that has no manifest — the dangling reference.
-    workspace.store.insert_doc(
-        "assignments",
-        {"_id": f"{ds.id}/missingfileid", "docset_id": ds.id, "file_id": "missingfileid"},
+    workspace.store.put_doc(
+        layout.Collection.ASSIGNMENTS,
+        layout.pair_id(ds.id, "missingfileid"),
+        {"docset_id": ds.id, "file_id": "missingfileid"},
     )
     report = check_workspace(workspace)
     assert any(i.kind == "dangling_file_reference" for i in report.issues)
@@ -176,12 +178,13 @@ def test_corrupt_file_metadata_does_not_crash(workspace: Workspace) -> None:
     """A corrupt file.json must be reported, not crash the whole walk."""
     fid = "corruptfileid"
     workspace.store.put_blob(f"files/{fid}/report.pdf", b"%PDF-1.4\n")  # makes the id visible
-    # Inject a corrupt manifest via put_blob (raw bytes), not put_doc — put_doc
-    # only accepts a valid dict, so it cannot write invalid JSON. This asserts a
-    # LocalStore-specific failure mode: the manifest is a JSON file on disk that
-    # get_doc parses, so half-written garbage surfaces as corrupt_metadata. The
-    # key string is the LocalStore layout; the default test store is LocalStore.
-    workspace.store.put_blob(f"files/{fid}/file.json", b"{not valid json")
+    # Inject a corrupt manifest directly on disk — put_doc only accepts a valid
+    # dict (can't write invalid JSON) and put_blob refuses a document key. This is
+    # a LocalStore-specific failure mode (the manifest is a JSON file that get_doc
+    # parses); local_path is the sanctioned filesystem escape for such fixtures.
+    workspace.local_path(f"{workspace.file_key(fid)}/file.json").write_text(
+        "{not valid json", encoding="utf-8"
+    )
     report = check_workspace(workspace)
     assert any(
         i.target_type == "file" and i.target_id == fid and i.kind == "corrupt_metadata"
@@ -192,9 +195,11 @@ def test_corrupt_file_metadata_does_not_crash(workspace: Workspace) -> None:
 def test_corrupt_docset_metadata_does_not_crash(workspace: Workspace) -> None:
     did = "corruptdocsetid"
     workspace.store.put_blob(f"docsets/{did}/extraction-schema.rnc", b"start = text\n")
-    # Corrupt manifest via put_blob — LocalStore-specific; see
+    # Corrupt manifest on disk — LocalStore-specific; see
     # test_corrupt_file_metadata_does_not_crash for the rationale.
-    workspace.store.put_blob(f"docsets/{did}/docset.json", b"{not valid json")
+    workspace.local_path(f"{workspace.docset_key(did)}/docset.json").write_text(
+        "{not valid json", encoding="utf-8"
+    )
     report = check_workspace(workspace)
     assert any(
         i.target_type == "docset" and i.target_id == did and i.kind == "corrupt_metadata"
@@ -210,9 +215,11 @@ def test_corrupt_metadata_alongside_clean_continues_walk(
     bad = "aaaaaaaaaaaa"
     good = "zzzzzzzzzzzz"
     workspace.store.put_blob(f"files/{bad}/report.pdf", b"%PDF-1.4\n")
-    # Corrupt manifest via put_blob — LocalStore-specific; see
+    # Corrupt manifest on disk — LocalStore-specific; see
     # test_corrupt_file_metadata_does_not_crash for the rationale.
-    workspace.store.put_blob(f"files/{bad}/file.json", b"{not json")
+    workspace.local_path(f"{workspace.file_key(bad)}/file.json").write_text(
+        "{not json", encoding="utf-8"
+    )
     workspace.store.put_blob(f"files/{good}/report.pdf", b"%PDF-1.4\n")  # blob-orphan: no manifest
     report = check_workspace(workspace)
     issues_by_id = {i.target_id: i.kind for i in report.issues if i.target_type == "file"}

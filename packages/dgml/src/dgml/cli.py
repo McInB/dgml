@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
+from dgml_core import layout
 from dgml_core.classification import (
     ClassificationConfig,
     classify_file,
@@ -1807,7 +1808,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         # core <stem>.dgml.xml — the single *.dgml.xml blob in the pair's prefix.
         dgml_keys = sorted(
             k
-            for k in ws.store.list_blobs(ws.docset_file_key(args.docset_id, args.file_id))
+            for k in ws.store.list_blobs(layout.docset_pair_prefix(args.docset_id, args.file_id))
             if k.endswith(".dgml.xml")
         )
         xml = ws.store.get_blob(dgml_keys[0]).decode("utf-8") if dgml_keys else ""
@@ -2208,7 +2209,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             )
             _diag(f"Source missing for {name} (file '{fid}') — reported as failed")
             continue
-        out_xml_key = ws.file_dgml_xml_key(args.docset_id, fid, stem)
+        out_xml_key = layout.dgml_xml_key(args.docset_id, fid, stem)
         if ws.store.blob_exists(out_xml_key) and _has_generated_tree(
             ws.store.get_blob(out_xml_key).decode("utf-8")
         ):
@@ -2222,7 +2223,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             name_to_fid[name] = fid  # in case it re-renders below and needs re-grounding
             _diag(f"Skipping {name} (already converted)")
             continue
-        pt_prefix = ws.file_text_key(fid)
+        pt_prefix = layout.file_text_prefix(fid)
         candidates.setdefault(name, []).append(
             (fid, out_xml_key, pt_prefix if ws.store.list_blobs(pt_prefix) else None)
         )
@@ -2333,7 +2334,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 ws.store.put_blob(xml_key, gpath.read_bytes())
                 if res.stats_path is not None and res.stats_path.exists():
                     ws.store.put_blob(
-                        f"{xml_key.rsplit('/', 1)[0]}/{res.stats_path.name}",
+                        layout.pair_artifact_key(
+                            args.docset_id, name_to_fid[name], res.stats_path.name
+                        ),
                         res.stats_path.read_bytes(),
                     )
         except DgmlError as exc:
@@ -2414,8 +2417,10 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             if args.cache_dir:
                 cache_dir = Path(args.cache_dir)
             else:
-                cache_dir = _cache_stack.enter_context(ws.store.working_dir(f"{output_key}/cache"))
-            schema_key = ws.docset_generation_schema_key(args.docset_id)
+                cache_dir = _cache_stack.enter_context(
+                    ws.store.working_dir(layout.generation_cache_prefix(args.docset_id))
+                )
+            schema_key = layout.docset_generation_schema_key(args.docset_id)
             schema_json_local = cache_dir.parent / "schema.json"
             if (
                 not args.cache_dir

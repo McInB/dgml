@@ -106,6 +106,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from . import layout
+
 if TYPE_CHECKING:
     from .style_config import StyleConfig
 
@@ -286,7 +288,7 @@ def _collect_segments(root: Any) -> list[_TextSeg]:
 
 
 def _list_pages(workspace: Workspace, file_id: str) -> list[int]:
-    prefix = workspace.file_text_key(file_id)
+    prefix = layout.file_text_prefix(file_id)
     pages = sorted(
         int(m.group(1))
         for key in workspace.store.list_blobs(prefix)

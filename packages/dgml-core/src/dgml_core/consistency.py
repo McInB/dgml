@@ -18,6 +18,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import layout
 from .errors import (
     AuthError,
     CorruptMetadata,
@@ -145,7 +146,7 @@ def _check_file(
         clear_recorded_errors(ws, file_id)
 
     try:
-        record_data = ws.store.get_doc("files", file_id)
+        record_data = ws.store.get_doc(layout.Collection.FILES, file_id)
     except CorruptMetadata as exc:
         report.issues.append(
             Issue(
@@ -184,7 +185,7 @@ def _check_file(
         )
         return
 
-    source_key = ws.file_source_key(file_id, original_filename)
+    source_key = layout.file_source_key(file_id, original_filename)
     if not ws.store.blob_exists(source_key):
         report.issues.append(
             Issue(
@@ -211,7 +212,7 @@ def _check_file(
     recorded = load_recorded_errors(ws, file_id)
     permanent_ops = {e.operation for e in recorded if e.permanent}
 
-    pages_prefix = ws.file_pages_key(file_id)
+    pages_prefix = layout.file_pages_prefix(file_id)
     rendered = len(ws.store.list_blobs(pages_prefix))
 
     expected: int | None
@@ -489,7 +490,7 @@ def _check_text_extraction(
     debug: bool,
     report: CheckReport,
 ) -> None:
-    text_keys = ws.store.list_blobs(ws.file_text_key(file_id))
+    text_keys = ws.store.list_blobs(layout.file_text_prefix(file_id))
     corrupt = [k for k in text_keys if not _is_valid_text_json(ws, k)]
     for k in corrupt:
         report.issues.append(
@@ -603,8 +604,8 @@ def _reextract(
     different value would leave ``page_text/`` disagreeing with the
     ``page_images/`` already on disk. The pure-OCR path reads those images
     directly and so needs no dpi."""
-    text_prefix = ws.file_text_key(file_id)
-    pages_prefix = ws.file_pages_key(file_id)
+    text_prefix = layout.file_text_prefix(file_id)
+    pages_prefix = layout.file_pages_prefix(file_id)
     with (
         ws.store.materialize(source_key) as pdf_path,
         ws.store.staged_write(text_prefix) as text_dir,
@@ -652,16 +653,16 @@ def _file_present(ws: Workspace, file_id: str) -> bool:
     that has a manifest (even a broken one) or stored blobs is not "dangling"
     (its own corruption is reported by :func:`_check_file`)."""
     try:
-        if ws.store.get_doc("files", file_id) is not None:
+        if ws.store.get_doc(layout.Collection.FILES, file_id) is not None:
             return True
     except CorruptMetadata:
         return True
-    return bool(ws.store.list_blobs(ws.file_key(file_id)))
+    return bool(ws.store.list_blobs(layout.file_prefix(file_id)))
 
 
 def _check_docset(ws: Workspace, docset_id: str, *, report: CheckReport) -> None:
     try:
-        record_data = ws.store.get_doc("docsets", docset_id)
+        record_data = ws.store.get_doc(layout.Collection.DOCSETS, docset_id)
     except CorruptMetadata as exc:
         report.issues.append(
             Issue(
@@ -684,7 +685,7 @@ def _check_docset(ws: Workspace, docset_id: str, *, report: CheckReport) -> None
         )
         return
 
-    for assignment in ws.store.find_docs("assignments", {"docset_id": docset_id}):
+    for assignment in ws.store.find_docs(layout.Collection.ASSIGNMENTS, {"docset_id": docset_id}):
         file_id = str(assignment["file_id"])
         if not _file_present(ws, file_id):
             report.issues.append(
@@ -712,7 +713,7 @@ def _check_computed_attribution(
     is owned by the generation/extraction writers, not this check."""
     from .extraction_xml import unattributed_computed_fields
 
-    for key in sorted(ws.store.list_blobs(ws.docset_file_key(docset_id, file_id))):
+    for key in sorted(ws.store.list_blobs(layout.docset_pair_prefix(docset_id, file_id))):
         if not key.endswith(".dgml.xml"):
             continue
         try:

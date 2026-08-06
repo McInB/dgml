@@ -17,7 +17,7 @@ The service handles two kinds of data, each with a small, familiar API:
 - **Blobs** (opaque bytes — page images, PDFs, XML, schema files): modeled on
   the S3 object API (``put_blob`` / ``get_blob`` / ``list_blobs`` / …).
 - **JSON documents** (manifests, page text, assignments, usage): modeled on the
-  MongoDB collection API (``insert_doc`` / ``get_doc`` / ``find_docs`` / …).
+  MongoDB collection API (``put_doc`` / ``get_doc`` / ``find_docs`` / …).
 
 Both kinds support create / read / update / delete.
 
@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from . import layout
 from .config import load_merged_config
 from .errors import StorageConfigInvalid, StorageProviderUnresolvable
 from .hashing import sha256_file
@@ -218,7 +219,7 @@ class StorageService(ABC):
             for path in sorted(staging.rglob("*")):
                 if path.is_file():
                     rel = path.relative_to(staging).as_posix()
-                    key = f"{prefix}/{rel}"
+                    key = layout.pair_id(prefix, rel)
                     self.upload_blob(key, path)
                     stale.discard(key)
             for key in sorted(stale):
@@ -310,9 +311,19 @@ class StorageService(ABC):
     # ---- JSON documents — modeled on the MongoDB collection API ----
 
     @abstractmethod
-    def insert_doc(self, collection: str, doc: dict[str, Any]) -> None:
-        """Add a document to ``collection`` (Mongo ``insert_one``). Except in
-        append-only collections (e.g. ``usage``), ``doc`` carries an ``_id``."""
+    def append_doc(self, collection: str, doc: dict[str, Any]) -> None:
+        """Append ``doc`` to an **append-only** ``collection`` (the usage log).
+
+        Such a document has no id: it is never fetched or replaced individually,
+        only enumerated with :meth:`find_docs`. Which collections are append-only
+        is the store's own business — ``LocalStore`` backs ``usage`` with
+        ``usage.jsonl`` and rejects anything else.
+
+        Deliberately *not* a Mongo-style ``insert_one``: an insert that fails on
+        a duplicate id would be a create-if-absent primitive, and nothing in DGML
+        needs one (creates go through :meth:`put_doc`, which is idempotent by
+        design). Adding it later is easy; shipping a method whose documented
+        semantics no implementation honours is not."""
 
     @abstractmethod
     def get_doc(self, collection: str, doc_id: str) -> dict[str, Any] | None:
@@ -344,7 +355,15 @@ class StorageService(ABC):
         directories). Documents are left untouched — a cascade delete composes this
         with ``delete_doc`` / ``delete_docs`` in the caller, so each store only ever
         does operations native to it (no store needs the blob/document layout). A
-        prefix that matches nothing is a no-op."""
+        prefix that matches nothing is a no-op.
+
+        Callers must run this **last** in a cascade. That is the contract
+        :class:`dgml_core.workspace_ops.WorkspaceOps` implements — *the
+        authoritative record dies first*, so an interrupted cascade leaves
+        orphaned bytes (recoverable) rather than a record pointing at bytes that
+        are gone (indistinguishable from a valid entity). It also happens to be
+        what lets ``LocalStore`` prune the emptied container, which it can only
+        do once the documents beside those blobs are gone."""
 
 
 def _resolve_store_class(provider: str) -> type[StorageService]:

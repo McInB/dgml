@@ -44,122 +44,30 @@ from __future__ import annotations
 
 import contextlib
 import json
-import re
 import shutil
 import tempfile
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from .errors import CorruptMetadata
+from .errors import CorruptMetadata, InvalidArgument
+from .layout import (
+    CACHE_DIR,
+    DOC_LAYOUTS,
+    DOCSET_FILES_DIR,
+    DOCSETS_DIR,
+    STAGING_DIR,
+    USAGE_FILE,
+    Collection,
+    is_blob_key,
+)
 from .storage import read_json
 from .storage_service import StorageConfig, StorageService
 
-# On-disk directory names (see docs/storage-layout.md).
-FILES_DIR = "files"
-DOCSETS_DIR = "docsets"
-DOCSET_FILES_DIR = "files"  # the per-docset assignment/output dir: docsets/<id>/files/
-
-# Manifest / bootstrap filenames.
-FILE_MANIFEST = "file.json"
-DOCSET_MANIFEST = "docset.json"
-ASSIGNMENT_MANIFEST = "assignment.json"
-ERRORS_FILE = "errors.json"
-GENERATION_SCHEMA_FILE = "schema.json"
-WORKSPACE_FILE = "workspace.json"
-EXTRACTION_STATS_FILE = "extraction_stats.json"
-CONFIG_FILE = "config.json"
-USAGE_FILE = "usage.jsonl"
-
-# Workspace-internal scratch, never part of the blob namespace: the clustering
-# embedding cache (``Workspace.embedding_cache_dir``) and ``staged_write``'s
-# staging area both live here. Keeping it under the workspace root is what lets
-# a staged write land by rename instead of a second copy of the bytes.
-CACHE_DIR = ".cache"
-STAGING_DIR = "staging"
-
-
-class Collection(StrEnum):
-    """The document collections the DGML workspace layout recognizes.
-
-    A ``StrEnum`` so it stays interchangeable with the generic ``collection: str``
-    interface — callers may pass ``Collection.FILES`` or ``"files"``, and a
-    third-party store can still use any collection name it likes.
-    """
-
-    FILES = "files"
-    DOCSETS = "docsets"
-    WORKSPACE = "workspace"
-    SCHEMAS = "schemas"
-    ERRORS = "errors"
-    ASSIGNMENTS = "assignments"
-    EXTRACTION_STATS = "extraction_stats"
-    USAGE = "usage"  # append-only; special-cased to usage.jsonl
-
-
-@dataclass(frozen=True)
-class _DocLayout:
-    """How a document collection maps onto the on-disk tree.
-
-    ``template`` is a format string over the id parts (e.g. ``"files/{id}/file.json"``,
-    ``"docsets/{did}/files/{fid}/extraction_stats.json"``); ``id_parts`` names the
-    ``/``-separated segments of ``doc_id`` the template consumes. ``glob`` (derived
-    from ``template`` by replacing each placeholder with ``*``) enumerates the
-    collection under the workspace root.
-    """
-
-    template: str
-    id_parts: tuple[str, ...]
-
-    @property
-    def glob(self) -> str:
-        return re.sub(r"\{[^}]+\}", "*", self.template)
-
-
-# Directory templates (format strings over id parts), mirroring the ``*_dir``
-# helpers on ``Workspace`` in storage.py so the layout lives in one place.
-def file_dir_template() -> str:
-    """Per-file directory template, e.g. ``files/{id}``."""
-    return f"{FILES_DIR}/{{id}}"
-
-
-def docset_dir_template() -> str:
-    """Per-docset directory template, e.g. ``docsets/{id}``."""
-    return f"{DOCSETS_DIR}/{{id}}"
-
-
-def docset_file_dir_template() -> str:
-    """Per-(docset, file) directory template, e.g. ``docsets/{did}/files/{fid}``."""
-    return f"{DOCSETS_DIR}/{{did}}/{DOCSET_FILES_DIR}/{{fid}}"
-
-
-# Layout templates for the known collections, composed from the directory templates
-# above. ``USAGE`` is absent — it is append-only and handled separately (usage.jsonl).
-_DOC_LAYOUTS: dict[str, _DocLayout] = {
-    Collection.FILES: _DocLayout(f"{file_dir_template()}/{FILE_MANIFEST}", ("id",)),
-    Collection.ERRORS: _DocLayout(f"{file_dir_template()}/{ERRORS_FILE}", ("id",)),
-    Collection.DOCSETS: _DocLayout(f"{docset_dir_template()}/{DOCSET_MANIFEST}", ("id",)),
-    Collection.SCHEMAS: _DocLayout(f"{docset_dir_template()}/{GENERATION_SCHEMA_FILE}", ("id",)),
-    Collection.WORKSPACE: _DocLayout(WORKSPACE_FILE, ()),
-    Collection.ASSIGNMENTS: _DocLayout(
-        f"{docset_file_dir_template()}/{ASSIGNMENT_MANIFEST}", ("did", "fid")
-    ),
-    Collection.EXTRACTION_STATS: _DocLayout(
-        f"{docset_file_dir_template()}/{EXTRACTION_STATS_FILE}", ("did", "fid")
-    ),
-}
-
-# Filenames that are documents or bootstrap/config, never returned by ``list_blobs``
-# even though they live beside blobs. Derived from the layouts' fixed basenames plus
-# the bootstrap files. (page_text is a *blob*, like page images — bulky per-page data
-# that is round-tripped, not a queried document — so it is not listed here.)
-_NON_BLOB_BASENAMES = frozenset(
-    layout.template.rsplit("/", 1)[-1]
-    for layout in _DOC_LAYOUTS.values()
-    if "{" not in layout.template.rsplit("/", 1)[-1]
-) | {CONFIG_FILE, USAGE_FILE}
+# The layout — collections, key shapes, document placement and blob
+# classification — lives in ``layout.py``, shared with ``Workspace`` and the
+# domain layer so a store key and a real filesystem path cannot drift apart.
+# This module only maps those keys onto ``root/<key>``.
 
 
 def _safe_segment(seg: str) -> str:
@@ -226,7 +134,31 @@ class LocalStore(StorageService):
     def _blob_path(self, key: str) -> Path:
         return self._root / _safe_rel(key)
 
+    @staticmethod
+    def _check_writable_blob(key: str) -> None:
+        """Reject a blob key that a document or bootstrap file already owns.
+
+        On this store blob keys and document paths share one namespace, so
+        ``put_blob("files/<id>/file.json", …)`` would overwrite that file's
+        manifest — and because ``list_blobs`` excludes document names, the blob
+        would then be invisible to every reader afterwards. A remote store keeps
+        the two namespaces apart and needs no such check.
+
+        No caller can currently reach this: every reserved basename ends in
+        ``.json``/``.jsonl`` and no ingestable source suffix does
+        (``.pdf``/``.doc``/``.docx``/``.xls``/``.xlsx``), so this is
+        defence-in-depth rather than a fix for a live bug. It earns its place by
+        making the *next* document filename or accepted extension fail loudly
+        here instead of silently clobbering a manifest."""
+        _safe_rel(key)  # shape first: traversal is a lower-level violation
+        if not is_blob_key(key):
+            raise InvalidArgument(
+                f"{key!r} is not a writable blob key for the local store — it collides with "
+                "a workspace document or reserved file. Rename the source file."
+            )
+
     def put_blob(self, key: str, data: bytes) -> None:
+        self._check_writable_blob(key)
         _write_bytes_atomic(self._blob_path(key), data)
 
     def get_blob(self, key: str) -> bytes:
@@ -242,27 +174,51 @@ class LocalStore(StorageService):
         return self._blob_path(key).is_file()
 
     def list_blobs(self, prefix: str) -> list[str]:
+        # Walk only what the prefix can reach, not the whole workspace. Not
+        # cosmetic: `dgml check` calls this once per file, so scanning from the
+        # root made it O(files x total blobs).
         root = self._root
-        keys = [
-            rel
-            for path in root.rglob("*")
-            if path.is_file() and self._is_blob(rel := path.relative_to(root).as_posix())
-        ]
+        keys: list[str] = []
+        for base in self._scan_bases(prefix):
+            if base.is_file():
+                if is_blob_key(rel := base.relative_to(root).as_posix()):
+                    keys.append(rel)
+                continue
+            keys.extend(
+                rel
+                for path in base.rglob("*")
+                if path.is_file() and is_blob_key(rel := path.relative_to(root).as_posix())
+            )
+        # Still string-filtered: a base may hold non-matching entries when the
+        # prefix ends mid-segment.
         return sorted(k for k in keys if k.startswith(prefix))
 
-    @staticmethod
-    def _is_blob(rel: str) -> bool:
-        parts = rel.split("/")
-        name = parts[-1]
-        if name.endswith(".tmp"):
-            return False
-        if parts[0] == CACHE_DIR:
-            return False  # workspace-internal scratch, not stored content
-        if name in _NON_BLOB_BASENAMES:
-            return False
-        return True
+    def _scan_bases(self, prefix: str) -> list[Path]:
+        """Every place a key matching ``prefix`` can live.
+
+        Keys match by **raw string prefix**, S3-style, which is not the same as
+        "everything inside a directory". A prefix ending mid-segment also selects
+        *siblings*: ``files/ab`` matches ``files/abc/…`` and ``files/abd/…``
+        alike. Only a prefix ending in ``/`` is unambiguous — nothing outside
+        that one directory can match it — which is the fast, single-base case
+        every hot caller uses.
+
+        Getting this wrong is silent: narrowing to the directory when the prefix
+        merely *happens* to name one would quietly drop every sibling that
+        extends it, returning a short list rather than an error."""
+        rel = prefix.strip("/")
+        if not rel:
+            return [self._root]
+        candidate = self._root / _safe_rel(rel)
+        if prefix.endswith("/"):
+            return [candidate] if candidate.is_dir() else []
+        parent = candidate.parent
+        if not parent.is_dir():
+            return []
+        return sorted(p for p in parent.iterdir() if p.name.startswith(candidate.name))
 
     def upload_blob(self, key: str, src: Path) -> None:
+        self._check_writable_blob(key)
         dest = self._blob_path(key)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(dest.suffix + ".tmp")
@@ -340,9 +296,9 @@ class LocalStore(StorageService):
         base = self._root / _safe_rel(prefix)
         if base.is_dir():
             for path in base.rglob("*"):
-                if path.is_file() and self._is_blob(path.relative_to(self._root).as_posix()):
+                if path.is_file() and is_blob_key(path.relative_to(self._root).as_posix()):
                     path.unlink()
-        elif base.is_file() and self._is_blob(base.relative_to(self._root).as_posix()):
+        elif base.is_file() and is_blob_key(base.relative_to(self._root).as_posix()):
             base.unlink()
         self._prune_empty_dirs(base)
 
@@ -382,7 +338,7 @@ class LocalStore(StorageService):
         return self._root / DOCSETS_DIR / did / DOCSET_FILES_DIR / fid
 
     def _doc_path(self, collection: str, doc_id: str) -> Path:
-        layout = _DOC_LAYOUTS.get(collection)
+        layout = DOC_LAYOUTS.get(collection)
         if layout is None:
             # Unknown collection: a generic per-id file, kept out of the blob
             # namespace by its ``.json`` extension under a same-named directory.
@@ -394,19 +350,19 @@ class LocalStore(StorageService):
             rel = layout.template.format(**dict(zip(layout.id_parts, segments, strict=True)))
         return self._root / _safe_rel(rel)
 
-    def insert_doc(self, collection: str, doc: dict[str, Any]) -> None:
-        if collection == Collection.USAGE:
-            line = json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
-            path = self._root / USAGE_FILE
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
-            return
-        doc_id = doc.get("_id")
-        if not isinstance(doc_id, str) or not doc_id:
-            raise ValueError(f"insert_doc into {collection!r} requires a string '_id'")
-        # ``_id`` routes the write; it is not persisted (manifests stay verbatim).
-        self.put_doc(collection, doc_id, {k: v for k, v in doc.items() if k != "_id"})
+    def append_doc(self, collection: str, doc: dict[str, Any]) -> None:
+        # ``usage`` is the workspace's only append-only collection; everything
+        # else is addressed by id and belongs in put_doc.
+        if collection != Collection.USAGE:
+            raise InvalidArgument(
+                f"{collection!r} is not an append-only collection; use put_doc "
+                f"(append-only: {Collection.USAGE.value!r})"
+            )
+        line = json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
+        path = self._root / USAGE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
 
     def get_doc(self, collection: str, doc_id: str) -> dict[str, Any] | None:
         if collection == Collection.USAGE:
@@ -467,7 +423,7 @@ class LocalStore(StorageService):
     # ---- document enumeration ----
 
     def _doc_paths(self, collection: str) -> list[Path]:
-        layout = _DOC_LAYOUTS.get(collection)
+        layout = DOC_LAYOUTS.get(collection)
         pattern = layout.glob if layout is not None else f"{collection}/*.json"
         return sorted(p for p in self._root.glob(pattern) if p.is_file())
 

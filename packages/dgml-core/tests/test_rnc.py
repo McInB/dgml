@@ -17,8 +17,10 @@ All schema/XML content here is SYNTHETIC — invented tags and values only.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from dgml_core import layout
 from dgml_core.generation.rnc import build_rnc, rnc_to_schema_dict, write_docset_rnc
 from dgml_core.storage import Workspace
 
@@ -106,7 +108,8 @@ def test_write_docset_rnc(workspace: Workspace) -> None:
     did = "d1"
     assert write_docset_rnc(ws, did) is None  # no schema.json yet
 
-    ws.store.put_doc("schemas", did, _SCHEMA)
+    # The generation schema is a blob (exact Schema.save bytes), not a document.
+    ws.store.put_blob(layout.docset_generation_schema_key(did), json.dumps(_SCHEMA).encode("utf-8"))
     ws.store.put_doc("docsets", did, {"id": did, "name": "synthetic"})
     ws.store.put_blob("docsets/d1/files/f1/doc.dgml.xml", _XML.encode("utf-8"))
 

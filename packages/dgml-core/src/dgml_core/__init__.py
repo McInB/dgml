@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from . import layout
 from .consistency import CheckReport, Issue, check_workspace
 from .conversion import (
     ConverterConfig,
@@ -58,6 +59,7 @@ from .file_attestation import (
     write_attestation,
 )
 from .files import AddFileResult, ConflictPolicy, FileStore
+from .layout import Collection
 from .migrations import (
     WORKSPACE_SCHEMA_VERSION,
     Migration,
@@ -78,6 +80,7 @@ from .storage_service import (
     make_store,
     storage_fingerprint,
 )
+from .workspace_ops import WorkspaceOps
 
 __version__ = "0.1.0"
 
@@ -90,6 +93,7 @@ __all__ = [
     "AttestationEntry",
     "AttestationInventory",
     "CheckReport",
+    "Collection",
     "ConflictError",
     "ConflictPolicy",
     "ConversionConfigInvalid",
@@ -121,6 +125,7 @@ __all__ = [
     "Workspace",
     "WorkspaceMigrationFailed",
     "WorkspaceNotInitialized",
+    "WorkspaceOps",
     "__version__",
     "attest_file",
     "attest_file_version",
@@ -128,6 +133,7 @@ __all__ = [
     "collect_file_version",
     "collect_from_attestation",
     "export_attestation",
+    "layout",
     "load_conversion_config",
     "load_storage_config",
     "make_converter",

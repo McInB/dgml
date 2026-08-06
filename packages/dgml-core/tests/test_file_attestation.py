@@ -336,9 +336,11 @@ def test_empty_version_raises_value_error(workspace: Workspace) -> None:
 
 
 def test_corrupt_file_json_raises_corrupt_metadata(workspace: Workspace) -> None:
-    # Corrupt manifest via put_blob (raw invalid bytes) — LocalStore-specific,
-    # like the other corrupt-metadata tests: put_doc can't write invalid JSON.
-    workspace.store.put_blob("files/f001/file.json", b"{not json")
+    # Corrupt manifest on disk (LocalStore-specific): put_doc can't write invalid
+    # JSON and put_blob refuses a document key, so write via the local_path escape.
+    manifest = workspace.local_path(f"{workspace.file_key('f001')}/file.json")
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("{not json", encoding="utf-8")
     with pytest.raises(CorruptMetadata):
         collect_file_version(workspace, "f001")
 

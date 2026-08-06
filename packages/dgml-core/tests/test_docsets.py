@@ -22,6 +22,7 @@ from dgml_core.errors import (
     SchemaNotFound,
 )
 from dgml_core.storage import Workspace
+from dgml_core.workspace_ops import WorkspaceOps
 
 # A minimal valid extraction schema in the supported RNC subset (RNC is the
 # canonical at-rest form since the extraction rework).
@@ -358,7 +359,7 @@ def test_unassign_removes_record_and_pair_artifacts(workspace: Workspace) -> Non
     all three explicitly — the behavior a remote backend depends on. It used to
     also pass on local disk when the assignment delete alone did an rmtree."""
     store, did, fid = _assigned_pair(workspace)
-    workspace.unassign(did, fid)
+    WorkspaceOps(workspace).unassign(did, fid)
 
     assert workspace.store.get_doc("assignments", f"{did}/{fid}") is None
     assert not workspace.store.blob_exists(f"docsets/{did}/files/{fid}/report.dgml.xml")

@@ -30,7 +30,11 @@ from dgml_core import (
     make_store,
     storage_fingerprint,
 )
-from dgml_core.errors import StorageConfigInvalid, StorageProviderUnresolvable
+from dgml_core.errors import (
+    InvalidArgument,
+    StorageConfigInvalid,
+    StorageProviderUnresolvable,
+)
 from dgml_core.hashing import CHUNK_SIZE
 
 from .conftest import DefaultBridgeStore, default_bridge_store, local_store
@@ -285,10 +289,12 @@ def test_bare_pair_directory_is_not_an_assignment(tmp_path: Path) -> None:
     assert store.find_docs("assignments", {}) == []
 
 
-def test_insert_doc_requires_id(tmp_path: Path) -> None:
+def test_append_doc_rejects_an_addressable_collection(tmp_path: Path) -> None:
+    """``append_doc`` is only for the append-only log; documents addressed by id
+    go through ``put_doc``, which is the only create path."""
     store = local_store(tmp_path)
-    with pytest.raises(ValueError):
-        store.insert_doc("files", {"sha256": "aa"})  # no _id to route the write
+    with pytest.raises(InvalidArgument, match="append-only"):
+        store.append_doc("files", {"sha256": "aa"})
 
 
 def test_delete_doc_and_delete_docs(tmp_path: Path) -> None:
@@ -308,8 +314,8 @@ def test_delete_doc_and_delete_docs(tmp_path: Path) -> None:
 
 def test_usage_is_append_only(tmp_path: Path) -> None:
     store = local_store(tmp_path)
-    store.insert_doc("usage", {"op": "transcribe", "cost_usd": 0.01})
-    store.insert_doc("usage", {"op": "label", "cost_usd": 0.02})
+    store.append_doc("usage", {"op": "transcribe", "cost_usd": 0.01})
+    store.append_doc("usage", {"op": "label", "cost_usd": 0.02})
     events = store.find_docs("usage", {})
     assert [e["op"] for e in events] == ["transcribe", "label"]
     assert "_id" not in events[0]  # stored verbatim as JSONL
@@ -321,7 +327,7 @@ def test_usage_is_append_only(tmp_path: Path) -> None:
 
 def test_usage_tolerates_corrupt_tail(tmp_path: Path) -> None:
     store = local_store(tmp_path)
-    store.insert_doc("usage", {"op": "ok"})
+    store.append_doc("usage", {"op": "ok"})
     with (tmp_path / "usage.jsonl").open("a", encoding="utf-8") as fh:
         fh.write('{"op": "truncated"')  # crashed mid-append, no newline / close brace
     assert [e["op"] for e in store.find_docs("usage", {})] == ["ok"]
@@ -679,3 +685,86 @@ def test_sha256_blob_does_not_load_the_blob_whole(tmp_path: Path, bridge: type[L
     store = _NoGetBlob(LocalStore.parse_config(StorageConfig(DEFAULT_STORAGE_PROVIDER, tmp_path)))
     store.put_blob("files/a/report.pdf", _MULTI_CHUNK)
     assert store.sha256_blob("files/a/report.pdf") == hashlib.sha256(_MULTI_CHUNK).hexdigest()
+
+
+# ----------------------------------------------------------- list_blobs scope
+
+
+def test_list_blobs_prefix_matches_are_boundary_correct(tmp_path: Path) -> None:
+    """Scanning only the prefix's subtree must not change *which* keys match —
+    in particular a sibling whose name extends the prefix stays excluded."""
+    store = local_store(tmp_path)
+    store.put_blob("files/f1/page_images/page_1.png", b"a")
+    store.put_blob("files/f10/page_images/page_1.png", b"b")
+    store.put_blob("docsets/d1/full-schema.rnc", b"c")
+
+    assert store.list_blobs("files/f1/") == ["files/f1/page_images/page_1.png"]
+    assert store.list_blobs("files/f10/") == ["files/f10/page_images/page_1.png"]
+    assert len(store.list_blobs("files/")) == 2
+    assert len(store.list_blobs("")) == 3
+
+
+def test_list_blobs_prefix_naming_a_dir_still_matches_extending_siblings(tmp_path: Path) -> None:
+    """The narrowing bug this guards against.
+
+    ``files/f1`` (no trailing slash) is a raw string prefix, so S3 semantics
+    match ``files/f1x/...`` as well as ``files/f1/...``. Scanning only the
+    directory the prefix happens to name would silently drop the sibling —
+    a short list, not an error. Only a trailing slash makes the prefix
+    unambiguous, which is why that is the single-directory fast path.
+
+    Not reachable through a current caller (ids are fixed-length, so no id can
+    prefix another), but the contract is what the next caller will rely on."""
+    store = local_store(tmp_path)
+    store.put_blob("files/f1/a.pdf", b"a")
+    store.put_blob("files/f1x/b.pdf", b"b")
+
+    assert store.list_blobs("files/f1") == ["files/f1/a.pdf", "files/f1x/b.pdf"]
+    assert store.list_blobs("files/f1/") == ["files/f1/a.pdf"]  # slash = that dir only
+
+
+def test_list_blobs_matches_a_full_key_as_a_prefix(tmp_path: Path) -> None:
+    """A prefix can name a file rather than a directory."""
+    store = local_store(tmp_path)
+    store.put_blob("files/f1/page_images/page_1.png", b"a")
+    store.put_blob("files/f1/page_images/page_10.png", b"b")
+    key = "files/f1/page_images/page_1.png"
+    assert store.list_blobs(key) == [key]
+    assert store.list_blobs("files/f1/page_images/page_1") == [key, key.replace("_1.", "_10.")]
+
+
+def test_list_blobs_accepts_a_partial_segment_prefix(tmp_path: Path) -> None:
+    """An object store matches keys by raw string prefix, including mid-segment;
+    narrowing the walk must not quietly drop that."""
+    store = local_store(tmp_path)
+    store.put_blob("files/abc/report.pdf", b"a")
+    store.put_blob("files/abd/report.pdf", b"b")
+    assert store.list_blobs("files/ab") == ["files/abc/report.pdf", "files/abd/report.pdf"]
+    assert store.list_blobs("files/abc") == ["files/abc/report.pdf"]
+    assert store.list_blobs("files/zz") == []
+    assert store.list_blobs("nosuchdir/") == []
+
+
+def test_list_blobs_does_not_walk_outside_the_prefix(tmp_path: Path) -> None:
+    """The point of the change: unrelated subtrees are never visited."""
+    store = local_store(tmp_path)
+    store.put_blob("files/f1/report.pdf", b"a")
+    for n in range(50):
+        store.put_blob(f"files/other{n}/page_images/page_1.png", b"x")
+
+    visited: list[Path] = []
+    real_rglob = Path.rglob
+
+    def counting_rglob(self: Path, pattern: str):  # type: ignore[no-untyped-def]
+        visited.append(self)
+        return real_rglob(self, pattern)
+
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(Path, "rglob", counting_rglob)
+    try:
+        assert store.list_blobs("files/f1/") == ["files/f1/report.pdf"]
+    finally:
+        mp.undo()
+    assert visited == [tmp_path / "files" / "f1"]
