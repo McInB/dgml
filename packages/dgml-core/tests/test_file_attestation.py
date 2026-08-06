@@ -463,9 +463,7 @@ def test_verify_roundtrip_returns_true_when_unchanged(workspace: Workspace) -> N
 def test_verify_returns_false_on_pdf_tamper(workspace: Workspace) -> None:
     _seed_file(workspace, "f001", pages=1)
     att = attest_file(workspace, "f001")
-    workspace.store.put_blob(
-        workspace.file_source_key("f001", "doc.pdf"), b"%PDF-1.4\n%TAMPERED\n"
-    )
+    workspace.store.put_blob(workspace.file_source_key("f001", "doc.pdf"), b"%PDF-1.4\n%TAMPERED\n")
     assert verify_file_version(workspace, att) is False
 
 

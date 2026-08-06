@@ -69,128 +69,78 @@ class Workspace:
         safe to delete."""
         return self.root / ".cache" / "embeddings"
 
-    def docset_dir(self, docset_id: str) -> Path:
-        return self.docsets_dir / docset_id
-
-    def docset_files_dir(self, docset_id: str) -> Path:
-        return self.docset_dir(docset_id) / "files"
-
-    def docset_json_path(self, docset_id: str) -> Path:
-        return self.docset_dir(docset_id) / "docset.json"
-
-    def docset_schema_path(self, docset_id: str) -> Path:
-        # The grounded *extraction* schema, stored in RELAX NG Compact (the
-        # spec's canonical schema form). Set via `extraction set-schema` /
-        # `extraction generate-schema`, consumed by extract_values (converted to
-        # the engine's grounded_field JSON Schema on read). Distinct from the
-        # *generation tag* schema at docset_generation_schema_path — separate
-        # names so the two never clobber.
-        return self.docset_dir(docset_id) / "extraction-schema.rnc"
-
-    def docset_generation_schema_path(self, docset_id: str) -> Path:
-        # The generation *tag* schema written by `docset generate`
-        # (consumed by convert_batch — the machine exchange format that seeds
-        # later runs via --schema-path).
-        return self.docset_dir(docset_id) / "schema.json"
-
-    def docset_full_schema_path(self, docset_id: str) -> Path:
-        # schema.json rendered as RELAX NG Compact at the end of `docset
-        # generate` — the *full* (whole-document) schema, named in the same
-        # style as extraction-schema.rnc. Lossless: every schema.json field
-        # survives as `# Field: value` comments, so this is the artifact that
-        # ships in DGMLX bundles and is hashed into the file attestation
-        # (slot "full_schema").
-        return self.docset_dir(docset_id) / "full-schema.rnc"
-
-    def docset_file_dir(self, docset_id: str, file_id: str) -> Path:
-        """Per-(docset, file) directory. The marker dir for the assignment; the
-        file's core ``<stem>.dgml.xml`` (generated tree and/or dg:extraction)
-        and its extraction_stats.json sidecar land here."""
-        return self.docset_files_dir(docset_id) / file_id
-
-    def docset_file_extraction_stats_path(self, docset_id: str, file_id: str) -> Path:
-        """Per-extraction phase timings, costs, and match %, written on every
-        successful extract_values run so the UX can render a Stats tab without
-        re-deriving anything from usage.jsonl. Lives in the file's marker dir."""
-        return self.docset_file_dir(docset_id, file_id) / "extraction_stats.json"
-
-    def file_dgml_xml_path(self, docset_id: str, file_id: str, file_stem: str) -> Path:
-        """Canonical location of the DGML XML output for one file in a
-        docset:
-        ``<workspace>/docsets/<docset_id>/files/<file_id>/<stem>.dgml.xml``.
-
-        This is the deterministic, per-(docset, file) slot that ``dgml
-        docset generate`` writes to and that file attestation reads as the
-        DGML artifact for the pair. It lives in the file's marker directory so
-        placement never depends on the original filename being unique within
-        the docset. Pass
-        ``Path(original_filename).stem`` as ``file_stem``."""
-        return self.docset_file_dir(docset_id, file_id) / f"{file_stem}.dgml.xml"
-
-    def file_dir(self, file_id: str) -> Path:
-        return self.files_dir / file_id
-
-    def file_json_path(self, file_id: str) -> Path:
-        return self.file_dir(file_id) / "file.json"
-
-    def file_pages_dir(self, file_id: str) -> Path:
-        return self.file_dir(file_id) / "page_images"
-
-    def file_text_dir(self, file_id: str) -> Path:
-        return self.file_dir(file_id) / "page_text"
-
     def blob_key(self, path: Path) -> str:
-        """The storage key for a workspace artifact ``path``.
+        """The storage key for a local workspace artifact ``path``.
 
         Blob keys are workspace-root-relative POSIX strings (``files/<id>/…``);
         ``LocalStore`` maps a key back onto ``root/<key>``, while a remote store
-        treats it as an opaque object key. Derived from the ``Workspace`` path
-        methods so the on-disk layout stays single-sourced here — callers route
-        payload I/O through ``store`` by handing it ``blob_key(some_path)``."""
+        treats it as an opaque object key. A general path→key converter (raises
+        ``ValueError`` on a path outside ``root``); most callers instead use the
+        semantic ``*_key`` methods below, which build keys directly."""
         return path.relative_to(self.root).as_posix()
 
     # ---- Store keys for workspace artifacts ----
     #
     # A key is the workspace-root-relative POSIX string a blob lives at; callers
-    # hand these straight to ``store`` (``list_blobs`` / ``get_blob`` / …). They
-    # are the store-native address. The parallel ``*_dir`` / ``*_path`` methods
-    # return the *same* location as a local ``Path`` (``root/<key>``), kept for
-    # the handful of filesystem-bound cases — the intentional local source read
-    # and test fixtures — and as the single source of the layout these delegate
-    # to.
+    # hand these straight to ``store`` (``list_blobs`` / ``get_blob`` / …). This
+    # is the single source of the on-disk layout: the keys compose from each
+    # other so ``LocalStore`` (and any remote store) round-trips every artifact
+    # by the exact same address.
 
     def file_key(self, file_id: str) -> str:
-        return self.blob_key(self.file_dir(file_id))
+        return f"files/{file_id}"
 
     def file_source_key(self, file_id: str, filename: str) -> str:
-        return self.blob_key(self.file_dir(file_id) / filename)
+        """The copied-in original source (and, for a convertible source, the
+        derived ``<stem>.pdf``) — a blob under the file's own prefix."""
+        return f"{self.file_key(file_id)}/{filename}"
 
     def file_pages_key(self, file_id: str) -> str:
-        return self.blob_key(self.file_pages_dir(file_id))
+        return f"{self.file_key(file_id)}/page_images"
 
     def file_text_key(self, file_id: str) -> str:
-        return self.blob_key(self.file_text_dir(file_id))
+        return f"{self.file_key(file_id)}/page_text"
 
     def docset_key(self, docset_id: str) -> str:
-        return self.blob_key(self.docset_dir(docset_id))
+        return f"docsets/{docset_id}"
 
     def docset_files_key(self, docset_id: str) -> str:
-        return self.blob_key(self.docset_files_dir(docset_id))
+        return f"{self.docset_key(docset_id)}/files"
 
     def docset_file_key(self, docset_id: str, file_id: str) -> str:
-        return self.blob_key(self.docset_file_dir(docset_id, file_id))
+        """Per-(docset, file) prefix. Holds the assignment record, the file's
+        core ``<stem>.dgml.xml`` (generated tree and/or dg:extraction), and its
+        ``extraction_stats.json`` sidecar."""
+        return f"{self.docset_files_key(docset_id)}/{file_id}"
 
     def docset_schema_key(self, docset_id: str) -> str:
-        return self.blob_key(self.docset_schema_path(docset_id))
+        # The grounded *extraction* schema, stored in RELAX NG Compact (the
+        # spec's canonical schema form). Set via `extraction set-schema` /
+        # `extraction generate-schema`, consumed by extract_values. Distinct from
+        # the *generation tag* schema (schema.json) — separate names, never clobber.
+        return f"{self.docset_key(docset_id)}/extraction-schema.rnc"
 
     def docset_generation_schema_key(self, docset_id: str) -> str:
-        return self.blob_key(self.docset_generation_schema_path(docset_id))
+        # The generation *tag* schema written by `docset generate` (consumed by
+        # convert_batch — the machine exchange format that seeds later runs).
+        return f"{self.docset_key(docset_id)}/schema.json"
 
     def docset_full_schema_key(self, docset_id: str) -> str:
-        return self.blob_key(self.docset_full_schema_path(docset_id))
+        # schema.json rendered as RELAX NG Compact at the end of `docset generate`
+        # — the *full* (whole-document) schema. Lossless (every field survives as
+        # `# Field: value` comments); shipped in DGMLX bundles and hashed into the
+        # file attestation (slot "full_schema").
+        return f"{self.docset_key(docset_id)}/full-schema.rnc"
 
     def file_dgml_xml_key(self, docset_id: str, file_id: str, file_stem: str) -> str:
-        return self.blob_key(self.file_dgml_xml_path(docset_id, file_id, file_stem))
+        """Canonical store key of the DGML XML for one file in a docset:
+        ``docsets/<docset_id>/files/<file_id>/<stem>.dgml.xml``.
+
+        The deterministic per-(docset, file) slot ``dgml docset generate`` writes
+        and file attestation reads. Living under the pair prefix means placement
+        never depends on the original filename being unique within the docset.
+        Pass ``Path(original_filename).stem`` as ``file_stem``."""
+        return f"{self.docset_file_key(docset_id, file_id)}/{file_stem}.dgml.xml"
 
     def read_page_text(self, file_id: str, page: int) -> dict[str, Any] | None:
         """The per-page word-box JSON for ``page`` of ``file_id`` (a blob),

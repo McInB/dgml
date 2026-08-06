@@ -444,17 +444,19 @@ def test_ground_honors_style_config_for_ocr(tmp_path: Path, monkeypatch) -> None
     )
     ws.store.put_blob(
         f"{ws.file_text_key(fid)}/page_1.json",
-        json.dumps({
-            "file_id": fid,
-            "page": 1,
-            "width": 1000,
-            "height": 1000,
-            # OCR words carry no "s" style facts.
-            "words": [
-                {"t": "TITLE", "l": [100, 100, 150, 120]},
-                {"t": "HERE", "l": [160, 100, 210, 120]},
-            ],
-        }).encode(),
+        json.dumps(
+            {
+                "file_id": fid,
+                "page": 1,
+                "width": 1000,
+                "height": 1000,
+                # OCR words carry no "s" style facts.
+                "words": [
+                    {"t": "TITLE", "l": [100, 100, 150, 120]},
+                    {"t": "HERE", "l": [160, 100, 210, 120]},
+                ],
+            }
+        ).encode(),
     )
     ws.store.put_blob(f"{ws.file_pages_key(fid)}/page_1.png", b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
@@ -513,13 +515,15 @@ def _seed_ocr_style_workspace(tmp_path: Path):  # type: ignore[no-untyped-def]
     )
     ws.store.put_blob(
         f"{ws.file_text_key(fid)}/page_1.json",
-        json.dumps({
-            "file_id": fid,
-            "page": 1,
-            "width": 1000,
-            "height": 1000,
-            "words": [{"t": "TITLE", "l": [100, 100, 150, 120]}],
-        }).encode(),
+        json.dumps(
+            {
+                "file_id": fid,
+                "page": 1,
+                "width": 1000,
+                "height": 1000,
+                "words": [{"t": "TITLE", "l": [100, 100, 150, 120]}],
+            }
+        ).encode(),
     )
     ws.store.put_blob(f"{ws.file_pages_key(fid)}/page_1.png", b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
@@ -601,13 +605,15 @@ def test_ground_skips_style_config_when_disabled(tmp_path: Path, monkeypatch) ->
     )
     ws.store.put_blob(
         f"{ws.file_text_key(fid)}/page_1.json",
-        json.dumps({
-            "file_id": fid,
-            "page": 1,
-            "width": 1000,
-            "height": 1000,
-            "words": [{"t": "TITLE", "l": [100, 100, 150, 120]}],
-        }).encode(),
+        json.dumps(
+            {
+                "file_id": fid,
+                "page": 1,
+                "width": 1000,
+                "height": 1000,
+                "words": [{"t": "TITLE", "l": [100, 100, 150, 120]}],
+            }
+        ).encode(),
     )
 
     def _boom(*args: object, **kwargs: object) -> dict[int, str]:
@@ -654,16 +660,18 @@ def test_style_credential_failure_preserves_grounding(tmp_path: Path, monkeypatc
     )
     ws.store.put_blob(
         f"{ws.file_text_key(fid)}/page_1.json",
-        json.dumps({
-            "file_id": fid,
-            "page": 1,
-            "width": 1000,
-            "height": 1000,
-            "words": [
-                {"t": "TITLE", "l": [100, 100, 150, 120]},
-                {"t": "HERE", "l": [160, 100, 210, 120]},
-            ],
-        }).encode(),
+        json.dumps(
+            {
+                "file_id": fid,
+                "page": 1,
+                "width": 1000,
+                "height": 1000,
+                "words": [
+                    {"t": "TITLE", "l": [100, 100, 150, 120]},
+                    {"t": "HERE", "l": [160, 100, 210, 120]},
+                ],
+            }
+        ).encode(),
     )
     ws.store.put_blob(f"{ws.file_pages_key(fid)}/page_1.png", b"\x89PNG\r\n\x1a\n fake")
     # `api_key_env` points at an env var we make sure is unset -> resolve_api_key
