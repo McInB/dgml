@@ -174,13 +174,36 @@ class LocalStore(StorageService):
         return self._blob_path(key).is_file()
 
     def list_blobs(self, prefix: str) -> list[str]:
+        # Walk only the subtree the prefix names, not the whole workspace. The
+        # difference is not cosmetic: `dgml check` calls this once per file, so
+        # scanning from the root made it O(files x total blobs) — and it hashes
+        # every source PDF on top of that.
         root = self._root
+        base = self._scan_base(prefix)
+        if base is None:
+            return []
         keys = [
             rel
-            for path in root.rglob("*")
+            for path in base.rglob("*")
             if path.is_file() and is_blob_key(rel := path.relative_to(root).as_posix())
         ]
+        # Still filtered: `base` may be the prefix's parent when the prefix ends
+        # mid-segment (`files/ab` selecting `files/abc/...` is legal for an
+        # object store, so it must stay legal here).
         return sorted(k for k in keys if k.startswith(prefix))
+
+    def _scan_base(self, prefix: str) -> Path | None:
+        """The shallowest directory that can contain every key under ``prefix``,
+        or ``None`` when nothing can match."""
+        rel = prefix.strip("/")
+        if not rel:
+            return self._root
+        candidate = self._root / _safe_rel(rel)
+        if candidate.is_dir():
+            return candidate
+        # A partial trailing segment (or a full key): its parent bounds the scan.
+        parent = candidate.parent
+        return parent if parent.is_dir() else None
 
     def upload_blob(self, key: str, src: Path) -> None:
         self._check_writable_blob(key)
@@ -315,19 +338,19 @@ class LocalStore(StorageService):
             rel = layout.template.format(**dict(zip(layout.id_parts, segments, strict=True)))
         return self._root / _safe_rel(rel)
 
-    def insert_doc(self, collection: str, doc: dict[str, Any]) -> None:
-        if collection == Collection.USAGE:
-            line = json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
-            path = self._root / USAGE_FILE
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
-            return
-        doc_id = doc.get("_id")
-        if not isinstance(doc_id, str) or not doc_id:
-            raise ValueError(f"insert_doc into {collection!r} requires a string '_id'")
-        # ``_id`` routes the write; it is not persisted (manifests stay verbatim).
-        self.put_doc(collection, doc_id, {k: v for k, v in doc.items() if k != "_id"})
+    def append_doc(self, collection: str, doc: dict[str, Any]) -> None:
+        # ``usage`` is the workspace's only append-only collection; everything
+        # else is addressed by id and belongs in put_doc.
+        if collection != Collection.USAGE:
+            raise InvalidArgument(
+                f"{collection!r} is not an append-only collection; use put_doc "
+                f"(append-only: {Collection.USAGE.value!r})"
+            )
+        line = json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
+        path = self._root / USAGE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
 
     def get_doc(self, collection: str, doc_id: str) -> dict[str, Any] | None:
         if collection == Collection.USAGE:

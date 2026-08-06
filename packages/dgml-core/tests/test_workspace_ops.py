@@ -176,9 +176,13 @@ def test_blank_ids_rejected(workspace: Workspace) -> None:
 def test_a_cascade_resolves_the_backend_once(
     workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``Workspace.store`` builds the configured backend afresh on every access,
-    so a cascade that reached through it per call would construct a client per
-    store operation. Binding it once is why this is an object."""
+    """Resolving the backend means reading config, importing the provider and
+    constructing it — a fresh SDK client per call on a remote store. A cascade
+    over N assignments issues on the order of 3N store calls, so it must resolve
+    once, not per call.
+
+    Counted from a *cold* workspace so the assertion holds on its own terms
+    rather than riding on ``Workspace.store``'s cache."""
     for fid in ("f1", "f2", "f3"):
         _pair(workspace, "d1", fid)
 
@@ -194,6 +198,6 @@ def test_a_cascade_resolves_the_backend_once(
 
     monkeypatch.setattr(storage_service, "make_store", counting_make)
 
-    ops = WorkspaceOps(workspace)  # the one resolution
-    ops.delete_docset("d1")
+    cold = Workspace(root=workspace.root)  # nothing cached yet
+    WorkspaceOps(cold).delete_docset("d1")
     assert built == 1

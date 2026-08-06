@@ -158,9 +158,10 @@ def test_dangling_docset_reference(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     # An assignment to a file that has no manifest — the dangling reference.
-    workspace.store.insert_doc(
-        "assignments",
-        {"_id": f"{ds.id}/missingfileid", "docset_id": ds.id, "file_id": "missingfileid"},
+    workspace.store.put_doc(
+        layout.Collection.ASSIGNMENTS,
+        layout.pair_id(ds.id, "missingfileid"),
+        {"docset_id": ds.id, "file_id": "missingfileid"},
     )
     report = check_workspace(workspace)
     assert any(i.kind == "dangling_file_reference" for i in report.issues)

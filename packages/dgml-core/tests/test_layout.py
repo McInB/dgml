@@ -176,3 +176,33 @@ def test_workspace_paths_are_derived_from_keys(tmp_path: Path) -> None:
     ]
     for path, key in cases:
         assert path == tmp_path / key.rstrip("/"), key
+
+
+# ------------------------------------------------------- the store is cached
+
+
+def test_workspace_store_is_resolved_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolving means reading config, importing the provider and constructing
+    it — a fresh SDK client per call on a remote backend, across ~100 call
+    sites. A workspace's store is one static choice, so it is cached."""
+    import dgml_core.storage_service as storage_service
+
+    built = 0
+    real_make = storage_service.make_store
+
+    def counting_make(config: object) -> object:
+        nonlocal built
+        built += 1
+        return real_make(config)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(storage_service, "make_store", counting_make)
+
+    ws = Workspace(root=tmp_path)
+    first = ws.store
+    for _ in range(5):
+        assert ws.store is first
+    assert built == 1
+
+    # Caching is per-workspace, not global: a separate instance resolves its own.
+    assert Workspace(root=tmp_path).store is not first
+    assert built == 2

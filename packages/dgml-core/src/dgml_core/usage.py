@@ -87,7 +87,7 @@ def record_usage(workspace: Workspace, event: UsageEvent) -> None:
     the user's PDF is still ingested / classified / extracted.
     """
     try:
-        workspace.store.insert_doc(layout.Collection.USAGE, event.to_json())
+        workspace.store.append_doc(layout.Collection.USAGE, event.to_json())
     except Exception:
         # Intentional broad catch: never let logging take down the
         # caller. The usage log is best-effort telemetry.

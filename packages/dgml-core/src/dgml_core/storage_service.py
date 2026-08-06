@@ -17,7 +17,7 @@ The service handles two kinds of data, each with a small, familiar API:
 - **Blobs** (opaque bytes — page images, PDFs, XML, schema files): modeled on
   the S3 object API (``put_blob`` / ``get_blob`` / ``list_blobs`` / …).
 - **JSON documents** (manifests, page text, assignments, usage): modeled on the
-  MongoDB collection API (``insert_doc`` / ``get_doc`` / ``find_docs`` / …).
+  MongoDB collection API (``put_doc`` / ``get_doc`` / ``find_docs`` / …).
 
 Both kinds support create / read / update / delete.
 
@@ -311,9 +311,19 @@ class StorageService(ABC):
     # ---- JSON documents — modeled on the MongoDB collection API ----
 
     @abstractmethod
-    def insert_doc(self, collection: str, doc: dict[str, Any]) -> None:
-        """Add a document to ``collection`` (Mongo ``insert_one``). Except in
-        append-only collections (e.g. ``usage``), ``doc`` carries an ``_id``."""
+    def append_doc(self, collection: str, doc: dict[str, Any]) -> None:
+        """Append ``doc`` to an **append-only** ``collection`` (the usage log).
+
+        Such a document has no id: it is never fetched or replaced individually,
+        only enumerated with :meth:`find_docs`. Which collections are append-only
+        is the store's own business — ``LocalStore`` backs ``usage`` with
+        ``usage.jsonl`` and rejects anything else.
+
+        Deliberately *not* a Mongo-style ``insert_one``: an insert that fails on
+        a duplicate id would be a create-if-absent primitive, and nothing in DGML
+        needs one (creates go through :meth:`put_doc`, which is idempotent by
+        design). Adding it later is easy; shipping a method whose documented
+        semantics no implementation honours is not."""
 
     @abstractmethod
     def get_doc(self, collection: str, doc_id: str) -> dict[str, Any] | None:
