@@ -49,12 +49,12 @@ import struct
 import sys
 import warnings
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar
 
+from .concurrency import map_concurrent
 from .config import load_merged_config
 from .errors import OcrConfigInvalid, OcrConfigMissing, OcrFailed
 from .models_config import ConfigSection
@@ -268,14 +268,15 @@ def extract_text_ocr(
     metadata). ``pdf_path`` is kept in the signature for symmetry with
     :func:`extract_text_digital` but is not opened here.
 
-    Pages are processed concurrently with up to ``max_concurrency``
-    threads. The provider's ``analyze_image`` is therefore called from
-    multiple threads; both shipped providers wrap stateless API calls
-    that are safe to invoke concurrently against the same underlying
-    SDK client. On the first per-page failure, pending pages are
-    cancelled and the exception is re-raised — partial state on disk is
-    possible (some pages may have written page_text JSON before the
-    failure) and the caller is responsible for cleanup; today
+    Pages are dispatched via :func:`dgml_core.concurrency.map_concurrent`
+    with up to ``max_concurrency`` workers. The provider's
+    ``analyze_image`` is therefore called from multiple threads; both
+    shipped providers wrap stateless API calls that are safe to invoke
+    concurrently against the same underlying SDK client. On the first
+    per-page failure, pending pages are cancelled and the exception is
+    re-raised — partial state on disk is possible (some pages may have
+    written page_text JSON before the failure) and the caller is
+    responsible for cleanup; today
     :meth:`dgml.files.FileStore._extract_text_ocr` records the failure
     and ``dgml check`` handles re-extraction.
 
@@ -310,30 +311,15 @@ def extract_text_ocr(
     pages_written = 0
     pages_with_words = 0
     total_words = 0
-    first_exc: BaseException | None = None
-
-    with ThreadPoolExecutor(max_workers=max(1, max_concurrency)) as executor:
-        futures = {executor.submit(_process_one_page, p): p for p in page_image_paths}
-        for future in as_completed(futures):
-            try:
-                words = future.result()
-            except BaseException as exc:
-                if first_exc is None:
-                    first_exc = exc
-                    # Cancel pending pages so we don't keep hammering the
-                    # API after a known failure. In-flight pages finish.
-                    for pending in futures:
-                        pending.cancel()
-                continue
-            if words is None:
-                continue
-            pages_written += 1
-            if words:
-                pages_with_words += 1
-                total_words += len(words)
-
-    if first_exc is not None:
-        raise first_exc
+    # Folded on this thread, in page order; the counters are order-independent
+    # sums and each worker has already written its own page JSON.
+    for words in map_concurrent(_process_one_page, page_image_paths, max_workers=max_concurrency):
+        if words is None:
+            continue
+        pages_written += 1
+        if words:
+            pages_with_words += 1
+            total_words += len(words)
 
     return ExtractDigitalResult(
         pages_written=pages_written,
