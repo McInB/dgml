@@ -1396,10 +1396,10 @@ def test_docset_generate_skips_already_converted(
 
     # Seed the canonical per-file output so the file looks already converted —
     # a root with document-tree content, as generate would have written.
-    out_xml = Workspace(root=ws).file_dgml_xml_path(did, fid, "with-text")
-    out_xml.parent.mkdir(parents=True, exist_ok=True)
-    out_xml.write_text(
-        '<dg:chunk xmlns:dg="http://dgml.io/ns/dg#"><a>tree</a></dg:chunk>', encoding="utf-8"
+    _wsx = Workspace(root=ws)
+    _wsx.store.put_blob(
+        _wsx.file_dgml_xml_key(did, fid, "with-text"),
+        b'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#"><a>tree</a></dg:chunk>',
     )
 
     with patch("dgml_core.generation.pipeline.convert_batch") as mock_batch:
@@ -1442,7 +1442,7 @@ def test_docset_generate_happy_path(
     main(_ws_args(ws) + ["docset", "add-file", fid, "--docset", did])
     capsys.readouterr()
 
-    out_xml = Workspace(root=ws).file_dgml_xml_path(did, fid, "with-text")
+    out_xml_key = Workspace(root=ws).file_dgml_xml_key(did, fid, "with-text")
     fake_xml = "<xml><chunk>hello</chunk></xml>"
 
     def fake_convert(
@@ -1463,12 +1463,12 @@ def test_docset_generate_happy_path(
     assert entry["status"] == "converted"
     assert entry["file_id"] == fid
     assert entry["source"] == "with-text.pdf"
-    assert entry["output"] == Workspace(root=ws).blob_key(out_xml)
+    assert entry["output"] == out_xml_key
     # Generation grounds each file in place. "hello" doesn't match the real OCR,
     # so 0 elements are annotated, but the file is still grounded (the tree is
     # re-serialized, so it no longer byte-equals fake_xml) and the entry says so.
     assert entry["grounded"] is True
-    assert "hello" in out_xml.read_text(encoding="utf-8")
+    assert "hello" in Workspace(root=ws).store.get_blob(out_xml_key).decode("utf-8")
 
     # Options threaded through to the typed-block ConvertOptions.
     _, kwargs = mock_batch.call_args
@@ -1488,7 +1488,8 @@ def test_docset_generate_cache_dir_and_debug_threading(
     fid = _read_stdout(capsys)["file"]["id"]
     main(_ws_args(ws) + ["docset", "add-file", fid, "--docset", did])
     capsys.readouterr()
-    cache_dir = Workspace(root=ws).docset_dir(did) / "cache"
+    # The generation cache materializes (zero-copy on LocalStore) at this path.
+    cache_dir = Workspace(root=ws).docsets_dir / did / "cache"
 
     def fake_convert(
         paths: object, *, options: object, on_output: Any, **_kw: object
@@ -1507,7 +1508,8 @@ def test_docset_generate_cache_dir_and_debug_threading(
         capsys.readouterr()
         # A fresh out_xml each run, so clear the per-(docset, file) slot to avoid
         # the already-converted skip short-circuiting convert_batch.
-        Workspace(root=ws).file_dgml_xml_path(did, fid, "with-text").unlink()
+        _wsx = Workspace(root=ws)
+        _wsx.store.delete_blob(_wsx.file_dgml_xml_key(did, fid, "with-text"))
         return mock_batch.call_args.kwargs["options"]
 
     # Default: cache dir is the docset cache/, debug off (debug-only files skipped).
@@ -1789,8 +1791,10 @@ def test_docset_generate_missing_source_is_per_file_failure(
     capsys.readouterr()
 
     # Remove the copied-in source so generation can't find it.
-    for src in Workspace(root=ws).file_dir(fid).glob("*.pdf"):
-        src.unlink()
+    _wsx = Workspace(root=ws)
+    for _k in _wsx.store.list_blobs(_wsx.file_key(fid)):
+        if _k.endswith(".pdf"):
+            _wsx.store.delete_blob(_k)
 
     with patch("dgml_core.generation.pipeline.convert_batch") as mock_batch:
         rc = main(_ws_args(ws) + ["docset", "generate", did])
@@ -1821,8 +1825,10 @@ def test_docset_generate_mixed_converted_and_failed(
     main(_ws_args(ws) + ["docset", "add-file", fid_ok, "--docset", did])
     main(_ws_args(ws) + ["docset", "add-file", fid_bad, "--docset", did])
     capsys.readouterr()
-    for src in Workspace(root=ws).file_dir(fid_bad).glob("*.pdf"):
-        src.unlink()  # break the second file's source
+    _wsx = Workspace(root=ws)
+    for _k in _wsx.store.list_blobs(_wsx.file_key(fid_bad)):
+        if _k.endswith(".pdf"):
+            _wsx.store.delete_blob(_k)  # break the second file's source
 
     def fake_convert(
         paths: object, *, options: object, on_output: Any, **_kw: object
@@ -2291,10 +2297,8 @@ def _seed_file_for_generate(
     Workspace."""
     from dgml_core.docsets import DocSetStore
     from dgml_core.models import FileRecord
-    from dgml_core.storage import write_json_atomic
 
     ws = Workspace(root=ws_root)
-    ws.file_dir(file_id).mkdir(parents=True, exist_ok=True)
     record = FileRecord(
         id=file_id,
         original_path="/fake/contract.pdf",
@@ -2304,20 +2308,21 @@ def _seed_file_for_generate(
         page_count=1,
         text_mode="digital",
     )
-    write_json_atomic(ws.file_json_path(file_id), record.to_json())
-    # generate resolves the source PDF from the file dir; convert_batch is
+    ws.store.put_doc("files", file_id, record.to_json())
+    # generate resolves the source PDF from the store; convert_batch is
     # mocked, so the bytes are never parsed — they just need to exist.
-    (ws.file_dir(file_id) / "contract.pdf").write_bytes(b"%PDF-1.4\n%fake\n")
+    ws.store.put_blob(ws.file_source_key(file_id, "contract.pdf"), b"%PDF-1.4\n%fake\n")
     if with_page_text:
         words = []
         x = 100
         for w in "Payment is due within 30 days of invoice".split():
             words.append({"t": w, "l": [x, 100, x + 50, 120]})
             x += 60
-        ws.file_text_dir(file_id).mkdir(parents=True, exist_ok=True)
-        write_json_atomic(
-            ws.file_text_dir(file_id) / "page_1.json",
-            {"file_id": file_id, "page": 1, "width": 1000, "height": 1000, "words": words},
+        ws.store.put_blob(
+            f"{ws.file_text_key(file_id)}/page_1.json",
+            json.dumps(
+                {"file_id": file_id, "page": 1, "width": 1000, "height": 1000, "words": words}
+            ).encode(),
         )
     DocSetStore(ws).add_file(docset_id, file_id)
     return ws
@@ -2381,7 +2386,7 @@ def test_docset_generate_grounds_in_place(
     main(_ws_args(ws_root) + ["docset", "create", "--name", "Contracts"])
     ds_id = _read_stdout(capsys)["id"]
     ws = _seed_file_for_generate(ws_root, ds_id, "f1aaaaaaaaaa")
-    out_xml = ws.file_dgml_xml_path(ds_id, "f1aaaaaaaaaa", "contract")
+    out_xml_key = ws.file_dgml_xml_key(ds_id, "f1aaaaaaaaaa", "contract")
 
     rc = _generate_with_xml(ws_root, ds_id, _GROUNDABLE_XML)
     assert rc == 0
@@ -2397,11 +2402,12 @@ def test_docset_generate_grounds_in_place(
     # No labeling failure → no label_error field on the entry (like grounding_error).
     assert "label_error" not in entry
 
-    content = out_xml.read_text(encoding="utf-8")
+    content = ws.store.get_blob(out_xml_key).decode("utf-8")
     assert 'dg:origin="1 ' in content  # bound to the document's dg prefix
     # Grounded in place — no separate .grounded.xml, no stats sidecar by default.
-    assert not (out_xml.parent / "contract.dgml.grounded.xml").exists()
-    assert not (out_xml.parent / "contract.dgml.grounding_stats.json").exists()
+    _out_dir = ws.docset_file_key(ds_id, "f1aaaaaaaaaa")
+    assert not ws.store.blob_exists(f"{_out_dir}/contract.dgml.grounded.xml")
+    assert not ws.store.blob_exists(f"{_out_dir}/contract.dgml.grounding_stats.json")
 
 
 def test_docset_generate_debug_writes_grounding_stats(
@@ -2414,11 +2420,12 @@ def test_docset_generate_debug_writes_grounding_stats(
     main(_ws_args(ws_root) + ["docset", "create", "--name", "Contracts"])
     ds_id = _read_stdout(capsys)["id"]
     ws = _seed_file_for_generate(ws_root, ds_id, "f1aaaaaaaaaa")
-    out_xml = ws.file_dgml_xml_path(ds_id, "f1aaaaaaaaaa", "contract")
 
     rc = _generate_with_xml(ws_root, ds_id, _GROUNDABLE_XML, debug=True)
     assert rc == 0
-    assert (out_xml.parent / "contract.dgml.grounding_stats.json").exists()
+    assert ws.store.blob_exists(
+        f"{ws.docset_file_key(ds_id, 'f1aaaaaaaaaa')}/contract.dgml.grounding_stats.json"
+    )
 
 
 def test_docset_generate_leaves_file_ungrounded_without_page_text(
@@ -2432,7 +2439,7 @@ def test_docset_generate_leaves_file_ungrounded_without_page_text(
     main(_ws_args(ws_root) + ["docset", "create", "--name", "Contracts"])
     ds_id = _read_stdout(capsys)["id"]
     ws = _seed_file_for_generate(ws_root, ds_id, "f1aaaaaaaaaa", with_page_text=False)
-    out_xml = ws.file_dgml_xml_path(ds_id, "f1aaaaaaaaaa", "contract")
+    out_xml_key = ws.file_dgml_xml_key(ds_id, "f1aaaaaaaaaa", "contract")
 
     rc = _generate_with_xml(ws_root, ds_id, _GROUNDABLE_XML)
     assert rc == 0
@@ -2441,8 +2448,8 @@ def test_docset_generate_leaves_file_ungrounded_without_page_text(
     assert entry["status"] == "converted"
     assert entry["grounded"] is False
     assert entry["grounding_error"]["code"] == "FILE_NOT_FOUND"
-    assert out_xml.exists()  # still written, just not grounded
-    assert "dg:origin" not in out_xml.read_text(encoding="utf-8")
+    assert ws.store.blob_exists(out_xml_key)  # still written, just not grounded
+    assert "dg:origin" not in ws.store.get_blob(out_xml_key).decode("utf-8")
 
 
 def test_docset_generate_surfaces_label_error_but_still_converts(
@@ -2458,7 +2465,7 @@ def test_docset_generate_surfaces_label_error_but_still_converts(
     main(_ws_args(ws_root) + ["docset", "create", "--name", "Contracts"])
     ds_id = _read_stdout(capsys)["id"]
     ws = _seed_file_for_generate(ws_root, ds_id, "f1aaaaaaaaaa")
-    out_xml = ws.file_dgml_xml_path(ds_id, "f1aaaaaaaaaa", "contract")
+    out_xml_key = ws.file_dgml_xml_key(ds_id, "f1aaaaaaaaaa", "contract")
 
     rc = _generate_with_xml(
         ws_root,
@@ -2476,7 +2483,7 @@ def test_docset_generate_surfaces_label_error_but_still_converts(
     assert entry["status"] == "converted"
     assert entry["label_error"]["code"] == "LABEL_MODEL_UNREACHABLE"
     assert "AuthenticationError" in entry["label_error"]["message"]
-    assert out_xml.exists()  # transcription/DGML never discarded
+    assert ws.store.blob_exists(out_xml_key)  # transcription/DGML never discarded
 
 
 def _seed_docset_with_one_file(ws_root: Path, capsys: pytest.CaptureFixture[str]) -> str:
@@ -2590,31 +2597,27 @@ def _seed_file_dir(
     directly on disk, no PDF pipeline / ghostscript needed — the
     attestation hashes bytes, not document semantics."""
     workspace = Workspace(root=ws)
-    file_dir = workspace.file_dir(file_id)
-    file_dir.mkdir(parents=True)
-    (file_dir / pdf_name).write_bytes(b"%PDF-1.4\n%fake\n")
-    workspace.file_json_path(file_id).write_text(
-        json.dumps(
-            {
-                "id": file_id,
-                "original_path": f"/src/{pdf_name}",
-                "original_filename": pdf_name,
-                "sha256": "0" * 64,
-                "added_at": "2026-06-05T00:00:00Z",
-                "page_count": pages,
-                "text_mode": "digital",
-            }
-        ),
-        encoding="utf-8",
+    workspace.store.put_blob(workspace.file_source_key(file_id, pdf_name), b"%PDF-1.4\n%fake\n")
+    workspace.store.put_doc(
+        "files",
+        file_id,
+        {
+            "id": file_id,
+            "original_path": f"/src/{pdf_name}",
+            "original_filename": pdf_name,
+            "sha256": "0" * 64,
+            "added_at": "2026-06-05T00:00:00Z",
+            "page_count": pages,
+            "text_mode": "digital",
+        },
     )
-    pages_dir = workspace.file_pages_dir(file_id)
-    pages_dir.mkdir(parents=True)
-    text_dir = workspace.file_text_dir(file_id)
-    text_dir.mkdir(parents=True)
     for n in range(1, pages + 1):
-        (pages_dir / f"page_{n}.png").write_bytes(f"img-{n}".encode())
-        (text_dir / f"page_{n}.json").write_text(
-            json.dumps({"file_id": file_id, "page": n, "words": []}), encoding="utf-8"
+        workspace.store.put_blob(
+            f"{workspace.file_pages_key(file_id)}/page_{n}.png", f"img-{n}".encode()
+        )
+        workspace.store.put_blob(
+            f"{workspace.file_text_key(file_id)}/page_{n}.json",
+            json.dumps({"file_id": file_id, "page": n, "words": []}).encode(),
         )
 
 
@@ -2757,14 +2760,10 @@ _NODE_XML = (
 def _seed_node_xml(ws: Path, file_id: str, docset_id: str) -> None:
     """Add the docset dir + generated DGML XML on top of _seed_file_dir."""
     workspace = Workspace(root=ws)
-    workspace.docset_dir(docset_id).mkdir(parents=True)
-    (workspace.docset_dir(docset_id) / "docset.json").write_text(
-        json.dumps({"id": docset_id, "name": "T", "description": "", "key_questions": []}),
-        encoding="utf-8",
+    workspace.store.put_doc(
+        "docsets", docset_id, {"id": docset_id, "name": "T", "description": "", "key_questions": []}
     )
-    xml_path = workspace.file_dgml_xml_path(docset_id, file_id, "doc")
-    xml_path.parent.mkdir(parents=True, exist_ok=True)
-    xml_path.write_bytes(_NODE_XML)
+    workspace.store.put_blob(workspace.file_dgml_xml_key(docset_id, file_id, "doc"), _NODE_XML)
 
 
 def test_node_export_then_prove(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -2893,8 +2892,10 @@ def test_node_prove_detects_tamper(tmp_path: Path, capsys: pytest.CaptureFixture
     exported = _read_stdout(capsys)
 
     workspace = Workspace(root=ws)
-    xml_path = workspace.file_dgml_xml_path("ds000000001a", "f0000000001a", "doc")
-    xml_path.write_bytes(_NODE_XML.replace(b"100", b"999"))
+    workspace.store.put_blob(
+        workspace.file_dgml_xml_key("ds000000001a", "f0000000001a", "doc"),
+        _NODE_XML.replace(b"100", b"999"),
+    )
 
     proof_file = tmp_path / "proof.json"
     proof_file.write_text(json.dumps(exported), encoding="utf-8")
@@ -3181,14 +3182,10 @@ _DISCOVER_XML = (
 
 def _seed_discover_xml(ws: Path, file_id: str, docset_id: str) -> None:
     workspace = Workspace(root=ws)
-    workspace.docset_dir(docset_id).mkdir(parents=True)
-    (workspace.docset_dir(docset_id) / "docset.json").write_text(
-        json.dumps({"id": docset_id, "name": "T", "description": "", "key_questions": []}),
-        encoding="utf-8",
+    workspace.store.put_doc(
+        "docsets", docset_id, {"id": docset_id, "name": "T", "description": "", "key_questions": []}
     )
-    xml_path = workspace.file_dgml_xml_path(docset_id, file_id, "doc")
-    xml_path.parent.mkdir(parents=True, exist_ok=True)
-    xml_path.write_bytes(_DISCOVER_XML)
+    workspace.store.put_blob(workspace.file_dgml_xml_key(docset_id, file_id, "doc"), _DISCOVER_XML)
 
 
 _DISC_FILE = "f1000000001a"
@@ -3579,8 +3576,9 @@ def test_extraction_set_schema_from_json_stores_rnc(
     assert payload["schema_format"] == "rnc"
     assert "element docset:VendorName" in payload["schema"]
     # JSON in → RNC at rest: only extraction-schema.rnc is written, never a .json schema.
-    assert (Workspace(root=ws).docset_schema_path(ds_id)).name == "extraction-schema.rnc"
-    assert Workspace(root=ws).docset_schema_path(ds_id).exists()
+    _wsx = Workspace(root=ws)
+    assert _wsx.docset_schema_key(ds_id).endswith("extraction-schema.rnc")
+    assert _wsx.store.blob_exists(_wsx.docset_schema_key(ds_id))
 
 
 def test_extraction_set_and_get_schema_rnc(
@@ -3652,9 +3650,10 @@ def test_extraction_get_values_json_and_xml(
             "locations": [{"page_number": 1, "bounding_box": [10, 20, 30, 40]}],
         }
     }
-    xml_path = wsx.file_dgml_xml_path(ds_id, "fileabc", "doc")
-    xml_path.parent.mkdir(parents=True, exist_ok=True)
-    xml_path.write_text(standalone_extraction_doc(values, vocab=vocab), encoding="utf-8")
+    wsx.store.put_blob(
+        wsx.file_dgml_xml_key(ds_id, "fileabc", "doc"),
+        standalone_extraction_doc(values, vocab=vocab).encode(),
+    )
 
     rc = main(_ws_args(ws) + ["extraction", "get-values", ds_id, "fileabc"])
     assert rc == 0
@@ -3711,11 +3710,12 @@ def test_extraction_generate_schema_happy_path(
     _write_grounded_config(ws)
     ds_id = _new_docset(ws, capsys)
 
-    # Seed a source PDF where _pdf_path expects it (files/<id>/*.pdf).
+    # Seed a source PDF where generation expects it (files/<id>/*.pdf), written
+    # through the store's staging bridge (zero-copy on LocalStore).
     fid = "filexyz12345"
-    file_dir = Workspace(root=ws).file_dir(fid)
-    file_dir.mkdir(parents=True, exist_ok=True)
-    _write_blank_pdf(file_dir / "doc.pdf", 1)
+    _wsx = Workspace(root=ws)
+    with _wsx.store.staged_write(_wsx.file_key(fid)) as _stage:
+        _write_blank_pdf(_stage / "doc.pdf", 1)
 
     response = _tool_response("submit_schema", {"fields": _FIELD_TREE})
     with patch("litellm.completion", return_value=response):
@@ -3728,10 +3728,8 @@ def test_extraction_generate_schema_happy_path(
     assert "element docset:LiabilityCap {\n    xsd:decimal" in payload["schema"]
     assert "element docset:EffectiveDate {\n    xsd:date" in payload["schema"]
     assert payload["from_file_ids"] == [fid]
-    assert (
-        Workspace(root=ws).docset_schema_path(ds_id).read_text(encoding="utf-8")
-        == payload["schema"]
-    )
+    _wsx = Workspace(root=ws)
+    assert _wsx.store.get_blob(_wsx.docset_schema_key(ds_id)).decode("utf-8") == payload["schema"]
 
 
 def test_extraction_extract_schema_not_found(
@@ -3784,7 +3782,8 @@ def test_extraction_extract_records_usage_under_debug(
     assert read_events(Workspace(root=ws)) == []
 
     # With --debug (global flag, precedes the subcommand): one extract_values row.
-    Workspace(root=ws).file_dgml_xml_path(ds_id, fid, "doc").unlink()  # re-extract cleanly
+    _wsx = Workspace(root=ws)
+    _wsx.store.delete_blob(_wsx.file_dgml_xml_key(ds_id, fid, "doc"))  # re-extract cleanly
     with patch("litellm.completion", return_value=response):
         assert main(_ws_args(ws) + ["--debug", "extraction", "extract", ds_id, fid]) == 0
     events = read_events(Workspace(root=ws))
@@ -3822,8 +3821,8 @@ def test_docset_add_file_auto_extracts_when_schema_set(
     assert payload["extraction"]["error"] is None
     assert payload["extraction"]["model"] == "gemini/gemini-2.5-pro"
 
-    xml_path = Workspace(root=ws).file_dgml_xml_path(ds_id, "fileauto0001", "doc")
-    xml = xml_path.read_text(encoding="utf-8")
+    _wsx = Workspace(root=ws)
+    xml = _wsx.store.get_blob(_wsx.file_dgml_xml_key(ds_id, "fileauto0001", "doc")).decode("utf-8")
     assert "<dg:extraction>" in xml
     assert "Acme" in xml
 
@@ -3889,14 +3888,13 @@ def test_docset_generate_builds_tree_for_extraction_only_file(
     capsys.readouterr()
 
     # Simulate a prior `extraction extract` with no tree: extraction-only file.
-    out_xml = Workspace(root=ws).file_dgml_xml_path(did, fid, "with-text")
-    out_xml.parent.mkdir(parents=True, exist_ok=True)
-    out_xml.write_text(
-        '<dg:chunk xmlns:dg="http://dgml.io/ns/dg#" xmlns:docset="http://www.dgml.io/ws/T">'
-        "<dg:extraction>"
-        '<docset:VendorName dg:origin="1 10 20 30 40">Acme</docset:VendorName>'
-        "</dg:extraction></dg:chunk>",
-        encoding="utf-8",
+    _wsx = Workspace(root=ws)
+    _wsx.store.put_blob(
+        _wsx.file_dgml_xml_key(did, fid, "with-text"),
+        b'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#" xmlns:docset="http://www.dgml.io/ws/T">'
+        b"<dg:extraction>"
+        b'<docset:VendorName dg:origin="1 10 20 30 40">Acme</docset:VendorName>'
+        b"</dg:extraction></dg:chunk>",
     )
 
     def fake_convert(
@@ -3914,7 +3912,7 @@ def test_docset_generate_builds_tree_for_extraction_only_file(
     payload = _read_generate_stdout(capsys)
     assert payload["summary"] == {"total": 1, "converted": 1, "skipped": 0, "failed": 0}
 
-    final = out_xml.read_text(encoding="utf-8")
+    final = _wsx.store.get_blob(_wsx.file_dgml_xml_key(did, fid, "with-text")).decode("utf-8")
     assert "the tree" in final  # document tree generated
     assert "<dg:extraction" in final  # prior extraction carried over
     assert ">Acme</docset:VendorName>" in final
@@ -3941,7 +3939,9 @@ def test_legacy_workspace_migrates_on_first_command(
     # Fabricate the legacy shape: a file, and an assignment as a bare directory.
     file_id = "aaaaaaaaaaaa"
     workspace.store.put_doc("files", file_id, {"id": file_id})
-    workspace.docset_file_dir(docset_id, file_id).mkdir(parents=True)
+    # Legacy bare-marker assignment (pre-assignment.json) — a LocalStore on-disk
+    # state the migration upgrades; there is no store-API way to make an empty dir.
+    (workspace.docsets_dir / docset_id / "files" / file_id).mkdir(parents=True)
     # Roll the stamp back so the workspace looks like it predates the change.
     stamp_schema_version(workspace, 0)
 
@@ -3950,7 +3950,7 @@ def test_legacy_workspace_migrates_on_first_command(
     captured = capsys.readouterr()
     assert json.loads(captured.out)["file_ids"] == [file_id]
     assert "upgraded workspace" in captured.err  # announced, but never on stdout
-    assert (workspace.docset_file_dir(docset_id, file_id) / "assignment.json").is_file()
+    assert workspace.store.get_doc("assignments", f"{docset_id}/{file_id}") is not None
 
     # Second command: already current, nothing announced even under --verbose.
     rc = main(_ws_args(ws) + ["docset", "list-files", docset_id, "--verbose"])
@@ -3968,7 +3968,7 @@ def test_migration_notice_never_breaks_the_stderr_error_envelope(
     ws = tmp_path / "ws"
     _init_ws(ws)
     workspace = Workspace(root=ws.resolve())
-    workspace.docset_file_dir("ds000000001a", "f0000000001a").mkdir(parents=True)
+    (workspace.docsets_dir / "ds000000001a" / "files" / "f0000000001a").mkdir(parents=True)
     stamp_schema_version(workspace, 0)
     capsys.readouterr()
 

@@ -60,7 +60,7 @@ from dgml_core.file_attestation import (
     verify_file_version,
 )
 from dgml_core.merkle import merkle_root, merkle_root_from_hashes
-from dgml_core.storage import Workspace, write_json_atomic
+from dgml_core.storage import Workspace
 from lxml import etree  # type: ignore[import-untyped]
 
 from .conftest import default_bridge_store
@@ -79,11 +79,10 @@ def _seed_file(
     """Drop a fake file directory: file.json, a source placeholder, page
     images and page text. Bytes are arbitrary — attestation hashes the
     bytes, it doesn't validate they're a real PDF/JPEG."""
-    file_dir = ws.file_dir(file_id)
-    file_dir.mkdir(parents=True)
-    (file_dir / pdf_name).write_bytes(b"%PDF-1.4\n%fake-pdf-bytes\n")
-    write_json_atomic(
-        ws.file_json_path(file_id),
+    ws.store.put_blob(ws.file_source_key(file_id, pdf_name), b"%PDF-1.4\n%fake-pdf-bytes\n")
+    ws.store.put_doc(
+        "files",
+        file_id,
         {
             "id": file_id,
             "original_path": f"/src/{pdf_name}",
@@ -97,18 +96,18 @@ def _seed_file(
             "pdf_converter": pdf_converter,
         },
     )
-    pages_dir = ws.file_pages_dir(file_id)
-    pages_dir.mkdir(parents=True)
-    text_dir = ws.file_text_dir(file_id)
-    text_dir.mkdir(parents=True)
     for n in range(1, pages + 1):
-        (pages_dir / f"page_{n}.png").write_bytes(f"fake-png-page-{n}".encode())
+        ws.store.put_blob(
+            f"{ws.file_pages_key(file_id)}/page_{n}.png", f"fake-png-page-{n}".encode()
+        )
         page_text = {
             "file_id": file_id,
             "page": n,
             "words": [{"t": f"w{n}", "l": [0, 0, 1, 1]}],
         }
-        (text_dir / f"page_{n}.json").write_text(json.dumps(page_text), encoding="utf-8")
+        ws.store.put_blob(
+            f"{ws.file_text_key(file_id)}/page_{n}.json", json.dumps(page_text).encode()
+        )
 
 
 _FULL_SCHEMA_RNC = "# Role: root\nstart = element dg:chunk { text }\n"
@@ -121,28 +120,25 @@ def _seed_docset(
     full_schema: str | None = None,
     extraction_schema: str | None = None,
 ) -> None:
-    ws.docset_dir(docset_id).mkdir(parents=True)
-    write_json_atomic(
-        ws.docset_dir(docset_id) / "docset.json",
+    ws.store.put_doc(
+        "docsets",
+        docset_id,
         {"id": docset_id, "name": "Test", "description": "", "key_questions": []},
     )
     if full_schema is not None:
         # The attestation "full_schema" slot is the generation tag schema
         # (full-schema.rnc, RELAX NG Compact), hashed as raw bytes.
-        ws.docset_full_schema_path(docset_id).write_text(full_schema, encoding="utf-8")
+        ws.store.put_blob(ws.docset_full_schema_key(docset_id), full_schema.encode())
     if extraction_schema is not None:
         # The attestation "extraction_schema" slot is the grounded extraction
         # schema (RELAX NG Compact), hashed as raw bytes.
-        ws.docset_schema_path(docset_id).write_text(extraction_schema, encoding="utf-8")
+        ws.store.put_blob(ws.docset_schema_key(docset_id), extraction_schema.encode())
 
 
 def _seed_dgml_xml(
     ws: Workspace, docset_id: str, pdf_stem: str, xml: bytes, file_id: str = "f001"
-) -> Path:
-    path = ws.file_dgml_xml_path(docset_id, file_id, pdf_stem)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(xml)
-    return path
+) -> None:
+    ws.store.put_blob(ws.file_dgml_xml_key(docset_id, file_id, pdf_stem), xml)
 
 
 _ATTESTATION_REL = f"{METADATA_DIRNAME}/{METADATA_FILENAME}"
@@ -195,7 +191,7 @@ def test_page_text_files_are_never_attested(workspace: Workspace) -> None:
     """The token files under `page_text/` exist on disk but are intentionally
     excluded from the file version — no `page_text[...]` slot ever appears."""
     _seed_file(workspace, "f001", pages=2)
-    assert workspace.file_text_dir("f001").exists()  # token files are on disk
+    assert workspace.store.list_blobs(workspace.file_text_key("f001"))  # token files exist
     version = collect_file_version(workspace, "f001")
     assert not any(a.slot_id.startswith("page_text[") for a in version.artifacts)
 
@@ -253,11 +249,11 @@ def test_assignment_representation_does_not_affect_attestation(workspace: Worksp
 
     # (2) assignment as a real document, written into that same directory
     workspace.store.put_doc("assignments", "ds01/f001", {"docset_id": "ds01", "file_id": "f001"})
-    assert (workspace.docset_file_dir("ds01", "f001") / "assignment.json").is_file()
+    assert workspace.store.get_doc("assignments", "ds01/f001") is not None
     assert snapshot() == baseline
 
-    # (3) legacy bare marker (no assignment.json)
-    (workspace.docset_file_dir("ds01", "f001") / "assignment.json").unlink()
+    # (3) assignment removed — still no effect on the file version
+    workspace.store.delete_doc("assignments", "ds01/f001")
     assert snapshot() == baseline
 
 
@@ -281,9 +277,7 @@ def test_missing_artifacts_silently_excluded(workspace: Workspace) -> None:
     slots and nothing else; not an error."""
     _seed_file(workspace, "f001", pages=2)
     # Remove the page-images dir to simulate rendering not having run yet.
-    import shutil
-
-    shutil.rmtree(workspace.file_pages_dir("f001"))
+    workspace.store.delete_blobs(f"{workspace.file_pages_key('f001')}/")
     version = collect_file_version(workspace, "f001")
     slot_ids = [a.slot_id for a in version.artifacts]
     assert slot_ids == ["source"]
@@ -323,9 +317,9 @@ def test_missing_docset_raises_docset_not_found(workspace: Workspace) -> None:
 
 def test_empty_version_raises_value_error(workspace: Workspace) -> None:
     """File dir exists but completely empty (no PDF, no pages, no text)."""
-    workspace.file_dir("f001").mkdir(parents=True)
-    write_json_atomic(
-        workspace.file_json_path("f001"),
+    workspace.store.put_doc(
+        "files",
+        "f001",
         {
             "id": "f001",
             "original_path": "/src/doc.pdf",
@@ -342,8 +336,9 @@ def test_empty_version_raises_value_error(workspace: Workspace) -> None:
 
 
 def test_corrupt_file_json_raises_corrupt_metadata(workspace: Workspace) -> None:
-    workspace.file_dir("f001").mkdir(parents=True)
-    workspace.file_json_path("f001").write_text("{not json", encoding="utf-8")
+    # Corrupt manifest via put_blob (raw invalid bytes) — LocalStore-specific,
+    # like the other corrupt-metadata tests: put_doc can't write invalid JSON.
+    workspace.store.put_blob("files/f001/file.json", b"{not json")
     with pytest.raises(CorruptMetadata):
         collect_file_version(workspace, "f001")
 
@@ -353,7 +348,7 @@ def test_schema_json_is_not_attested(workspace: Workspace) -> None:
     slot, and even a corrupt one is never read during collection."""
     _seed_file(workspace, "f001", pages=1)
     _seed_docset(workspace, "ds01", full_schema=_FULL_SCHEMA_RNC)
-    workspace.docset_generation_schema_path("ds01").write_text("not json", encoding="utf-8")
+    workspace.store.put_blob(workspace.docset_generation_schema_key("ds01"), b"not json")
     slot_ids = [a.slot_id for a in collect_file_version(workspace, "f001", "ds01").artifacts]
     assert "schema" not in slot_ids
     assert "full_schema" in slot_ids
@@ -363,7 +358,7 @@ def test_unexpected_page_filename_raises(workspace: Workspace) -> None:
     _seed_file(workspace, "f001", pages=1)
     # Stray file matching the ``page_*.png`` glob but not the strict
     # ``page_<digits>.png`` shape the attestation requires for ordering.
-    (workspace.file_pages_dir("f001") / "page_thumb.png").write_bytes(b"x")
+    workspace.store.put_blob(f"{workspace.file_pages_key('f001')}/page_thumb.png", b"x")
     with pytest.raises(ValueError, match="unexpected file name"):
         collect_file_version(workspace, "f001")
 
@@ -438,10 +433,10 @@ def test_root_matches_manual_merkle_over_leaf_hashes(workspace: Workspace) -> No
 def test_single_artifact_root_equals_leaf_hash(workspace: Workspace) -> None:
     """RFC 6962: a 1-leaf tree has root == leaf (no pairing). Matches the
     merkle.py contract."""
-    workspace.file_dir("f001").mkdir(parents=True)
-    (workspace.file_dir("f001") / "doc.pdf").write_bytes(b"only-pdf")
-    write_json_atomic(
-        workspace.file_json_path("f001"),
+    workspace.store.put_blob(workspace.file_source_key("f001", "doc.pdf"), b"only-pdf")
+    workspace.store.put_doc(
+        "files",
+        "f001",
         {
             "id": "f001",
             "original_path": "/src/doc.pdf",
@@ -468,7 +463,9 @@ def test_verify_roundtrip_returns_true_when_unchanged(workspace: Workspace) -> N
 def test_verify_returns_false_on_pdf_tamper(workspace: Workspace) -> None:
     _seed_file(workspace, "f001", pages=1)
     att = attest_file(workspace, "f001")
-    (workspace.file_dir("f001") / "doc.pdf").write_bytes(b"%PDF-1.4\n%TAMPERED\n")
+    workspace.store.put_blob(
+        workspace.file_source_key("f001", "doc.pdf"), b"%PDF-1.4\n%TAMPERED\n"
+    )
     assert verify_file_version(workspace, att) is False
 
 
@@ -477,10 +474,10 @@ def test_page_text_tamper_does_not_affect_verification(workspace: Workspace) -> 
     unchanged — verification still passes."""
     _seed_file(workspace, "f001", pages=1)
     att = attest_file(workspace, "f001")
-    text_path = workspace.file_text_dir("f001") / "page_1.json"
-    parsed = json.loads(text_path.read_text())
+    text_key = f"{workspace.file_text_key('f001')}/page_1.json"
+    parsed = json.loads(workspace.store.get_blob(text_key))
     parsed["words"][0]["t"] = "TAMPERED"
-    text_path.write_text(json.dumps(parsed), encoding="utf-8")
+    workspace.store.put_blob(text_key, json.dumps(parsed).encode())
     assert verify_file_version(workspace, att) is True
 
 
@@ -488,8 +485,8 @@ def test_verify_returns_false_on_schema_tamper(workspace: Workspace) -> None:
     _seed_file(workspace, "f001", pages=1)
     _seed_docset(workspace, "ds01", full_schema=_FULL_SCHEMA_RNC)
     att = attest_file(workspace, "f001", "ds01")
-    workspace.docset_full_schema_path("ds01").write_text(
-        _FULL_SCHEMA_RNC + "# tampered\n", encoding="utf-8"
+    workspace.store.put_blob(
+        workspace.docset_full_schema_key("ds01"), (_FULL_SCHEMA_RNC + "# tampered\n").encode()
     )
     assert verify_file_version(workspace, att) is False
 
@@ -504,8 +501,8 @@ def test_verify_returns_false_on_extraction_schema_tamper(workspace: Workspace) 
         extraction_schema='namespace docset = "http://www.dgml.io/acme/x#"\n',
     )
     att = attest_file(workspace, "f001", "ds01")
-    workspace.docset_schema_path("ds01").write_text(
-        'namespace docset = "http://www.dgml.io/acme/y#"\n', encoding="utf-8"
+    workspace.store.put_blob(
+        workspace.docset_schema_key("ds01"), b'namespace docset = "http://www.dgml.io/acme/y#"\n'
     )
     assert verify_file_version(workspace, att) is False
 
@@ -516,7 +513,7 @@ def test_verify_raises_on_slot_inventory_mismatch(workspace: Workspace) -> None:
     _seed_file(workspace, "f001", pages=2)
     att = attest_file(workspace, "f001")
     # Delete one page image — slot count drops by 1.
-    (workspace.file_pages_dir("f001") / "page_2.png").unlink()
+    workspace.store.delete_blob(f"{workspace.file_pages_key('f001')}/page_2.png")
     with pytest.raises(ValueError, match="slot inventory differs"):
         verify_file_version(workspace, att)
 
@@ -524,9 +521,8 @@ def test_verify_raises_on_slot_inventory_mismatch(workspace: Workspace) -> None:
 def test_verify_raises_when_file_was_deleted(workspace: Workspace) -> None:
     _seed_file(workspace, "f001", pages=1)
     att = attest_file(workspace, "f001")
-    import shutil
-
-    shutil.rmtree(workspace.file_dir("f001"))
+    workspace.store.delete_doc("files", "f001")
+    workspace.store.delete_blobs(f"{workspace.file_key('f001')}/")
     with pytest.raises(FileNotFound):
         verify_file_version(workspace, att)
 
@@ -536,8 +532,8 @@ def test_two_independent_file_versions_have_distinct_roots(workspace: Workspace)
     _seed_file(workspace, "f002", pages=1, pdf_name="b.pdf")
     # The fixture writes identical placeholder bytes; give the two sources
     # distinct content so their (source-only + page-image) roots must differ.
-    (workspace.file_dir("f001") / "a.pdf").write_bytes(b"%PDF-1.4\n%aaa\n")
-    (workspace.file_dir("f002") / "b.pdf").write_bytes(b"%PDF-1.4\n%bbb\n")
+    workspace.store.put_blob(workspace.file_source_key("f001", "a.pdf"), b"%PDF-1.4\n%aaa\n")
+    workspace.store.put_blob(workspace.file_source_key("f002", "b.pdf"), b"%PDF-1.4\n%bbb\n")
     assert attest_file(workspace, "f001").root != attest_file(workspace, "f002").root
 
 
@@ -1136,11 +1132,10 @@ _GOLDEN_LEAVES = {
 
 def _seed_golden(ws: Workspace) -> None:
     """Seed the fixture the golden root above was captured from."""
-    file_dir = ws.file_dir("f001")
-    file_dir.mkdir(parents=True)
-    (file_dir / "contract.pdf").write_bytes(_GOLDEN_SOURCE)
-    write_json_atomic(
-        ws.file_json_path("f001"),
+    ws.store.put_blob(ws.file_source_key("f001", "contract.pdf"), _GOLDEN_SOURCE)
+    ws.store.put_doc(
+        "files",
+        "f001",
         {
             "id": "f001",
             "original_path": "/src/contract.pdf",
@@ -1154,10 +1149,8 @@ def _seed_golden(ws: Workspace) -> None:
             "pdf_converter": None,
         },
     )
-    pages_dir = ws.file_pages_dir("f001")
-    pages_dir.mkdir(parents=True)
-    (pages_dir / "page_1.png").write_bytes(_GOLDEN_PAGE_1)
-    (pages_dir / "page_2.png").write_bytes(_GOLDEN_PAGE_2)
+    ws.store.put_blob(f"{ws.file_pages_key('f001')}/page_1.png", _GOLDEN_PAGE_1)
+    ws.store.put_blob(f"{ws.file_pages_key('f001')}/page_2.png", _GOLDEN_PAGE_2)
     _seed_docset(
         ws, "ds01", full_schema=_GOLDEN_FULL_SCHEMA, extraction_schema=_GOLDEN_EXTRACTION_SCHEMA
     )
@@ -1302,7 +1295,7 @@ def test_shrinking_re_render_yields_the_same_root_on_both_backends(
     _seed_file(workspace, "f001", pages=5, pdf_name="contract.pdf")
 
     def re_render_to_two_pages() -> str:
-        prefix = workspace.blob_key(workspace.file_pages_dir("f001"))
+        prefix = workspace.file_pages_key("f001")
         with workspace.store.staged_write(prefix) as pages_dir:
             for n in (1, 2):
                 (pages_dir / f"page_{n}.png").write_bytes(f"fake-png-page-{n}".encode())
@@ -1315,8 +1308,8 @@ def test_shrinking_re_render_yields_the_same_root_on_both_backends(
     # Put the surplus pages back, then repeat the whole thing through the base
     # bridge — the implementation every third-party store inherits.
     for n in range(3, 6):
-        (workspace.file_pages_dir("f001") / f"page_{n}.png").write_bytes(
-            f"fake-png-page-{n}".encode()
+        workspace.store.put_blob(
+            f"{workspace.file_pages_key('f001')}/page_{n}.png", f"fake-png-page-{n}".encode()
         )
     monkeypatch.setattr(Workspace, "store", property(lambda self: default_bridge_store(self.root)))
     assert re_render_to_two_pages() == local_root

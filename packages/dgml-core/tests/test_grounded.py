@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -42,7 +41,7 @@ from dgml_core.grounded import (
     load_grounded_config,
 )
 from dgml_core.models import FileRecord
-from dgml_core.storage import Workspace, write_json_atomic
+from dgml_core.storage import Workspace
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -82,12 +81,12 @@ def _seed_file(
     pdf_bytes: bytes = b"%PDF-1.4 fake\n",
     page_count: int = 1,
     filename: str = "doc.pdf",
-) -> Path:
-    """Create a minimal file record + a placeholder PDF on disk.
+) -> None:
+    """Create a minimal file record + a placeholder source PDF in the store.
 
-    Returns the source PDF path. The PDF doesn't need to be valid for
-    these tests — `extract_values`/`generate_schema` read the bytes and
-    hand them to a mocked litellm, which never inspects them.
+    The PDF doesn't need to be valid for these tests — `extract_values` /
+    `generate_schema` read the bytes and hand them to a mocked litellm, which
+    never inspects them.
     """
     record = FileRecord(
         id=file_id,
@@ -98,11 +97,8 @@ def _seed_file(
         page_count=page_count,
         text_mode="digital",
     )
-    workspace.file_dir(file_id).mkdir(parents=True, exist_ok=True)
-    write_json_atomic(workspace.file_json_path(file_id), record.to_json())
-    pdf_path = workspace.file_dir(file_id) / filename
-    pdf_path.write_bytes(pdf_bytes)
-    return pdf_path
+    workspace.store.put_doc("files", file_id, record.to_json())
+    workspace.store.put_blob(workspace.file_source_key(file_id, filename), pdf_bytes)
 
 
 def _seed_page_text(
@@ -122,7 +118,6 @@ def _seed_page_text(
             {"t": "Hello", "l": [100, 210, 182, 242]},
             {"t": "world", "l": [190, 210, 290, 242]},
         ]
-    workspace.file_text_dir(file_id).mkdir(parents=True, exist_ok=True)
     payload = {
         "file_id": file_id,
         "page": page,
@@ -130,15 +125,17 @@ def _seed_page_text(
         "height": height,
         "words": words,
     }
-    write_json_atomic(workspace.file_text_dir(file_id) / f"page_{page}.json", payload)
+    workspace.store.put_blob(
+        f"{workspace.file_text_key(file_id)}/page_{page}.json", json.dumps(payload).encode()
+    )
 
 
 def _seed_page_image(workspace: Workspace, file_id: str, page: int) -> None:
     """Drop a minimal PNG so phase-3 ``image_path.exists()`` passes.
     Bytes never reach a real decoder — litellm is mocked in these tests."""
-    img_dir = workspace.file_dir(file_id) / "page_images"
-    img_dir.mkdir(parents=True, exist_ok=True)
-    (img_dir / f"page_{page}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    workspace.store.put_blob(
+        f"{workspace.file_pages_key(file_id)}/page_{page}.png", b"\x89PNG\r\n\x1a\n"
+    )
 
 
 def _tool_call_response(
@@ -761,14 +758,12 @@ def test_extract_values_full_extraction_embeds_in_existing_tree(workspace: Works
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
 
     # Simulate a prior `docset generate`: a core file with a document tree.
-    core = workspace.file_dgml_xml_path(ds_id, fid, "doc")
-    core.parent.mkdir(parents=True, exist_ok=True)
-    core.write_text(
-        '<?xml version="1.0" encoding="utf-8"?>\n'
-        '<dg:chunk xmlns:dg="http://dgml.io/ns/dg#">\n'
-        "  <dg:chunk>the generated document tree</dg:chunk>\n"
-        "</dg:chunk>\n",
-        encoding="utf-8",
+    workspace.store.put_blob(
+        workspace.file_dgml_xml_key(ds_id, fid, "doc"),
+        b'<?xml version="1.0" encoding="utf-8"?>\n'
+        b'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#">\n'
+        b"  <dg:chunk>the generated document tree</dg:chunk>\n"
+        b"</dg:chunk>\n",
     )
 
     phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
@@ -780,8 +775,8 @@ def test_extract_values_full_extraction_embeds_in_existing_tree(workspace: Works
         result = extract_values(workspace, ds_id, fid, config=config)
 
     assert result.mode == "full-extraction"
-    assert result.xml_key == workspace.blob_key(core)
-    xml = core.read_text(encoding="utf-8")
+    assert result.xml_key == workspace.file_dgml_xml_key(ds_id, fid, "doc")
+    xml = workspace.store.get_blob(workspace.file_dgml_xml_key(ds_id, fid, "doc")).decode("utf-8")
     assert "the generated document tree" in xml  # tree preserved
     assert xml.count("<dg:extraction>") == 1  # extraction added once
 
@@ -883,9 +878,8 @@ def test_extract_values_phase3_merges_costs_across_parallel_pages(
         extract_values(workspace, ds_id, fid, config=config)
 
     assert mock_completion.call_count == 3
-    stats = json.loads(
-        workspace.docset_file_extraction_stats_path(ds_id, fid).read_text(encoding="utf-8")
-    )
+    stats = workspace.store.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
     # Phase 3 ran two parallel page-calls; merged cost == sum of both.
     assert stats["phases"]["phase3"]["page_calls"] == 2
     assert stats["phases"]["phase3"]["cost_usd"] == pytest.approx(0.06)
@@ -912,9 +906,8 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
     ):
         extract_values(workspace, ds_id, fid, config=config)
 
-    stats_path = workspace.docset_file_extraction_stats_path(ds_id, fid)
-    assert stats_path.exists()
-    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    stats = workspace.store.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
     # Lock the top-level shape — this file is read by the UX
     # (StatsPanel) and is part of the on-disk surface.
     assert set(stats.keys()) == {
@@ -976,8 +969,8 @@ def test_extract_values_write_stats_false_suppresses_file(workspace: Workspace) 
     ):
         extract_values(workspace, ds_id, fid, config=config, write_stats=False)
 
-    assert not workspace.docset_file_extraction_stats_path(ds_id, fid).exists()
-    assert workspace.file_dgml_xml_path(ds_id, fid, "doc").exists()
+    assert workspace.store.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
+    assert workspace.store.blob_exists(workspace.file_dgml_xml_key(ds_id, fid, "doc"))
 
 
 def test_extract_values_no_tool_call_errors(workspace: Workspace) -> None:
@@ -1428,9 +1421,8 @@ def test_extract_values_computed_field_end_to_end(workspace: Workspace) -> None:
     vocab = parse_rnc(DocSetStore(workspace).get_schema(ds.id))
     assert dgml_xml_to_values(xml, vocab=vocab) == result.values
 
-    stats = json.loads(
-        workspace.docset_file_extraction_stats_path(ds.id, fid).read_text(encoding="utf-8")
-    )
+    stats = workspace.store.get_doc("extraction_stats", f"{ds.id}/{fid}")
+    assert stats is not None
     assert stats["matching"] == {
         "total_locations": 1,
         "matched_phase2": 1,
@@ -1470,8 +1462,7 @@ def test_extract_values_counts_dropped_refs_in_stats(workspace: Workspace) -> No
     ):
         extract_values(workspace, ds.id, fid, config=config)
 
-    stats = json.loads(
-        workspace.docset_file_extraction_stats_path(ds.id, fid).read_text(encoding="utf-8")
-    )
+    stats = workspace.store.get_doc("extraction_stats", f"{ds.id}/{fid}")
+    assert stats is not None
     assert stats["matching"]["computed_fields"] == 1
     assert stats["matching"]["dropped_refs"] == 2
