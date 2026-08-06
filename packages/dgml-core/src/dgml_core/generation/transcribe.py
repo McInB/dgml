@@ -10,18 +10,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pass A — verbatim transcription into flat typed blocks (JSON).
+"""Pass A — verbatim transcription into flat typed blocks.
 
-Per document: disjoint page windows, one LLM call each, JSON out. Merging is
-list concatenation; a window that starts mid-sentence returns the remainder
-in `continues`, which is appended to the previous window's last text block.
+Per document: disjoint page windows, one LLM call each. The model is always
+told to emit the compact tab-delimited ("TL") line format; the reply parser
+still content-sniffs, so legacy JSON replies (e.g. cached ``*_wNN_raw.json``
+artifacts from older runs) keep parsing. Merging is list concatenation; a
+window that starts mid-sentence returns the remainder in `continues`, which
+is appended to the previous window's last text block.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
-import os
 import re
 import tempfile
 from collections import Counter
@@ -127,39 +129,11 @@ def strip_fences(text: str) -> str:
     return (match.group(1) if match else text).strip()
 
 
-SYSTEM_PROMPT = prompt("transcribe_system")
-
-# Generation-compaction flag: when ON, the Pass-A transcription calls request
-# the compact tab-delimited ("TL") line grammar (``transcribe_system_compact``)
-# instead of JSON. OFF (the default) is byte-identical to today — the unchanged
-# ``SYSTEM_PROMPT`` + ``transcribe_window_json``. Reply parsing always sniffs
-# the content (:func:`parse_window_any`), so both modes — and every cached raw
-# artifact — parse the same way regardless of how this is set.
-_COMPACT_GENERATION_ENV = "DGML_COMPACT_GENERATION"
-_COMPACT_GENERATION_TRUE = frozenset({"1", "true", "yes", "on"})
-_COMPACT_GENERATION_FALSE = frozenset({"", "0", "false", "no", "off"})
-
-
-def _generation_compaction_enabled() -> bool:
-    """Resolve ``$DGML_COMPACT_GENERATION`` as a boolean.
-
-    OFF (``False``) — unset, ``""``, ``"0"``, ``"false"``, ``"no"``, ``"off"``
-    (case-insensitive, trimmed) — takes the JSON path, byte-identical to today.
-    ON (``True``) — ``"1"``, ``"true"``, ``"yes"``, ``"on"``. Any other value
-    raises loudly, naming the offending value and the accepted set (resolved
-    once per document, so a typo fails the run rather than silently reverting).
-    """
-    value = os.environ.get(_COMPACT_GENERATION_ENV, "").strip().lower()
-    if value in _COMPACT_GENERATION_TRUE:
-        return True
-    if value in _COMPACT_GENERATION_FALSE:
-        return False
-    on = "/".join(sorted(_COMPACT_GENERATION_TRUE))
-    off = "/".join(sorted(_COMPACT_GENERATION_FALSE - {""}))
-    raise ValueError(
-        f"${_COMPACT_GENERATION_ENV} must be a boolean — "
-        f"on ({on}) or off (unset/{off}) — got {value!r}"
-    )
+# Pass-A transcription always instructs the model to emit the compact
+# tab-delimited ("TL") line grammar. The reply parser still content-sniffs
+# (:func:`parse_window_any`), so legacy JSON replies — including cached raw
+# ``*_wNN_raw.json`` artifacts from older runs — keep parsing unchanged.
+SYSTEM_PROMPT = prompt("transcribe_system_compact")
 
 
 def _heading_breadcrumb(blocks: list[Block]) -> list[str]:
@@ -204,9 +178,7 @@ def _window_context(blocks: list[Block], tail_chars: int = 300) -> str:
     return "\n".join(parts)
 
 
-def _window_instruction(
-    first_page: int, last_page: int, total: int, context: str, compact: bool = False
-) -> str:
+def _window_instruction(first_page: int, last_page: int, total: int, context: str) -> str:
     parts = [
         prompt("transcribe_window_header").format(
             first=first_page + 1, last=last_page + 1, total=total
@@ -214,7 +186,7 @@ def _window_instruction(
     ]
     if context:
         parts.append(prompt("transcribe_window_context").format(context=context))
-    parts.append(prompt("transcribe_window_compact" if compact else "transcribe_window_json"))
+    parts.append(prompt("transcribe_window_compact"))
     return "\n\n".join(parts)
 
 
@@ -416,9 +388,9 @@ def parse_window_any(raw: str, *, log: Callable[[str], None] = lambda _m: None) 
     ``json.JSONDecodeError`` on damaged JSON, so the caller's
     ``_salvage_window_json`` fallback still runs exactly as before. Anything
     else decodes as the compact tab-delimited format, which is per-line
-    tolerant and never raises. The CONTENT decides, not
-    ``$DGML_COMPACT_GENERATION``, so cached raw artifacts and mixed-mode runs
-    parse through one entry point.
+    tolerant and never raises. The CONTENT decides, not how the model was
+    prompted, so legacy JSON caches and today's compact replies parse through
+    one entry point.
     """
     if strip_fences(raw).lstrip().startswith("{"):
         return _parse_window_json(raw)
@@ -579,11 +551,9 @@ def transcribe_document(
     windows = document.iter_windows(total, window_size, overlap=0)
     log(f"{doc_name}: {total} pages → {len(windows)} window(s)")
     page_tokens = _page_token_lists(page_text_dir)
-    # Resolved once per document, BEFORE the window loop: a bad
-    # $DGML_COMPACT_GENERATION value must fail loudly, never dissolve into
-    # per-window soft skips.
-    compact = _generation_compaction_enabled()
-    system_prompt = prompt("transcribe_system_compact") if compact else SYSTEM_PROMPT
+    # Pass A always instructs the model in the compact tab-delimited grammar;
+    # parsing content-sniffs so a legacy JSON reply still decodes.
+    system_prompt = SYSTEM_PROMPT
 
     # One usage row per document, aggregating every window's call (gated on
     # --debug via the config). ``config`` is fresh per document in the pipeline,
@@ -599,7 +569,7 @@ def transcribe_document(
         ) -> tuple[float, str, dict[str, Any]] | None:
             """Gated attempt loop for one page range; best (recall, raw, payload)."""
             pdf_slice = document.slice_pdf(pdf_bytes, pages)
-            instr = _window_instruction(pages[0], pages[-1], total, context, compact)
+            instr = _window_instruction(pages[0], pages[-1], total, context)
             exp = [t for p in pages if p < len(page_tokens) for t in page_tokens[p]]
             n_attempts = 1 + (_GATE_RETRIES if len(exp) >= _GATE_MIN_TOKENS else 0)
             found: tuple[float, str, dict[str, Any]] | None = None

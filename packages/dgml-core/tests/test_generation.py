@@ -239,7 +239,7 @@ def test_window_context_gives_section_path_and_open_table_header() -> None:
     assert _window_context([]) == ""
 
 
-# ── Pass-A generation compaction (DGML_COMPACT_GENERATION) ───────────────────
+# ── Pass-A generation compaction (compact tab-delimited "TL" wire format) ────
 
 
 def _tla_escape(text: str) -> str:
@@ -374,72 +374,23 @@ def test_parse_window_any_sniffs_json_and_compact() -> None:
 
 
 @pytest.mark.parametrize(
-    ("value", "expected"),
+    "reply",
     [
-        (None, False),
-        ("", False),
-        ("0", False),
-        ("false", False),
-        ("FALSE", False),
-        ("  no  ", False),
-        ("off", False),
-        ("1", True),
-        ("true", True),
-        ("TRUE", True),
-        (" Yes ", True),
-        ("on", True),
+        "P\tHello world",
+        json.dumps({"continues": "", "blocks": [{"structure": "p", "text": "Hello world"}]}),
     ],
+    ids=["compact-reply", "legacy-json-reply"],
 )
-def test_generation_compaction_flag_boolean(
-    monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool
+def test_transcribe_document_is_unconditionally_compact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reply: str
 ) -> None:
-    from dgml_core.generation.transcribe import _generation_compaction_enabled
-
-    if value is None:
-        monkeypatch.delenv("DGML_COMPACT_GENERATION", raising=False)
-    else:
-        monkeypatch.setenv("DGML_COMPACT_GENERATION", value)
-    assert _generation_compaction_enabled() is expected
-
-
-def test_generation_compaction_flag_rejects_unknown_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    from dgml_core.generation.transcribe import _generation_compaction_enabled
-
-    monkeypatch.setenv("DGML_COMPACT_GENERATION", "yaml")
-    with pytest.raises(ValueError, match=r"DGML_COMPACT_GENERATION.*'yaml'"):
-        _generation_compaction_enabled()
-
-
-@pytest.mark.parametrize(
-    ("env", "system_name", "window_name", "reply"),
-    [
-        (
-            None,
-            "transcribe_system",
-            "transcribe_window_json",
-            json.dumps({"continues": "", "blocks": [{"structure": "p", "text": "Hello world"}]}),
-        ),
-        (
-            "false",
-            "transcribe_system",
-            "transcribe_window_json",
-            json.dumps({"continues": "", "blocks": [{"structure": "p", "text": "Hello world"}]}),
-        ),
-        ("1", "transcribe_system_compact", "transcribe_window_compact", "P\tHello world"),
-        ("on", "transcribe_system_compact", "transcribe_window_compact", "P\tHello world"),
-    ],
-    ids=["unset-json", "off-json", "on-compact", "on-alias-compact"],
-)
-def test_compact_generation_flag_selects_prompts_end_to_end(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    env: str | None,
-    system_name: str,
-    window_name: str,
-    reply: str,
-) -> None:
+    """Pass A always TELLS the model to emit the compact tab-delimited format —
+    there is no env flag — yet still READS a legacy-JSON reply via content
+    sniffing, so a re-run over cached ``*_wNN_raw.json`` JSON artifacts from
+    older runs keeps parsing."""
     from dgml_core.generation import document as document_mod
     from dgml_core.generation import transcribe as transcribe_mod
+    from dgml_core.generation.transcribe import SYSTEM_PROMPT
 
     seen: list[dict[str, Any]] = []
 
@@ -450,10 +401,10 @@ def test_compact_generation_flag_selects_prompts_end_to_end(
     monkeypatch.setattr(llm, "call_continued", fake_call_continued)
     monkeypatch.setattr(transcribe_mod, "_count_pages", lambda _b: 1)
     monkeypatch.setattr(document_mod, "slice_pdf", lambda b, _pages: b)
-    if env is None:
-        monkeypatch.delenv("DGML_COMPACT_GENERATION", raising=False)
-    else:
-        monkeypatch.setenv("DGML_COMPACT_GENERATION", env)
+    # The removed DGML_COMPACT_GENERATION flag is inert: a stale value is
+    # neither read nor validated, and compaction stays on regardless.
+    monkeypatch.setenv("DGML_COMPACT_GENERATION", "false")
+
     blocks = transcribe_mod.transcribe_document(
         b"%PDF-fake",
         doc_name="doc.pdf",
@@ -462,34 +413,31 @@ def test_compact_generation_flag_selects_prompts_end_to_end(
         debug=True,
     )
     assert [b.text for b in blocks] == ["Hello world"]
-    # System prompt and per-window reply suffix follow the flag; off/unset is
-    # byte-identical to today's JSON constants.
-    assert [str(k["system_prompt"]) for k in seen] == [get_prompt(system_name)]
-    if system_name == "transcribe_system":
-        from dgml_core.generation.transcribe import SYSTEM_PROMPT
-
-        assert seen[0]["system_prompt"] == SYSTEM_PROMPT  # constant kept, unchanged
-    instruction = seen[0]["user_content"][0]["text"]
-    assert get_prompt(window_name) in instruction
+    # The model is unconditionally prompted with the compact system + window
+    # instruction; SYSTEM_PROMPT is that compact prompt.
+    assert [str(k["system_prompt"]) for k in seen] == [get_prompt("transcribe_system_compact")]
+    assert seen[0]["system_prompt"] == SYSTEM_PROMPT
+    assert get_prompt("transcribe_window_compact") in seen[0]["user_content"][0]["text"]
     # Raw cache artifact keeps its filename regardless of the wire format.
     assert (tmp_path / "doc_w01_raw.json").read_text(encoding="utf-8") == reply
     assert (tmp_path / "doc_blocks.json").exists()
 
 
-def test_transcribe_prompt_variants_share_rules() -> None:
-    base = get_prompt("transcribe_system")
+def test_transcribe_compact_prompt_has_rules_and_worked_example() -> None:
+    """The (now sole) transcription prompt teaches the compact TL grammar by a
+    worked example and carries the verbatim transcription rules, with no JSON
+    contract left behind."""
     compact = get_prompt("transcribe_system_compact")
     assert "H1\t" in compact  # worked example rendered with real tabs
     assert "*INLAND MARINE" in compact  # a checked option demonstrated
     assert "\\n" in compact  # escaped-newline multiline P demonstrated
     assert '"structure"' not in compact  # no JSON contract left behind
-    # The transcription rules survive verbatim in the compact variant.
     for rule in (
         "1. Copy text verbatim. Never paraphrase, never skip, never re-order.",
         "4. Exclude only repeated page decorations (page numbers, running headers).",
         "roman sub-headings sit one level below the heading that contains them.",
     ):
-        assert rule in base and rule in compact
+        assert rule in compact
 
 
 # ── labeling ─────────────────────────────────────────────────────────────────

@@ -1,53 +1,6 @@
 # Prompts for the DGML generation pipeline.
 # Edit prompt wording here (not inline in the Python modules).
 # Loaded by dgml.generation.prompts.get(<name>).
-"transcribe_system": |
-  You transcribe document pages into a FLAT JSON list of typed blocks. You do
-  not build a tree, you do not invent names, you do not summarise — you copy
-  every visible character of body text, in reading order, into blocks.
-
-  Block types (the only ones):
-  - {"structure": "heading", "level": 1-6, "lim": "<printed number, if any>",
-     "text": "<heading text>"}            — any section/clause/rule heading
-  - {"structure": "p", "text": "..."}     — a paragraph of prose
-  - {"structure": "item", "lim": "<printed marker>", "text": "..."}
-                                          — one list/enumeration item
-  - {"structure": "row", "cells": ["...", "..."]}
-                                          — one table row, one string per cell
-  - {"structure": "field", "lim": "<printed item no.>", "label": "...",
-     "value": "..."}                      — one label/value form line
-  - {"structure": "field", "label": "<group caption>",
-     "options": ["...", "..."], "checked": ["..."]}
-                                          — one checkbox/radio CHOICE GROUP
-
-  Rules:
-  1. Copy text verbatim. Never paraphrase, never skip, never re-order.
-  2. `lim` holds the PRINTED enumerator exactly as shown ("2.13", "(a)",
-     "ITEM 3", "•"). Empty when nothing is printed.
-  3. Heading levels reflect the document's own hierarchy (a clause heading
-     under a part heading gets a higher level number). When headings carry
-     printed numbers, deeper numbering means a deeper level, consistently:
-     if "2" is level 2 then "2.1" is level 3 and "2.1.1" level 4; lettered or
-     roman sub-headings sit one level below the heading that contains them.
-  4. Exclude only repeated page decorations (page numbers, running headers).
-  5. A checkbox/radio group is ONE field block: `options` lists the printed
-     choice labels in reading order; `checked` lists the labels whose box
-     carries a mark (X, tick, filled). NEVER output the mark character
-     itself as text or a cell. A mark printed directly beside a label
-     ("X COLL") means that label is checked. An unmarked group still
-     transcribes, with "checked": []. A printed label whose box/line is
-     blank still transcribes as a field with "value": "".
-  6. Output JSON only: {"continues": "...", "blocks": [...]}.
-     `continues` holds text that finishes the PREVIOUS window's final block
-     when your first page starts mid-sentence; otherwise "".
-  6. A paragraph that begins with a printed enumerator and has at least one
-     sibling in the same series ("(a) …" followed by "(b) …"; "(i) …" then
-     "(ii) …") is one `item` per entry — never a `p`.
-  7. `field` is only for label/value lines whose value is short data (a name,
-     date, amount, address — a few words). A numbered clause whose body is
-     full sentences is a `heading` plus `p` block(s), never a `field`.
-  8. `row` is only for genuinely tabular content (ruled or visibly aligned
-     columns). A two-column running list without column meaning is `item`s.
 "transcribe_system_compact": |
   You transcribe document pages into a FLAT list of typed block lines. You do
   not build a tree, you do not invent names, you do not summarise — you copy
@@ -128,8 +81,6 @@
   {context}
   Keep heading levels/numbering and any open table's columns consistent with it.
   If your first page begins mid-sentence, put the completing text in "continues".
-"transcribe_window_json": |-
-  Return JSON only: {"continues": "...", "blocks": [...]}.
 "transcribe_window_compact": |-
   Return tab-delimited block lines only (a C line first when your first page
   starts mid-sentence — that is the "continues" text) — no JSON, no code
