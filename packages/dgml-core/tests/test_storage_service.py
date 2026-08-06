@@ -704,6 +704,35 @@ def test_list_blobs_prefix_matches_are_boundary_correct(tmp_path: Path) -> None:
     assert len(store.list_blobs("")) == 3
 
 
+def test_list_blobs_prefix_naming_a_dir_still_matches_extending_siblings(tmp_path: Path) -> None:
+    """The narrowing bug this guards against.
+
+    ``files/f1`` (no trailing slash) is a raw string prefix, so S3 semantics
+    match ``files/f1x/...`` as well as ``files/f1/...``. Scanning only the
+    directory the prefix happens to name would silently drop the sibling —
+    a short list, not an error. Only a trailing slash makes the prefix
+    unambiguous, which is why that is the single-directory fast path.
+
+    Not reachable through a current caller (ids are fixed-length, so no id can
+    prefix another), but the contract is what the next caller will rely on."""
+    store = local_store(tmp_path)
+    store.put_blob("files/f1/a.pdf", b"a")
+    store.put_blob("files/f1x/b.pdf", b"b")
+
+    assert store.list_blobs("files/f1") == ["files/f1/a.pdf", "files/f1x/b.pdf"]
+    assert store.list_blobs("files/f1/") == ["files/f1/a.pdf"]  # slash = that dir only
+
+
+def test_list_blobs_matches_a_full_key_as_a_prefix(tmp_path: Path) -> None:
+    """A prefix can name a file rather than a directory."""
+    store = local_store(tmp_path)
+    store.put_blob("files/f1/page_images/page_1.png", b"a")
+    store.put_blob("files/f1/page_images/page_10.png", b"b")
+    key = "files/f1/page_images/page_1.png"
+    assert store.list_blobs(key) == [key]
+    assert store.list_blobs("files/f1/page_images/page_1") == [key, key.replace("_1.", "_10.")]
+
+
 def test_list_blobs_accepts_a_partial_segment_prefix(tmp_path: Path) -> None:
     """An object store matches keys by raw string prefix, including mid-segment;
     narrowing the walk must not quietly drop that."""

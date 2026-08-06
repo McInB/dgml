@@ -174,36 +174,48 @@ class LocalStore(StorageService):
         return self._blob_path(key).is_file()
 
     def list_blobs(self, prefix: str) -> list[str]:
-        # Walk only the subtree the prefix names, not the whole workspace. The
-        # difference is not cosmetic: `dgml check` calls this once per file, so
-        # scanning from the root made it O(files x total blobs) — and it hashes
-        # every source PDF on top of that.
+        # Walk only what the prefix can reach, not the whole workspace. Not
+        # cosmetic: `dgml check` calls this once per file, so scanning from the
+        # root made it O(files x total blobs).
         root = self._root
-        base = self._scan_base(prefix)
-        if base is None:
-            return []
-        keys = [
-            rel
-            for path in base.rglob("*")
-            if path.is_file() and is_blob_key(rel := path.relative_to(root).as_posix())
-        ]
-        # Still filtered: `base` may be the prefix's parent when the prefix ends
-        # mid-segment (`files/ab` selecting `files/abc/...` is legal for an
-        # object store, so it must stay legal here).
+        keys: list[str] = []
+        for base in self._scan_bases(prefix):
+            if base.is_file():
+                if is_blob_key(rel := base.relative_to(root).as_posix()):
+                    keys.append(rel)
+                continue
+            keys.extend(
+                rel
+                for path in base.rglob("*")
+                if path.is_file() and is_blob_key(rel := path.relative_to(root).as_posix())
+            )
+        # Still string-filtered: a base may hold non-matching entries when the
+        # prefix ends mid-segment.
         return sorted(k for k in keys if k.startswith(prefix))
 
-    def _scan_base(self, prefix: str) -> Path | None:
-        """The shallowest directory that can contain every key under ``prefix``,
-        or ``None`` when nothing can match."""
+    def _scan_bases(self, prefix: str) -> list[Path]:
+        """Every place a key matching ``prefix`` can live.
+
+        Keys match by **raw string prefix**, S3-style, which is not the same as
+        "everything inside a directory". A prefix ending mid-segment also selects
+        *siblings*: ``files/ab`` matches ``files/abc/…`` and ``files/abd/…``
+        alike. Only a prefix ending in ``/`` is unambiguous — nothing outside
+        that one directory can match it — which is the fast, single-base case
+        every hot caller uses.
+
+        Getting this wrong is silent: narrowing to the directory when the prefix
+        merely *happens* to name one would quietly drop every sibling that
+        extends it, returning a short list rather than an error."""
         rel = prefix.strip("/")
         if not rel:
-            return self._root
+            return [self._root]
         candidate = self._root / _safe_rel(rel)
-        if candidate.is_dir():
-            return candidate
-        # A partial trailing segment (or a full key): its parent bounds the scan.
+        if prefix.endswith("/"):
+            return [candidate] if candidate.is_dir() else []
         parent = candidate.parent
-        return parent if parent.is_dir() else None
+        if not parent.is_dir():
+            return []
+        return sorted(p for p in parent.iterdir() if p.name.startswith(candidate.name))
 
     def upload_blob(self, key: str, src: Path) -> None:
         self._check_writable_blob(key)
