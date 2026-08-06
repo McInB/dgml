@@ -77,13 +77,11 @@ def test_update_key_questions(workspace: Workspace) -> None:
 
 def test_from_json_tolerates_missing_key_questions(workspace: Workspace) -> None:
     """A docset.json without `key_questions` must round-trip as an empty list."""
-    from dgml_core.storage import write_json_atomic
-
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     # A docset.json that omits the optional key_questions field.
     minimal = {"id": ds.id, "name": "Minimal", "description": "no key_questions"}
-    write_json_atomic(workspace.docset_json_path(ds.id), minimal)
+    workspace.store.put_doc("docsets", ds.id, minimal)
     loaded = store.get(ds.id)
     assert loaded.key_questions == []
     assert loaded.name == "Minimal"
@@ -147,7 +145,6 @@ def test_add_remove_file_reference(workspace: Workspace) -> None:
 def test_add_file_to_missing_docset(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     fid = "abcdefghijkl"
-    workspace.file_dir(fid).mkdir(parents=True)
     with pytest.raises(DocSetNotFound):
         store.add_file("nosuchdocset", fid)
 
@@ -163,7 +160,6 @@ def test_remove_file_not_assigned(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "abcdefghijkl"
-    workspace.file_dir(fid).mkdir(parents=True)
     with pytest.raises(FileNotFound):
         store.remove_file(ds.id, fid)
 
@@ -242,9 +238,9 @@ def test_schema_set_and_roundtrip(workspace: Workspace) -> None:
     assert store.has_schema(ds.id) is True
     assert store.get_schema(ds.id) == _RNC
     # Persisted on disk as extraction-schema.rnc in the docset directory.
-    on_disk = workspace.docset_schema_path(ds.id)
-    assert on_disk.name == "extraction-schema.rnc"
-    assert on_disk.read_text(encoding="utf-8") == _RNC
+    schema_key = workspace.docset_schema_key(ds.id)
+    assert schema_key.endswith("extraction-schema.rnc")
+    assert workspace.store.get_blob(schema_key).decode("utf-8") == _RNC
 
 
 def test_schema_set_replaces_previous(workspace: Workspace) -> None:
@@ -316,7 +312,6 @@ def test_list_files_rejects_empty_docset_id(workspace: Workspace) -> None:
 def test_add_file_rejects_empty_docset_id(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     fid = "abcdefghijkl"
-    workspace.file_dir(fid).mkdir(parents=True)
     with pytest.raises(InvalidArgument):
         store.add_file("", fid)
 

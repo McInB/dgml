@@ -30,8 +30,12 @@ from dgml_core.storage import Workspace
 
 
 def _legacy_assignment(ws: Workspace, docset_id: str, file_id: str) -> Path:
-    """An assignment as it was stored before assignment.json: a bare directory."""
-    pair = ws.docset_file_dir(docset_id, file_id)
+    """An assignment as it was stored before assignment.json: a bare directory.
+
+    Inherently LocalStore-specific — the migration exists to upgrade a legacy
+    on-disk layout, so this reaches the real directory via the kept
+    ``docsets_dir`` property (there is no store-API way to make an empty dir)."""
+    pair = ws.docsets_dir / docset_id / "files" / file_id
     pair.mkdir(parents=True, exist_ok=True)
     return pair
 
@@ -117,8 +121,8 @@ def test_migration_ignores_non_pair_directories(workspace: Workspace) -> None:
     or a stray nested directory must not become one."""
     store = DocSetStore(workspace)
     ds = store.create(name="X")
-    workspace.docset_files_dir(ds.id).mkdir(parents=True, exist_ok=True)
-    (workspace.docset_dir(ds.id) / "scratch").mkdir(parents=True, exist_ok=True)
+    (workspace.docsets_dir / ds.id / "files").mkdir(parents=True, exist_ok=True)
+    (workspace.docsets_dir / ds.id / "scratch").mkdir(parents=True, exist_ok=True)
 
     assert [r.changed for r in migrate_workspace(workspace)] == [0]
     assert workspace.store.find_docs("assignments", {}) == []

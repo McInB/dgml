@@ -32,7 +32,7 @@ from dgml_core.hybrid import (
 )
 from dgml_core.ocr import OcrConfig, OcrProvider, OcrProviderName
 from dgml_core.storage import Workspace
-from dgml_core.text_extraction import PAGE_TEXT_GLOB, TextMode
+from dgml_core.text_extraction import TextMode
 
 from .conftest import make_fake_png, write_ocr_config
 
@@ -603,8 +603,12 @@ def test_file_add_hybrid_records_hybrid_mode_and_summary(
     assert result.text_extraction["mode"] == "hybrid"
     assert result.text_extraction["pages_written"] == 2
 
-    text_dir = workspace.file_text_dir(result.record.id)
-    assert len(list(text_dir.glob(PAGE_TEXT_GLOB))) == 2
+    texts = [
+        k
+        for k in workspace.store.list_blobs(workspace.file_text_key(result.record.id))
+        if k.endswith(".json")
+    ]
+    assert len(texts) == 2
 
 
 # ---------------------------------------------------------------------------
