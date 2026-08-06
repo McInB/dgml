@@ -401,9 +401,6 @@ def test_transcribe_document_is_unconditionally_compact(
     monkeypatch.setattr(llm, "call_continued", fake_call_continued)
     monkeypatch.setattr(transcribe_mod, "_count_pages", lambda _b: 1)
     monkeypatch.setattr(document_mod, "slice_pdf", lambda b, _pages: b)
-    # The removed DGML_COMPACT_GENERATION flag is inert: a stale value is
-    # neither read nor validated, and compaction stays on regardless.
-    monkeypatch.setenv("DGML_COMPACT_GENERATION", "false")
 
     blocks = transcribe_mod.transcribe_document(
         b"%PDF-fake",

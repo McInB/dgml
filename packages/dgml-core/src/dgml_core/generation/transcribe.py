@@ -551,9 +551,6 @@ def transcribe_document(
     windows = document.iter_windows(total, window_size, overlap=0)
     log(f"{doc_name}: {total} pages → {len(windows)} window(s)")
     page_tokens = _page_token_lists(page_text_dir)
-    # Pass A always instructs the model in the compact tab-delimited grammar;
-    # parsing content-sniffs so a legacy JSON reply still decodes.
-    system_prompt = SYSTEM_PROMPT
 
     # One usage row per document, aggregating every window's call (gated on
     # --debug via the config). ``config`` is fresh per document in the pipeline,
@@ -590,7 +587,7 @@ def transcribe_document(
                     )
                 raw = llm.call_continued(
                     config,
-                    system_prompt=system_prompt,
+                    system_prompt=SYSTEM_PROMPT,
                     user_content=llm.build_user_content(
                         instruction_text=attempt_instr, pdf_bytes=pdf_slice
                     ),
