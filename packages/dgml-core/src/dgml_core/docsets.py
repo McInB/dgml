@@ -26,6 +26,7 @@ from .errors import (
 from .ids import new_id
 from .models import DocSet
 from .storage import Workspace
+from .workspace_ops import WorkspaceOps
 
 
 class DocSetStore:
@@ -101,18 +102,9 @@ class DocSetStore:
         return ds
 
     def delete(self, docset_id: str) -> None:
-        if not docset_id.strip():
-            raise InvalidArgument("docset id must not be empty")
-        self._require_docset(docset_id)
-        # Unassign every file (removing each pair's outputs), then the docset's own
-        # documents and blobs; delete_blobs runs last so it prunes the empty subtree.
-        # The underlying files under files/ are left untouched.
-        for assignment in self.ws.store.find_docs(
-            layout.Collection.ASSIGNMENTS, {"docset_id": docset_id}
-        ):
-            self.ws.unassign(docset_id, assignment["file_id"])
-        self.ws.store.delete_doc(layout.Collection.DOCSETS, docset_id)
-        self.ws.store.delete_blobs(f"docsets/{docset_id}/")
+        """Delete the docset and every assignment to it. The underlying files
+        are untouched. The cascade itself lives in :class:`WorkspaceOps`."""
+        WorkspaceOps(self.ws).delete_docset(docset_id)
 
     def list_files(self, docset_id: str) -> list[str]:
         if not docset_id.strip():
@@ -150,7 +142,7 @@ class DocSetStore:
             is None
         ):
             raise FileNotFound(f"file '{file_id}' is not assigned to docset '{docset_id}'")
-        self.ws.unassign(docset_id, file_id)
+        WorkspaceOps(self.ws).unassign(docset_id, file_id)
 
     # ---- extraction schema (docsets/<id>/extraction-schema.rnc, RELAX NG Compact) --
 

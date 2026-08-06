@@ -345,7 +345,15 @@ class StorageService(ABC):
         directories). Documents are left untouched — a cascade delete composes this
         with ``delete_doc`` / ``delete_docs`` in the caller, so each store only ever
         does operations native to it (no store needs the blob/document layout). A
-        prefix that matches nothing is a no-op."""
+        prefix that matches nothing is a no-op.
+
+        Callers must run this **last** in a cascade. That is the contract
+        :class:`dgml_core.workspace_ops.WorkspaceOps` implements — *the
+        authoritative record dies first*, so an interrupted cascade leaves
+        orphaned bytes (recoverable) rather than a record pointing at bytes that
+        are gone (indistinguishable from a valid entity). It also happens to be
+        what lets ``LocalStore`` prune the emptied container, which it can only
+        do once the documents beside those blobs are gone."""
 
 
 def _resolve_store_class(provider: str) -> type[StorageService]:

@@ -80,6 +80,7 @@ from .storage_service import (
     make_store,
     storage_fingerprint,
 )
+from .workspace_ops import WorkspaceOps
 
 __version__ = "0.1.0"
 
@@ -124,6 +125,7 @@ __all__ = [
     "Workspace",
     "WorkspaceMigrationFailed",
     "WorkspaceNotInitialized",
+    "WorkspaceOps",
     "__version__",
     "attest_file",
     "attest_file_version",

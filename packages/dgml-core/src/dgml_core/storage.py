@@ -259,23 +259,6 @@ class Workspace:
 
         return make_store(load_storage_config(self))
 
-    def unassign(self, docset_id: str, file_id: str) -> None:
-        """Remove a docset↔file assignment and that pair's generated artifacts
-        (the ``dgml.xml`` blob and the extraction-stats document). Composed from
-        native store ops — document deletes + a blob-prefix delete — so it is
-        correct on any backend, not just local disk.
-
-        Ordering is load-bearing. The **authoritative record dies first**, so a
-        crash mid-cascade leaves orphaned bytes (recoverable garbage) rather than
-        an assignment pointing at artifacts that are gone. ``delete_blobs`` runs
-        last for the same reason it does in the file/docset cascades: it is the
-        step that prunes the emptied container on ``LocalStore``.
-        """
-        pair = layout.pair_id(docset_id, file_id)
-        self.store.delete_doc(layout.Collection.ASSIGNMENTS, pair)
-        self.store.delete_doc(layout.Collection.EXTRACTION_STATS, pair)
-        self.store.delete_blobs(layout.docset_pair_prefix(docset_id, file_id))
-
     def read_meta(self) -> dict[str, Any]:
         """Return the parsed ``workspace.json`` mapping, or ``{}`` when the file
         is absent (workspaces created before ``workspace.json`` existed)."""

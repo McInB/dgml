@@ -51,6 +51,7 @@ from .pages import DEFAULT_DPI, RENDERER_NAME, pdf_page_count, render_pages
 from .storage import Workspace
 from .text_extraction import TextMode, classify_extraction_outcome, extract_text_digital
 from .text_extraction_config import load_text_extraction_config
+from .workspace_ops import WorkspaceOps
 
 PDF_MAGIC = b"%PDF-"
 
@@ -595,17 +596,6 @@ class FileStore:
         return message
 
     def delete(self, file_id: str) -> None:
-        if not file_id.strip():
-            raise InvalidArgument("file id must not be empty")
-        if self.ws.store.get_doc(layout.Collection.FILES, file_id) is None:
-            raise FileNotFound(f"file '{file_id}' not found")
-        # Unassign from every docset (removing each pair's marker + generated
-        # outputs), then delete the file's own documents and blobs. delete_blobs
-        # runs last so it prunes the now-empty file directory.
-        for assignment in self.ws.store.find_docs(
-            layout.Collection.ASSIGNMENTS, {"file_id": file_id}
-        ):
-            self.ws.unassign(assignment["docset_id"], file_id)
-        self.ws.store.delete_doc(layout.Collection.FILES, file_id)
-        self.ws.store.delete_doc(layout.Collection.ERRORS, file_id)
-        self.ws.store.delete_blobs(f"files/{file_id}/")
+        """Delete the file, unassigning it from every docset first. The cascade
+        itself lives in :class:`WorkspaceOps`."""
+        WorkspaceOps(self.ws).delete_file(file_id)
