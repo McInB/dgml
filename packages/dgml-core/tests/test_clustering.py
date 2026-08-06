@@ -27,6 +27,7 @@ from unittest.mock import patch
 
 import pytest
 from clustering.scenarios.base import UNKNOWN_NOISE_LABEL
+from dgml_core import layout
 from dgml_core.classification import ClassificationDecision
 from dgml_core.clustering import (
     DEFAULT_INCREMENTAL_NOVELTY_QUANTILE,
@@ -76,7 +77,7 @@ def _seed_page_image(workspace: Workspace, file_id: str) -> None:
 
     buf = BytesIO()
     Image.new("RGB", (8, 8), color=(123, 200, 50)).save(buf, "PNG")
-    workspace.store.put_blob(f"{workspace.file_pages_key(file_id)}/page_1.png", buf.getvalue())
+    workspace.store.put_blob(layout.file_page_image_key(file_id, 1), buf.getvalue())
 
 
 @pytest.fixture

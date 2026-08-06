@@ -34,7 +34,7 @@ from .conftest import needs_gs
 def _page_pngs(ws: Workspace, file_id: str) -> list[str]:
     """Rendered page-image blob keys for ``file_id`` — the store analogue of
     globbing ``page_*.png`` in the workspace's page-images dir."""
-    return [k for k in ws.store.list_blobs(ws.file_pages_key(file_id)) if k.endswith(".png")]
+    return [k for k in ws.store.list_blobs(layout.file_pages_prefix(file_id)) if k.endswith(".png")]
 
 
 @needs_gs
@@ -51,7 +51,7 @@ def test_clean_workspace_passes(workspace: Workspace, text_pdf: Path) -> None:
 @needs_gs
 def test_missing_pdf_detected(workspace: Workspace, sample_pdf: Path) -> None:
     f = FileStore(workspace).add(sample_pdf)
-    workspace.store.delete_blob(workspace.file_source_key(f.record.id, f.record.original_filename))
+    workspace.store.delete_blob(layout.file_source_key(f.record.id, f.record.original_filename))
     report = check_workspace(workspace)
     assert any(i.kind == "missing_pdf" for i in report.issues)
 
@@ -60,7 +60,7 @@ def test_missing_pdf_detected(workspace: Workspace, sample_pdf: Path) -> None:
 def test_hash_mismatch_detected(workspace: Workspace, sample_pdf: Path) -> None:
     f = FileStore(workspace).add(sample_pdf)
     workspace.store.put_blob(
-        workspace.file_source_key(f.record.id, f.record.original_filename),
+        layout.file_source_key(f.record.id, f.record.original_filename),
         b"%PDF-1.4\nbroken-but-still-pdf-magic",
     )
     report = check_workspace(workspace)
@@ -70,7 +70,7 @@ def test_hash_mismatch_detected(workspace: Workspace, sample_pdf: Path) -> None:
 @needs_gs
 def test_missing_pages_re_rendered(workspace: Workspace, sample_pdf: Path) -> None:
     f = FileStore(workspace).add(sample_pdf)
-    workspace.store.delete_blobs(f"{workspace.file_pages_key(f.record.id)}/")
+    workspace.store.delete_blobs(layout.file_pages_prefix(f.record.id))
     report = check_workspace(workspace)
     repaired = [i for i in report.issues if i.kind == "page_count_mismatch" and i.repaired]
     assert repaired, report.to_json()
@@ -106,7 +106,7 @@ def test_bogus_zero_page_count_re_renders_missing_pages(
     assert data is not None
     data["page_count"] = 0
     workspace.store.put_doc("files", f.record.id, data)
-    workspace.store.delete_blobs(f"{workspace.file_pages_key(f.record.id)}/")
+    workspace.store.delete_blobs(layout.file_pages_prefix(f.record.id))
 
     report = check_workspace(workspace)
     assert any(i.kind == "page_count_mismatch" and i.repaired for i in report.issues), (
@@ -118,7 +118,7 @@ def test_bogus_zero_page_count_re_renders_missing_pages(
 @needs_gs
 def test_permanent_error_blocks_retry(workspace: Workspace, sample_pdf: Path) -> None:
     f = FileStore(workspace).add(sample_pdf)
-    workspace.store.delete_blobs(f"{workspace.file_pages_key(f.record.id)}/")
+    workspace.store.delete_blobs(layout.file_pages_prefix(f.record.id))
     append_recorded_error(
         workspace,
         f.record.id,
@@ -137,7 +137,7 @@ def test_permanent_error_blocks_retry(workspace: Workspace, sample_pdf: Path) ->
 @needs_gs
 def test_retry_errors_clears_and_retries(workspace: Workspace, sample_pdf: Path) -> None:
     f = FileStore(workspace).add(sample_pdf)
-    workspace.store.delete_blobs(f"{workspace.file_pages_key(f.record.id)}/")
+    workspace.store.delete_blobs(layout.file_pages_prefix(f.record.id))
     append_recorded_error(
         workspace,
         f.record.id,
@@ -182,7 +182,7 @@ def test_corrupt_file_metadata_does_not_crash(workspace: Workspace) -> None:
     # dict (can't write invalid JSON) and put_blob refuses a document key. This is
     # a LocalStore-specific failure mode (the manifest is a JSON file that get_doc
     # parses); local_path is the sanctioned filesystem escape for such fixtures.
-    workspace.local_path(f"{workspace.file_key(fid)}/file.json").write_text(
+    workspace.local_path(f"{layout.file_prefix(fid)}file.json").write_text(
         "{not valid json", encoding="utf-8"
     )
     report = check_workspace(workspace)
@@ -197,7 +197,7 @@ def test_corrupt_docset_metadata_does_not_crash(workspace: Workspace) -> None:
     workspace.store.put_blob(f"docsets/{did}/extraction-schema.rnc", b"start = text\n")
     # Corrupt manifest on disk — LocalStore-specific; see
     # test_corrupt_file_metadata_does_not_crash for the rationale.
-    workspace.local_path(f"{workspace.docset_key(did)}/docset.json").write_text(
+    workspace.local_path(f"{layout.docset_prefix(did)}docset.json").write_text(
         "{not valid json", encoding="utf-8"
     )
     report = check_workspace(workspace)
@@ -217,7 +217,7 @@ def test_corrupt_metadata_alongside_clean_continues_walk(
     workspace.store.put_blob(f"files/{bad}/report.pdf", b"%PDF-1.4\n")
     # Corrupt manifest on disk — LocalStore-specific; see
     # test_corrupt_file_metadata_does_not_crash for the rationale.
-    workspace.local_path(f"{workspace.file_key(bad)}/file.json").write_text(
+    workspace.local_path(f"{layout.file_prefix(bad)}file.json").write_text(
         "{not json", encoding="utf-8"
     )
     workspace.store.put_blob(f"files/{good}/report.pdf", b"%PDF-1.4\n")  # blob-orphan: no manifest
@@ -243,7 +243,7 @@ def test_check_no_longer_falls_back_to_any_pdf(workspace: Workspace) -> None:
             "page_count": 1,
         },
     )
-    workspace.store.put_blob(workspace.file_source_key(fid, "something_else.pdf"), b"%PDF-1.4\n")
+    workspace.store.put_blob(layout.file_source_key(fid, "something_else.pdf"), b"%PDF-1.4\n")
     report = check_workspace(workspace)
     assert any(i.target_id == fid and i.kind == "missing_pdf" for i in report.issues)
 
@@ -258,7 +258,7 @@ def test_unattributed_computed_field_flagged(workspace: Workspace, text_pdf: Pat
     ds = store.create(name="X")
     store.add_file(ds.id, f.record.id)
 
-    xml_key = workspace.file_dgml_xml_key(ds.id, f.record.id, "doc")
+    xml_key = layout.dgml_xml_key(ds.id, f.record.id, "doc")
     workspace.store.put_blob(
         xml_key,
         (
@@ -312,7 +312,7 @@ def test_reextract_hybrid_threads_debug(
 
     fid = "fid"
     workspace.store.put_blob(f"files/{fid}/doc.pdf", b"%PDF-1.4\n")
-    source_key = workspace.file_source_key(fid, "doc.pdf")
+    source_key = layout.file_source_key(fid, "doc.pdf")
     _reextract(workspace, source_key, fid, "hybrid", verbose=False, debug=debug)
 
     assert captured["debug"] is debug

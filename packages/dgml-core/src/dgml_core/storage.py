@@ -92,52 +92,13 @@ class Workspace:
         have a real path in hand and need the key for it."""
         return path.resolve().relative_to(self.root).as_posix()
 
-    # ---- Store keys for workspace artifacts ----
-    #
-    # A key is the workspace-root-relative POSIX string a blob lives at; callers
-    # hand these straight to ``store`` (``list_blobs`` / ``get_blob`` / …). They
-    # are the store-native address. Each one delegates to a
-    # :mod:`dgml_core.layout` builder — layout is the single source of the
-    # on-disk shape, and these are the convenience spelling of it. A
-    # filesystem-bound caller composes ``local_path`` with a ``layout`` key
-    # builder directly.
-    #
-    # ``*_key`` never carries a trailing slash; the ``layout.*_prefix`` builders
-    # do (it is load-bearing for prefix matching in ``list_blobs``), so the
-    # directory-shaped keys below strip it.
-
-    def file_key(self, file_id: str) -> str:
-        return layout.file_prefix(file_id).rstrip("/")
-
-    def file_source_key(self, file_id: str, filename: str) -> str:
-        return layout.file_source_key(file_id, filename)
-
-    def file_pages_key(self, file_id: str) -> str:
-        return layout.file_pages_prefix(file_id).rstrip("/")
-
-    def file_text_key(self, file_id: str) -> str:
-        return layout.file_text_prefix(file_id).rstrip("/")
-
-    def docset_key(self, docset_id: str) -> str:
-        return layout.docset_prefix(docset_id).rstrip("/")
-
-    def docset_files_key(self, docset_id: str) -> str:
-        return layout.docset_files_prefix(docset_id).rstrip("/")
-
-    def docset_file_key(self, docset_id: str, file_id: str) -> str:
-        return layout.docset_pair_prefix(docset_id, file_id).rstrip("/")
-
-    def docset_schema_key(self, docset_id: str) -> str:
-        return layout.docset_extraction_schema_key(docset_id)
-
-    def docset_generation_schema_key(self, docset_id: str) -> str:
-        return layout.docset_generation_schema_key(docset_id)
-
-    def docset_full_schema_key(self, docset_id: str) -> str:
-        return layout.docset_full_schema_key(docset_id)
-
-    def file_dgml_xml_key(self, docset_id: str, file_id: str, file_stem: str) -> str:
-        return layout.dgml_xml_key(docset_id, file_id, file_stem)
+    # Naming workspace artifacts is :mod:`dgml_core.layout`'s job, not this
+    # class's: a key is root-relative, so it does not need a workspace to exist.
+    # Callers build one with a ``layout`` builder and hand it straight to
+    # ``store`` (``list_blobs`` / ``get_blob`` / …); the filesystem-bound few
+    # compose it with ``local_path``. Prefer the ``layout.*_prefix`` spelling for
+    # anything prefix-matched — the trailing slash is what keeps ``files/ab``
+    # from also selecting ``files/abc``.
 
     def read_page_text(self, file_id: str, page: int) -> dict[str, Any] | None:
         """The per-page word-box JSON for ``page`` of ``file_id`` (a blob),

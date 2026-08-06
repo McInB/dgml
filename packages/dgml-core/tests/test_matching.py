@@ -16,6 +16,7 @@ import json
 from typing import Any
 
 import pytest
+from dgml_core import layout
 from dgml_core.matching import (
     _array_layout_key,
     _walk_leaves,
@@ -50,7 +51,7 @@ def _seed_file_and_text(
     )
     workspace.store.put_doc("files", file_id, record.to_json())
     workspace.store.put_blob(
-        f"{workspace.file_text_key(file_id)}/page_{page}.json",
+        layout.file_page_text_key(file_id, page),
         json.dumps(
             {"file_id": file_id, "page": page, "width": width, "height": height, "words": words}
         ).encode(),

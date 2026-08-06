@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from dgml_core import layout
 from dgml_core.errors import OcrFailed
 from dgml_core.files import FileStore
 from dgml_core.hybrid import (
@@ -605,7 +606,7 @@ def test_file_add_hybrid_records_hybrid_mode_and_summary(
 
     texts = [
         k
-        for k in workspace.store.list_blobs(workspace.file_text_key(result.record.id))
+        for k in workspace.store.list_blobs(layout.file_text_prefix(result.record.id))
         if k.endswith(".json")
     ]
     assert len(texts) == 2

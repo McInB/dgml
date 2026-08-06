@@ -296,7 +296,7 @@ def get_page_words(
 
 def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
     """Return the bytes of the single ``*.pdf`` stored for ``file_id``."""
-    keys = workspace.store.list_blobs(workspace.file_key(file_id))
+    keys = workspace.store.list_blobs(layout.file_prefix(file_id))
     pdfs = [k for k in keys if k.endswith(".pdf")]
     if not pdfs:
         raise FileNotFound(f"file '{file_id}' has no source PDF")

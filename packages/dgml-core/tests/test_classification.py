@@ -18,6 +18,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from dgml_core import layout
 from dgml_core.classification import (
     DEFAULT_MAX_PAGES,
     ClassificationConfig,
@@ -67,7 +68,7 @@ def _seed_file(workspace: Workspace, file_id: str, *, filename: str = "doc.pdf")
 
 
 def _seed_page_image(workspace: Workspace, file_id: str, page: int, content: bytes) -> None:
-    workspace.store.put_blob(f"{workspace.file_pages_key(file_id)}/page_{page}.png", content)
+    workspace.store.put_blob(layout.file_page_image_key(file_id, page), content)
 
 
 def _tool_call_response(name: str, arguments: dict[str, Any]) -> SimpleNamespace:

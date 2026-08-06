@@ -2160,11 +2160,14 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     # The docset prefix is always the output base — schema.json,
     # coverage_report.json, cache/, and semantic/ live under it. Each file's
     # final .dgml.xml lands at its per-(docset, file) key (see
-    # ws.file_dgml_xml_key) so placement is deterministic and stable.
+    # layout.dgml_xml_key) so placement is deterministic and stable.
     # The docset's store key (``docsets/<id>``) — the prefix the cache, coverage
     # report, and per-file DGML live under. Reported to the user and used to
     # build child keys; no directory is created here (the store owns that).
-    output_key = ws.docset_key(args.docset_id)
+    # Slash-stripped because it is echoed as ``output_key`` in the JSON result,
+    # where the trailing-slash form would be a breaking change; nothing
+    # prefix-matches on it.
+    output_key = layout.docset_prefix(args.docset_id).rstrip("/")
 
     # Resolve each assigned file into exactly one bucket so the summary counts
     # always sum to `total`: skipped (already converted), failed (source
@@ -2193,8 +2196,8 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         # Both are store blobs under the file's prefix; materialized to a real
         # path for transcription just before convert_batch (below).
         if not (
-            ws.store.blob_exists(ws.file_source_key(fid, f"{stem}.pdf"))
-            or ws.store.blob_exists(ws.file_source_key(fid, name))
+            ws.store.blob_exists(layout.file_source_key(fid, f"{stem}.pdf"))
+            or ws.store.blob_exists(layout.file_source_key(fid, name))
         ):
             failed_results.append(
                 _file_result(
@@ -2482,7 +2485,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 # dir (zero-copy); a remote store downloads it for the batch.
                 pdf_paths: list[Path | str] = [
                     pt_stack.enter_context(
-                        ws.store.materialize_dir(ws.file_key(filename_to_fid[nm]))
+                        ws.store.materialize_dir(layout.file_prefix(filename_to_fid[nm]))
                     )
                     / nm
                     for nm in convert_names

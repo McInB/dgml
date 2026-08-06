@@ -154,21 +154,21 @@ def test_traversal_still_raises_value_error(tmp_path: Path) -> None:
 def test_local_path_agrees_with_keys(tmp_path: Path) -> None:
     """``local_path`` must resolve a key to its location under the root, and
     ``blob_key`` must invert it — the drift the shared layout exists to prevent.
-    ``Workspace`` exposes only *keys* now (the ``*_key`` methods); the filesystem
-    escape is ``local_path`` composed with a ``layout`` builder."""
+    ``Workspace`` names nothing itself: every key comes from a ``layout``
+    builder, and the filesystem escape is ``local_path`` composed with one."""
     ws = Workspace(root=tmp_path)
     keys = [
-        ws.file_key("f1"),
-        ws.file_pages_key("f1"),
-        ws.file_text_key("f1"),
-        ws.file_source_key("f1", "doc.pdf"),
-        ws.docset_key("d1"),
-        ws.docset_files_key("d1"),
-        ws.docset_file_key("d1", "f1"),
-        ws.docset_schema_key("d1"),
-        ws.docset_full_schema_key("d1"),
-        ws.docset_generation_schema_key("d1"),
-        ws.file_dgml_xml_key("d1", "f1", "r"),
+        layout.file_prefix("f1"),
+        layout.file_pages_prefix("f1"),
+        layout.file_text_prefix("f1"),
+        layout.file_source_key("f1", "doc.pdf"),
+        layout.docset_prefix("d1"),
+        layout.docset_files_prefix("d1"),
+        layout.docset_pair_prefix("d1", "f1"),
+        layout.docset_extraction_schema_key("d1"),
+        layout.docset_full_schema_key("d1"),
+        layout.docset_generation_schema_key("d1"),
+        layout.dgml_xml_key("d1", "f1", "r"),
         layout.file_page_image_key("f1", 1),
         layout.file_page_text_key("f1", 1),
     ]

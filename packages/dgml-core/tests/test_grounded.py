@@ -18,6 +18,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from dgml_core import layout
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
     AuthError,
@@ -98,7 +99,7 @@ def _seed_file(
         text_mode="digital",
     )
     workspace.store.put_doc("files", file_id, record.to_json())
-    workspace.store.put_blob(workspace.file_source_key(file_id, filename), pdf_bytes)
+    workspace.store.put_blob(layout.file_source_key(file_id, filename), pdf_bytes)
 
 
 def _seed_page_text(
@@ -125,17 +126,13 @@ def _seed_page_text(
         "height": height,
         "words": words,
     }
-    workspace.store.put_blob(
-        f"{workspace.file_text_key(file_id)}/page_{page}.json", json.dumps(payload).encode()
-    )
+    workspace.store.put_blob(layout.file_page_text_key(file_id, page), json.dumps(payload).encode())
 
 
 def _seed_page_image(workspace: Workspace, file_id: str, page: int) -> None:
     """Drop a minimal PNG so phase-3 ``image_path.exists()`` passes.
     Bytes never reach a real decoder — litellm is mocked in these tests."""
-    workspace.store.put_blob(
-        f"{workspace.file_pages_key(file_id)}/page_{page}.png", b"\x89PNG\r\n\x1a\n"
-    )
+    workspace.store.put_blob(layout.file_page_image_key(file_id, page), b"\x89PNG\r\n\x1a\n")
 
 
 def _tool_call_response(
@@ -742,7 +739,7 @@ def test_extract_values_direct_submit(workspace: Workspace) -> None:
     # Persisted as a dg:extraction element in the file's core <stem>.dgml.xml
     # (no separate file). With no prior document tree, mode is "extraction".
     assert result.mode == "extraction"
-    assert result.xml_key == workspace.file_dgml_xml_key(ds_id, fid, "doc")
+    assert result.xml_key == layout.dgml_xml_key(ds_id, fid, "doc")
     xml = workspace.store.get_blob(result.xml_key).decode("utf-8")
     assert "<dg:extraction>" in xml
     vocab = parse_rnc(DocSetStore(workspace).get_schema(ds_id))
@@ -759,7 +756,7 @@ def test_extract_values_full_extraction_embeds_in_existing_tree(workspace: Works
 
     # Simulate a prior `docset generate`: a core file with a document tree.
     workspace.store.put_blob(
-        workspace.file_dgml_xml_key(ds_id, fid, "doc"),
+        layout.dgml_xml_key(ds_id, fid, "doc"),
         b'<?xml version="1.0" encoding="utf-8"?>\n'
         b'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#">\n'
         b"  <dg:chunk>the generated document tree</dg:chunk>\n"
@@ -775,8 +772,8 @@ def test_extract_values_full_extraction_embeds_in_existing_tree(workspace: Works
         result = extract_values(workspace, ds_id, fid, config=config)
 
     assert result.mode == "full-extraction"
-    assert result.xml_key == workspace.file_dgml_xml_key(ds_id, fid, "doc")
-    xml = workspace.store.get_blob(workspace.file_dgml_xml_key(ds_id, fid, "doc")).decode("utf-8")
+    assert result.xml_key == layout.dgml_xml_key(ds_id, fid, "doc")
+    xml = workspace.store.get_blob(layout.dgml_xml_key(ds_id, fid, "doc")).decode("utf-8")
     assert "the generated document tree" in xml  # tree preserved
     assert xml.count("<dg:extraction>") == 1  # extraction added once
 
@@ -970,7 +967,7 @@ def test_extract_values_write_stats_false_suppresses_file(workspace: Workspace) 
         extract_values(workspace, ds_id, fid, config=config, write_stats=False)
 
     assert workspace.store.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
-    assert workspace.store.blob_exists(workspace.file_dgml_xml_key(ds_id, fid, "doc"))
+    assert workspace.store.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc"))
 
 
 def test_extract_values_no_tool_call_errors(workspace: Workspace) -> None:

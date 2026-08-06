@@ -29,6 +29,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from dgml_core import layout
 from dgml_core.classification import ClassificationConfig
 from dgml_core.clustering import (
     _resolve_method,
@@ -72,7 +73,7 @@ def _seed_file(workspace: Workspace, file_id: str) -> None:
 
 def _seed_page_image(workspace: Workspace, file_id: str) -> None:
     """Write a valid single-page PNG so ``gather_file_pages`` finds one page."""
-    workspace.store.put_blob(f"{workspace.file_pages_key(file_id)}/page_1.png", make_fake_png(8, 8))
+    workspace.store.put_blob(layout.file_page_image_key(file_id, 1), make_fake_png(8, 8))
 
 
 def _seed(workspace: Workspace, file_id: str, *, with_page: bool = True) -> None:

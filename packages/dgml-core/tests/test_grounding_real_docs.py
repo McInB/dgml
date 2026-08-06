@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from dgml_core import layout
 from dgml_core.matching import _walk_leaves, path_to_str, run_phase2_matching
 from dgml_core.storage import Workspace
 
@@ -99,9 +100,9 @@ def _load_workspace(tmp_path: Path, case: str) -> tuple[Workspace, dict[str, Any
     ws = Workspace(root=tmp_path / "ws")
     ws.init()
     file_id = inputs["source"]["file_id"]
-    text_key = ws.file_text_key(file_id)
+    text_prefix = layout.file_text_prefix(file_id)
     for page_text in sorted((FIXTURES / case / "page_text").glob("page_*.json")):
-        ws.store.put_blob(f"{text_key}/{page_text.name}", page_text.read_bytes())
+        ws.store.put_blob(f"{text_prefix}{page_text.name}", page_text.read_bytes())
     return ws, inputs
 
 

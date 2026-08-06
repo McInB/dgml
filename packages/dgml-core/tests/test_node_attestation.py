@@ -22,6 +22,7 @@ import hashlib
 import json
 
 import pytest
+from dgml_core import layout
 from dgml_core.errors import DocSetNotFound, FileNotFound, InvalidArgument, NotFoundError
 from dgml_core.merkle import merkle_root, proof_from_json, proof_to_json
 from dgml_core.node_attestation import (
@@ -73,7 +74,7 @@ def _seed(ws: Workspace, file_id: str = "f001", docset_id: str = "ds01") -> None
         docset_id,
         {"id": docset_id, "name": "Test", "description": "", "key_questions": []},
     )
-    ws.store.put_blob(ws.file_dgml_xml_key(docset_id, file_id, "ledger"), DGML_XML)
+    ws.store.put_blob(layout.dgml_xml_key(docset_id, file_id, "ledger"), DGML_XML)
 
 
 # --- export -------------------------------------------------------------------
@@ -212,7 +213,7 @@ def test_prove_detects_node_tamper(workspace: Workspace) -> None:
     att = export_node(workspace, "f001", "ds01", xpath="/dg:chunk/docset:Header")
 
     workspace.store.put_blob(
-        workspace.file_dgml_xml_key("ds01", "f001", "ledger"),
+        layout.dgml_xml_key("ds01", "f001", "ledger"),
         DGML_XML.replace(b"Resident Ledger", b"TAMPERED"),
     )
 
@@ -234,7 +235,7 @@ def test_prove_raises_when_document_restructured(workspace: Workspace) -> None:
     _seed(workspace)
     att = export_node(workspace, "f001", "ds01", leaf_index=8)
     workspace.store.put_blob(
-        workspace.file_dgml_xml_key("ds01", "f001", "ledger"),
+        layout.dgml_xml_key("ds01", "f001", "ledger"),
         b"<dg:chunk xmlns:dg='http://dgml.io/ns/dg#'/>",
     )
     with pytest.raises(ValueError, match="out of range"):

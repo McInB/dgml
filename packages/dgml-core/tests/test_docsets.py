@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import pytest
+from dgml_core import layout
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
     DocSetNotFound,
@@ -239,7 +240,7 @@ def test_schema_set_and_roundtrip(workspace: Workspace) -> None:
     assert store.has_schema(ds.id) is True
     assert store.get_schema(ds.id) == _RNC
     # Persisted on disk as extraction-schema.rnc in the docset directory.
-    schema_key = workspace.docset_schema_key(ds.id)
+    schema_key = layout.docset_extraction_schema_key(ds.id)
     assert schema_key.endswith("extraction-schema.rnc")
     assert workspace.store.get_blob(schema_key).decode("utf-8") == _RNC
 

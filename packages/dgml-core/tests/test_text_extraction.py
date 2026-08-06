@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 import pytest
+from dgml_core import layout
 from dgml_core.consistency import check_workspace
 from dgml_core.errors import load_recorded_errors
 from dgml_core.files import FileStore
@@ -32,7 +33,7 @@ from .conftest import PAGE_HEIGHT_PTS, PAGE_WIDTH_PTS
 def _page_texts(ws: Workspace, file_id: str) -> list[str]:
     """page_text blob keys for ``file_id`` — the store analogue of globbing
     ``page_*.json`` in the workspace's page-text dir."""
-    return [k for k in ws.store.list_blobs(ws.file_text_key(file_id)) if k.endswith(".json")]
+    return [k for k in ws.store.list_blobs(layout.file_text_prefix(file_id)) if k.endswith(".json")]
 
 
 def test_extract_text_digital_writes_per_page_json(tmp_path: Path, text_pdf: Path) -> None:
@@ -160,7 +161,7 @@ def test_check_partial_empty_re_extract_records_non_permanent(
     signal must be re-recorded (not silently reported as 'repaired')."""
     f = FileStore(workspace).add(mixed_pdf)
     # Drop the page_text JSONs so check is forced to re-extract.
-    workspace.store.delete_blobs(f"{workspace.file_text_key(f.record.id)}/")
+    workspace.store.delete_blobs(layout.file_text_prefix(f.record.id))
 
     report = check_workspace(workspace)
     issues = [i for i in report.issues if i.kind == "page_text_count_mismatch"]
@@ -202,7 +203,7 @@ def test_check_retry_errors_re_runs_text_extraction(workspace: Workspace, sample
 
     # Delete the page_text JSONs to simulate missing extraction output and
     # force the consistency check to attempt re-extraction.
-    workspace.store.delete_blobs(f"{workspace.file_text_key(f.record.id)}/")
+    workspace.store.delete_blobs(layout.file_text_prefix(f.record.id))
 
     # With --retry-errors: the marker is cleared; re-extraction runs and (for
     # a blank PDF) re-records the same permanent failure.
@@ -218,7 +219,7 @@ def test_check_repairs_missing_page_text_for_digital_pdf(
     --retry-errors should re-extract and mark the issue repaired."""
     f = FileStore(workspace).add(text_pdf)
     assert f.text_extraction_error is None
-    workspace.store.delete_blobs(f"{workspace.file_text_key(f.record.id)}/")
+    workspace.store.delete_blobs(layout.file_text_prefix(f.record.id))
 
     report = check_workspace(workspace)
     repaired = [i for i in report.issues if i.kind == "page_text_count_mismatch" and i.repaired]
@@ -239,7 +240,7 @@ def test_check_re_extracts_at_the_files_own_dpi(workspace: Workspace, text_pdf: 
     assert before is not None
     assert before["width"] == round(PAGE_WIDTH_PTS * 150 / 72)
 
-    workspace.store.delete_blobs(f"{workspace.file_text_key(f.record.id)}/")
+    workspace.store.delete_blobs(layout.file_text_prefix(f.record.id))
     check_workspace(workspace)
 
     after = workspace.read_page_text(f.record.id, 1)
@@ -259,7 +260,7 @@ def test_check_falls_back_to_the_default_dpi_for_legacy_records(
     del data["page_image_dpi"]
     workspace.store.put_doc("files", f.record.id, data)
 
-    workspace.store.delete_blobs(f"{workspace.file_text_key(f.record.id)}/")
+    workspace.store.delete_blobs(layout.file_text_prefix(f.record.id))
     check_workspace(workspace)
 
     page = workspace.read_page_text(f.record.id, 1)

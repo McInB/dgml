@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 import pytest
+from dgml_core import layout
 from dgml_core.style import (
     build_style,
     fontname_is_bold,
@@ -264,7 +265,7 @@ def test_annotate_style_from_image(tmp_path: Path, monkeypatch) -> None:  # type
     ws = Workspace(root=tmp_path / "ws")
     ws.init()
     file_id = "ocrfile12345"
-    ws.store.put_blob(f"{ws.file_pages_key(file_id)}/page_1.png", b"\x89PNG\r\n\x1a\n fake")
+    ws.store.put_blob(layout.file_page_image_key(file_id, 1), b"\x89PNG\r\n\x1a\n fake")
 
     root = etree.fromstring(
         '<dg:chunk xmlns:dg="http://dgml.io/ns/dg#">'
@@ -443,7 +444,7 @@ def test_ground_honors_style_config_for_ocr(tmp_path: Path, monkeypatch) -> None
         ).to_json(),
     )
     ws.store.put_blob(
-        f"{ws.file_text_key(fid)}/page_1.json",
+        layout.file_page_text_key(fid, 1),
         json.dumps(
             {
                 "file_id": fid,
@@ -458,7 +459,7 @@ def test_ground_honors_style_config_for_ocr(tmp_path: Path, monkeypatch) -> None
             }
         ).encode(),
     )
-    ws.store.put_blob(f"{ws.file_pages_key(fid)}/page_1.png", b"\x89PNG\r\n\x1a\n fake")
+    ws.store.put_blob(layout.file_page_image_key(fid, 1), b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
         dump_toml({"style": {"enabled": True, "model": "anthropic/claude-haiku-4-5"}}),
         encoding="utf-8",
@@ -514,7 +515,7 @@ def _seed_ocr_style_workspace(tmp_path: Path):  # type: ignore[no-untyped-def]
         ).to_json(),
     )
     ws.store.put_blob(
-        f"{ws.file_text_key(fid)}/page_1.json",
+        layout.file_page_text_key(fid, 1),
         json.dumps(
             {
                 "file_id": fid,
@@ -525,7 +526,7 @@ def _seed_ocr_style_workspace(tmp_path: Path):  # type: ignore[no-untyped-def]
             }
         ).encode(),
     )
-    ws.store.put_blob(f"{ws.file_pages_key(fid)}/page_1.png", b"\x89PNG\r\n\x1a\n fake")
+    ws.store.put_blob(layout.file_page_image_key(fid, 1), b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
         dump_toml({"style": {"enabled": True, "model": "anthropic/claude-haiku-4-5"}}),
         encoding="utf-8",
@@ -604,7 +605,7 @@ def test_ground_skips_style_config_when_disabled(tmp_path: Path, monkeypatch) ->
         ).to_json(),
     )
     ws.store.put_blob(
-        f"{ws.file_text_key(fid)}/page_1.json",
+        layout.file_page_text_key(fid, 1),
         json.dumps(
             {
                 "file_id": fid,
@@ -659,7 +660,7 @@ def test_style_credential_failure_preserves_grounding(tmp_path: Path, monkeypatc
         ).to_json(),
     )
     ws.store.put_blob(
-        f"{ws.file_text_key(fid)}/page_1.json",
+        layout.file_page_text_key(fid, 1),
         json.dumps(
             {
                 "file_id": fid,
@@ -673,7 +674,7 @@ def test_style_credential_failure_preserves_grounding(tmp_path: Path, monkeypatc
             }
         ).encode(),
     )
-    ws.store.put_blob(f"{ws.file_pages_key(fid)}/page_1.png", b"\x89PNG\r\n\x1a\n fake")
+    ws.store.put_blob(layout.file_page_image_key(fid, 1), b"\x89PNG\r\n\x1a\n fake")
     # `api_key_env` points at an env var we make sure is unset -> resolve_api_key
     # raises AuthError inside the style pass at grounding time.
     monkeypatch.delenv("DGML_STYLE_KEY_MISSING", raising=False)

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
+from dgml_core import layout
 from dgml_core.conversion import ConverterConfig, DocConverter
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
@@ -88,11 +89,11 @@ def test_convertible_source_persists_converted_pdf(
     assert result.record.original_filename == "foo.docx"
     # original preserved + converted PDF persisted, both as blobs under the file
     assert (
-        store.ws.store.get_blob(store.ws.file_source_key(result.record.id, "foo.docx"))
+        store.ws.store.get_blob(layout.file_source_key(result.record.id, "foo.docx"))
         == b"original docx bytes"
     )
     assert (
-        store.ws.store.get_blob(store.ws.file_source_key(result.record.id, "foo.pdf"))
+        store.ws.store.get_blob(layout.file_source_key(result.record.id, "foo.pdf"))
         == b"%PDF-stub:foo.docx"
     )
     assert result.record.pdf_converter == "stub-docx"  # converter named on the record
@@ -138,7 +139,9 @@ def _png_size(data: bytes) -> tuple[int, int]:
 def _page_pngs(ws: Workspace, file_id: str) -> list[str]:
     """Sorted page-image blob keys for ``file_id`` (store analogue of globbing
     page_*.png in the page-images dir)."""
-    return sorted(k for k in ws.store.list_blobs(ws.file_pages_key(file_id)) if k.endswith(".png"))
+    return sorted(
+        k for k in ws.store.list_blobs(layout.file_pages_prefix(file_id)) if k.endswith(".png")
+    )
 
 
 def test_add_rejects_nonpositive_dpi(store: FileStore, sample_pdf: Path) -> None:

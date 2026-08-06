@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from dgml_core import layout
 from dgml_core.errors import FileNotFound, GroundingFailed
 from dgml_core.models import FileRecord
 from dgml_core.storage import Workspace
@@ -67,7 +68,7 @@ def _seed_pages(workspace: Workspace, pages: dict[int, list[dict[str, Any]]]) ->
     workspace.store.put_doc("files", FILE_ID, record.to_json())
     for page, words in pages.items():
         workspace.store.put_blob(
-            f"{workspace.file_text_key(FILE_ID)}/page_{page}.json",
+            layout.file_page_text_key(FILE_ID, page),
             json.dumps(
                 {"file_id": FILE_ID, "page": page, "width": 1000, "height": 1000, "words": words}
             ).encode(),
