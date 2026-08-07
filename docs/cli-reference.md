@@ -37,7 +37,7 @@ or after a command group (`dgml docset --format text list`).
 
 | Flag             | Description |
 |------------------|-------------|
-| `--workspace`    | Override the workspace root. Default: `$DGML_HOME` then `./dgml-workspace`. |
+| `--workspace`    | Override the workspace to open — a filesystem path **or** a `ws_…` id from `dgml workspace list`. A registered id resolves through the per-machine registry to its root; anything else is treated as a path. Default: `$DGML_HOME` then `./dgml-workspace`. |
 | `--format`       | `json` (default) or `text`. |
 | `--verbose`      | Emit informational diagnostics to stderr. Controls hybrid text-mode warnings (digital/OCR conflicts, OCR misses) and the per-page merge summary, plus the `docset generate` pipeline's progress lines. Off by default — stderr stays reserved for error envelopes. |
 | `--debug`        | Keep intermediate debug files in the workspace **and** record LLM cost/token telemetry to `<workspace>/usage.jsonl`. Off by default, so only final files (and the small functional cache the next run reloads) are kept. With `--debug` off: no `usage.jsonl` rows are written for **any** operation (classify, cluster, transcribe, label, links, schema/value extraction, hybrid merge); `docset generate` skips the debug-only `cache/` artifacts (raw LLM dumps, `*.concept.xml`/`*.semantic.xml`, prompt listings) and `coverage_report.json`; and the in-place grounding pass skips the `<stem>.dgml.grounding_stats.json` sidecar. The functional `cache/` files (`*_blocks.json`, `label_*_cNN_raw.json`, `concept_roster.json`) are **always** written — incremental generation reloads them. Pass `--debug` to retain the debug artifacts and log usage. (Coverage summaries still print on stderr under `--verbose` either way.) |
@@ -98,8 +98,11 @@ omitted, the root resolves in the usual order (global `--workspace` → `$DGML_H
 
 Steps:
 1. Creates `docsets/` and `files/`.
-2. Writes the workspace identity (`name` + `organization`) to
-   `<workspace>/workspace.json`.
+2. Writes the workspace identity (`name` + `organization` + a freshly-minted
+   stable `workspace_id`) to `<workspace>/workspace.json`.
+3. Indexes the workspace in this machine's registry
+   (`~/.config/dgml/workspaces.json`) so it can be listed by
+   `dgml workspace list` and opened by id (`dgml --workspace <workspace_id>`).
 
 Config is owned by `dgml init` and lives at the user level — `workspace create`
 does **not** create or touch it (nor does it write a per-workspace
@@ -120,6 +123,7 @@ Output (JSON):
 ```json
 {
   "workspace": "…/dgml-workspace",
+  "workspace_id": "ws_7f3k9q2m4b8xr5wa",
   "name": "dgml-workspace",
   "organization": "Acme",
   "initialized": true,
@@ -128,9 +132,62 @@ Output (JSON):
 }
 ```
 
-`config_present` reports whether the user-level config exists. When it is
-`false`, an extra `next_action` field is present and the stderr warning above is
-emitted — but the workspace is created regardless (exit `0`).
+`workspace_id` is the stable handle (`ws_` + 16 base32 chars) minted for this
+workspace; pass it to any command as `--workspace <workspace_id>`. It survives a
+directory rename, is written to `workspace.json`, and keys the per-machine
+registry. `config_present` reports whether the user-level config exists. When it
+is `false`, an extra `next_action` field is present and the stderr warning above
+is emitted — but the workspace is created regardless (exit `0`).
+
+### `dgml workspace list`
+List the workspaces registered on **this machine** (the registry is per-machine,
+so a workspace opened on two machines appears once on each). Reads only
+`~/.config/dgml/workspaces.json` — no workspace needs to be resolved, and it
+never touches the workspaces themselves.
+
+Output (JSON), sorted by id:
+
+```json
+{
+  "workspaces": [
+    {
+      "workspace_id": "ws_7f3k9q2m4b8xr5wa",
+      "name": "Acme Contracts",
+      "organization": "Acme",
+      "root": "/Users/me/acme-ws",
+      "created_at": "2026-08-05T12:00:00Z"
+    }
+  ]
+}
+```
+
+### `dgml workspace register [PATH]`
+Index an existing workspace in this machine's registry — the recovery path when a
+workspace was created elsewhere or its directory **moved**. `PATH` is optional and
+defaults to the globally-resolved workspace. The workspace must already be
+initialized (run `dgml workspace create` otherwise → `WORKSPACE_NOT_INITIALIZED`).
+
+- If `workspace.json` already carries a `workspace_id`, it is re-registered under
+  that same id and the recorded `root` is updated to `PATH` (the moved-directory
+  fix). Unlike the additive auto-registration that happens on any open, this
+  **overwrites** an existing entry's root.
+- If it has no id (a legacy workspace), one is minted, written back to
+  `workspace.json`, and registered.
+
+Normal use never needs this: `workspace create` registers new workspaces, and the
+first time any command opens a workspace it is auto-registered on that machine.
+
+Output (JSON):
+
+```json
+{
+  "workspace": "/Users/me/acme-ws",
+  "workspace_id": "ws_7f3k9q2m4b8xr5wa",
+  "name": "Acme Contracts",
+  "organization": "Acme",
+  "registered": true
+}
+```
 
 ### `dgml status`
 Summary: workspace path, count of docsets, count of files.

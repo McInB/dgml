@@ -49,7 +49,20 @@ class Workspace:
 
     @classmethod
     def resolve(cls, override: Path | str | None = None) -> Workspace:
+        """Resolve a workspace from ``override`` (the ``--workspace`` value), then
+        ``$DGML_HOME``, then ``./dgml-workspace``.
+
+        ``override`` may be a **path** or a **workspace id**: if it exactly matches
+        a registered id, the workspace opens at that entry's recorded root;
+        otherwise it is treated as a path (unchanged behaviour). Ids are opaque
+        ``ws_…`` slugs, so they never collide with a real path a user would type.
+        """
         if override is not None:
+            from . import registry  # lazy: registry imports storage helpers
+
+            entry = registry.get(str(override))
+            if entry is not None and entry.root is not None:
+                return cls(root=Path(entry.root).resolve())
             root = Path(override).expanduser().resolve()
         elif ENV_VAR in os.environ and os.environ[ENV_VAR].strip():
             root = Path(os.environ[ENV_VAR]).expanduser().resolve()
@@ -166,15 +179,27 @@ class Workspace:
         data = self.store.get_doc(layout.Collection.WORKSPACE, layout.Collection.WORKSPACE)
         return data if isinstance(data, dict) else {}
 
-    def write_meta(self, *, name: str, organization: str) -> None:
-        """Persist the workspace identity (``name`` + ``organization``) to
-        ``workspace.json``. The organization is embedded in docset namespace
-        URIs. Backs ``dgml workspace create``."""
-        self.store.put_doc(
-            layout.Collection.WORKSPACE,
-            layout.Collection.WORKSPACE,
-            {"name": name, "organization": organization},
-        )
+    def write_meta(self, *, name: str, organization: str, workspace_id: str | None = None) -> None:
+        """Persist the workspace identity to ``workspace.json``: ``name`` +
+        ``organization`` (embedded in docset namespace URIs), and a stable
+        ``workspace_id`` when given. Backs ``dgml workspace create``.
+
+        Merge-preserving: reads the existing meta and updates only these fields, so
+        it never drops ``schema_version`` (stamped by migrations) or an existing
+        ``workspace_id`` — pass ``workspace_id`` only when setting/minting one."""
+        meta = dict(self.read_meta())
+        meta["name"] = name
+        meta["organization"] = organization
+        if workspace_id is not None:
+            meta["workspace_id"] = workspace_id
+        self.store.put_doc(layout.Collection.WORKSPACE, layout.Collection.WORKSPACE, meta)
+
+    @property
+    def workspace_id(self) -> str | None:
+        """The workspace's stable id from ``workspace.json`` (``None`` for a
+        workspace created before ids existed, until backfilled on first open)."""
+        v = self.read_meta().get("workspace_id")
+        return v if isinstance(v, str) and v else None
 
     @property
     def organization(self) -> str:

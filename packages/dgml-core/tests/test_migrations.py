@@ -42,6 +42,7 @@ def _legacy_assignment(ws: Workspace, docset_id: str, file_id: str) -> Path:
 
 def test_unstamped_workspace_reads_as_version_zero(workspace: Workspace) -> None:
     assert workspace_schema_version(workspace) == 0
+    # A single revision while the storage layer is unmerged (see migrations module).
     assert [m.version for m in pending_migrations(workspace)] == [1]
 
 
@@ -71,15 +72,16 @@ def test_migration_upgrades_legacy_assignments(workspace: Workspace) -> None:
 
     assert store.list_files(ds.id) == []  # invisible before migrating
 
-    results = migrate_workspace(workspace)
+    migrate_workspace(workspace)
 
-    assert [r.changed for r in results] == [2]
     assert store.list_files(ds.id) == ["aaaaaaaaaaaa", "bbbbbbbbbbbb"]
     assert workspace.store.get_doc("assignments", f"{ds.id}/aaaaaaaaaaaa") == {
         "docset_id": ds.id,
         "file_id": "aaaaaaaaaaaa",
     }
     assert workspace.store.get_blob(f"docsets/{ds.id}/files/aaaaaaaaaaaa/r.dgml.xml") == b"<x/>"
+    # The same v1 migration also backfilled the workspace_id (store-agnostic part).
+    assert workspace.workspace_id is not None
     assert workspace_schema_version(workspace) == WORKSPACE_SCHEMA_VERSION
 
 
@@ -92,11 +94,14 @@ def test_migration_is_idempotent(workspace: Workspace) -> None:
     workspace.store.put_doc("files", fid, {"id": fid})
     _legacy_assignment(workspace, ds.id, fid)
 
-    assert [r.changed for r in migrate_workspace(workspace)] == [1]
-    # replay from scratch: the version stamp is what normally short-circuits,
-    # so force the migration to run a second time against migrated data
+    migrate_workspace(workspace)
+    assert store.list_files(ds.id) == [fid]
+    # replay from scratch: the version stamp is what normally short-circuits, so
+    # force the migration to run a second time against already-migrated data — with
+    # both parts idempotent (id present, assignment already a document) it changes
+    # nothing.
     stamp_schema_version(workspace, 0)
-    assert [r.changed for r in migrate_workspace(workspace)] == [0]
+    assert migrate_workspace(workspace)[0].changed == 0
     assert store.list_files(ds.id) == [fid]
 
 
@@ -112,7 +117,9 @@ def test_migration_does_not_touch_existing_assignment_documents(workspace: Works
     assert before is not None and before["assigned_at"]
 
     stamp_schema_version(workspace, 0)
-    assert [r.changed for r in migrate_workspace(workspace)] == [0]
+    migrate_workspace(workspace)
+    # The migration leaves an assignment document written by current code untouched
+    # (in particular it keeps its assigned_at) rather than flattening it.
     assert workspace.store.get_doc("assignments", f"{ds.id}/{fid}") == before
 
 
@@ -124,13 +131,28 @@ def test_migration_ignores_non_pair_directories(workspace: Workspace) -> None:
     (workspace.docsets_dir / ds.id / "files").mkdir(parents=True, exist_ok=True)
     (workspace.docsets_dir / ds.id / "scratch").mkdir(parents=True, exist_ok=True)
 
-    assert [r.changed for r in migrate_workspace(workspace)] == [0]
+    migrate_workspace(workspace)
     assert workspace.store.find_docs("assignments", {}) == []
 
 
 def test_empty_workspace_migrates_cleanly(workspace: Workspace) -> None:
-    assert [r.changed for r in migrate_workspace(workspace)] == [0]
+    migrate_workspace(workspace)
     assert workspace_schema_version(workspace) == WORKSPACE_SCHEMA_VERSION
+    assert workspace.store.find_docs("assignments", {}) == []  # nothing to upgrade
+
+
+def test_backfill_workspace_id_mints_and_is_idempotent(workspace: Workspace) -> None:
+    """The store-agnostic part of the v1 migration gives a pre-id workspace a stable
+    id, then is a no-op once present."""
+    assert workspace.workspace_id is None
+    migrate_workspace(workspace)
+    wid = workspace.workspace_id
+    assert wid is not None and wid.startswith("ws_")
+
+    # Re-run against already-migrated data: no new id, none minted, nothing changes.
+    stamp_schema_version(workspace, 0)
+    assert migrate_workspace(workspace)[0].changed == 0
+    assert workspace.workspace_id == wid  # unchanged
 
 
 def test_unwritable_workspace_fails_loudly(workspace: Workspace, monkeypatch) -> None:  # type: ignore[no-untyped-def]

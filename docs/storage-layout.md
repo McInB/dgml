@@ -19,7 +19,11 @@ element can span pages.
 
 The root is determined in this order:
 
-1. `--workspace <path>` CLI flag (or `Workspace.resolve(<path>)` in code).
+1. `--workspace <path-or-id>` CLI flag (or `Workspace.resolve(<path-or-id>)` in
+   code). The argument is a filesystem path **or** a `ws_…` workspace id: when it
+   exactly matches an id in the [per-machine registry](#per-machine-workspace-registry),
+   the workspace opens at that entry's recorded root; otherwise it is treated as a
+   path (the `ws_` prefix + base32 charset means an id can't be mistaken for one).
 2. The `DGML_HOME` environment variable.
 3. Default: `./dgml-workspace` (relative to the current working directory).
 
@@ -37,7 +41,7 @@ config merges across layers.
 
 ```
 <workspace_root>/
-├── workspace.json                    # { name, organization } — written by `workspace create`
+├── workspace.json                    # { name, organization, workspace_id, schema_version } — written by `workspace create`
 ├── config.toml                       # OCR / LLM / clustering settings (optional)
 ├── usage.jsonl                       # LLM call event log (optional)
 ├── docsets/
@@ -99,10 +103,24 @@ The workspace identity, written by `dgml workspace create`:
 ```json
 {
   "name": "Acme Contracts",
-  "organization": "Acme"
+  "organization": "Acme",
+  "workspace_id": "ws_7f3k9q2m4b8xr5wa",
+  "schema_version": 1
 }
 ```
 
+- `workspace_id` — the workspace's **stable handle** (`ws_` + 16 lowercase
+  base32 chars, 80 bits from `secrets`). Opaque and non-semantic, so it survives a
+  directory rename. Minted at `workspace create` and carried here so the directory
+  self-describes; it also keys the [per-machine registry](#per-machine-workspace-registry).
+  A workspace created before this field existed is given one automatically the
+  first time any command opens it (a schema migration). `dgml --workspace <workspace_id>`
+  opens the workspace by this id.
+- `schema_version` — the on-disk layout revision this workspace was last written
+  against. `dgml` migrates an older workspace up to the current revision in place
+  the first time a command touches it (see
+  [migrations](../packages/dgml-core/src/dgml_core/migrations.py)); a workspace
+  with no `workspace.json` at all reads as version 0.
 - `organization` — embedded in every docset namespace URI this workspace
   generates (`http://dgml.io/<organization>/<DocSetSlug>`), across both the
   generated document tree (`dgml docset generate`) and the extraction schema
@@ -116,6 +134,43 @@ The workspace identity, written by `dgml workspace create`:
   `workspace.json` existed (e.g. `dgml-workspace`), preserving their namespaces.
 - `name` — human-readable label (`--name`, optional; defaults to the workspace
   directory name). Surfaced by `dgml status`; not used in URIs.
+
+## Per-machine workspace registry
+
+A single **per-machine** index maps each `workspace_id` to where that workspace
+lives, so workspaces can be listed (`dgml workspace list`) and opened by id
+(`dgml --workspace <workspace_id>`). It sits next to the user config —
+`$XDG_CONFIG_HOME/dgml/workspaces.json` if set, else `%APPDATA%\dgml\workspaces.json`
+on Windows, else `~/.config/dgml/workspaces.json` — and is machine-managed **JSON**
+(not hand-edited, unlike `config.toml`), an object keyed by `workspace_id`:
+
+```json
+{
+  "ws_7f3k9q2m4b8xr5wa": {
+    "name": "Acme Contracts",
+    "organization": "Acme",
+    "root": "/Users/me/acme-ws",
+    "storage": { "provider": "dgml_core.storage_local:LocalStore" },
+    "storage_fingerprint": "sha256:…",
+    "created_at": "2026-08-05T12:00:00Z",
+    "schema_version": 1
+  }
+}
+```
+
+- The registry is **per-machine**, deliberately separate from `workspace.json`
+  (which travels with the directory): the same workspace opened on two machines has
+  one `workspace_id` but two registry entries, each with that machine's `root`.
+- `root` is the local store location (used for open-by-id and the reverse lookup);
+  `storage` records the store *identity* (provider + non-secret options) and
+  `storage_fingerprint` a credential-free hash of it. Only `LocalStore` ships today,
+  so every entry has a `root`.
+- Entries are added automatically: `workspace create` registers a new workspace, and
+  the first time any command opens a workspace on a machine it is auto-registered
+  there (additive — it never overwrites an existing entry). `dgml workspace register`
+  is the explicit override that re-points a **moved** directory's recorded `root`.
+- Each write is atomic (write-temp-rename); registration is an idempotent upsert by
+  id, so a lost update from a concurrent write self-heals on the next open.
 
 ## Configuration (`config.toml`)
 

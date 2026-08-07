@@ -75,18 +75,37 @@ class MigrationResult:
         return f"{self.migration.name}: {self.changed} item(s) migrated"
 
 
-def _migrate_assignments_to_documents(ws: Workspace) -> int:
+def _backfill_workspace_id(ws: Workspace) -> int:
+    """Give a pre-id workspace a stable ``workspace_id`` in ``workspace.json``.
+
+    Store-AGNOSTIC — reads/writes ``workspace.json`` only through the store's
+    document API (`read_meta`/`write_meta`), so it runs on **every** backend (a
+    remote workspace needs an id too), and does no disk globbing. Idempotent: a
+    no-op once an id is present. Because it must run everywhere, it lives outside
+    the LocalStore guard below (calling it unconditionally is the point).
+    """
+    from .registry import mint_workspace_id
+
+    if ws.workspace_id is not None:
+        return 0
+    ws.write_meta(
+        name=ws.display_name, organization=ws.organization, workspace_id=mint_workspace_id()
+    )
+    return 1
+
+
+def _upgrade_assignments_to_documents(ws: Workspace) -> int:
     """Give every pre-``assignment.json`` DocSet assignment a real document.
 
-    Before this revision an assignment *was* the bare directory
+    Before the storage layer an assignment *was* the bare directory
     ``docsets/<did>/files/<fid>/``. That representation cannot survive its own
     deletion — once the record is removed, a pair directory still holding
     generated artifacts is indistinguishable from a live assignment — so bare
     directories are no longer read as assignments and have to be upgraded.
 
-    Directory-as-record only ever existed on local disk, so this is a no-op on
-    any other backend. Writes only the documents that are missing, and touches
-    nothing else in the pair directory.
+    Directory-as-record only ever existed on local disk, so this **self-guards**
+    on ``LocalStore`` and is a no-op on any other backend. Writes only the
+    documents that are missing, and touches nothing else in the pair directory.
     """
     from .layout import ASSIGNMENT_MANIFEST, DOCSET_FILES_DIR, Collection, pair_id
     from .storage_local import LocalStore
@@ -109,12 +128,36 @@ def _migrate_assignments_to_documents(ws: Workspace) -> int:
     return migrated
 
 
+def _migrate_to_v1(ws: Workspace) -> int:
+    """The single revision the whole (still-unmerged) storage layer ships as.
+
+    Per this module's "fold into migration 1 while unmerged" rule, every 0→1 data
+    change lives in this one step rather than a chain of intermediate versions —
+    released ``dgml`` (version 0) upgrades straight to the merged result. It bundles
+    two independent, individually-idempotent parts:
+
+    - :func:`_backfill_workspace_id` — store-agnostic; runs on every backend.
+    - :func:`_upgrade_assignments_to_documents` — LocalStore-only (self-guarded).
+
+    Both are **one** migration deliberately: two separate ``Migration`` entries at
+    the same version would break crash-resume (the version is stamped after each,
+    so a crash between them would make the next run skip the second). Keep the
+    store-agnostic backfill OUT of the LocalStore-guarded upgrade — call the two as
+    siblings so the backfill still runs on a remote store. When the storage layer is
+    released, further changes get their own version 2, not more code here.
+    """
+    return _backfill_workspace_id(ws) + _upgrade_assignments_to_documents(ws)
+
+
 _MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
-        name="assignments-as-documents",
-        description="Write assignment.json for DocSet assignments stored as bare directories",
-        apply=_migrate_assignments_to_documents,
+        name="storage-layer-v1",
+        description=(
+            "Backfill workspace_id (all backends) and upgrade bare-directory DocSet "
+            "assignments to documents (LocalStore)"
+        ),
+        apply=_migrate_to_v1,
     ),
 )
 

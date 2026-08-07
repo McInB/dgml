@@ -159,15 +159,20 @@ def test_workspace_create(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert payload["organization"] == "Acme"
     assert payload["name"] == "ws"  # defaults to the workspace directory name
     assert payload["config_present"] is True  # user config existed (init ran)
+    # A stable workspace_id is minted at create and echoed in the payload.
+    workspace_id = payload["workspace_id"]
+    assert workspace_id.startswith("ws_")
     assert (ws / "docsets").is_dir()
     assert (ws / "files").is_dir()
     assert not (ws / "config.toml").exists()  # create writes no per-workspace config
     meta = json.loads((ws / "workspace.json").read_text(encoding="utf-8"))
     # workspace.json also carries the layout revision the workspace was written
-    # against, so an older one can be upgraded in place on first use.
+    # against, so an older one can be upgraded in place on first use, plus the
+    # stable workspace_id that the central registry keys on.
     assert meta == {
         "name": "ws",
         "organization": "Acme",
+        "workspace_id": workspace_id,
         "schema_version": WORKSPACE_SCHEMA_VERSION,
     }
 
@@ -206,6 +211,129 @@ def test_workspace_create_positional_path(
     assert Path(_read_stdout(capsys)["workspace"]) == other.resolve()
     assert (other / "docsets").is_dir()
     assert not (tmp_path / "ignored" / "docsets").exists()
+
+
+def test_workspace_create_registers_and_opens_by_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`create` indexes the workspace in the per-machine registry, and the minted
+    id can then be used anywhere a path can — `--workspace <id>` opens it."""
+    from dgml_core import registry
+
+    ws = tmp_path / "ws"
+    rc = main(["workspace", "create", str(ws), "--organization", "Acme"])
+    assert rc == 0
+    workspace_id = _read_stdout(capsys)["workspace_id"]
+
+    # The registry now points that id at this root.
+    entry = registry.get(workspace_id)
+    assert entry is not None
+    assert entry.root == str(ws.resolve())
+
+    # Open by id: a command run with --workspace <id> resolves to the same root.
+    rc = main(["--workspace", workspace_id, "status"])
+    assert rc == 0
+    assert Path(_read_stdout(capsys)["workspace"]) == ws.resolve()
+
+
+def test_workspace_list(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`workspace list` reports every workspace registered on this machine."""
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    main(["workspace", "create", str(a), "--organization", "Acme", "--name", "A"])
+    id_a = _read_stdout(capsys)["workspace_id"]
+    main(["workspace", "create", str(b), "--organization", "Beta", "--name", "B"])
+    id_b = _read_stdout(capsys)["workspace_id"]
+
+    rc = main(["workspace", "list"])
+    assert rc == 0
+    rows = _read_stdout(capsys)["workspaces"]
+    by_id = {r["workspace_id"]: r for r in rows}
+    assert set(by_id) >= {id_a, id_b}
+    assert by_id[id_a]["name"] == "A"
+    assert by_id[id_a]["root"] == str(a.resolve())
+    assert by_id[id_b]["organization"] == "Beta"
+
+
+def test_open_backfills_id_and_auto_registers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A legacy workspace with no workspace_id gets one minted into workspace.json
+    and an entry added to this machine's registry on first open — no manual step,
+    and idempotent on a second open."""
+    from dgml_core import registry
+
+    # Simulate a pre-id workspace: initialized, meta without a workspace_id,
+    # stamped at an older schema version so the backfill migration runs.
+    ws = Workspace(root=tmp_path / "legacy")
+    ws.init()
+    ws.write_meta(name="legacy", organization="Acme")
+    stamp_schema_version(ws, 0)
+    assert ws.workspace_id is None
+
+    rc = main(_ws_args(ws.root) + ["status"])
+    assert rc == 0
+
+    wid = ws.workspace_id
+    assert wid is not None and wid.startswith("ws_")
+    entry = registry.get(wid)
+    assert entry is not None and entry.root == str(ws.root.resolve())
+
+    # Second open: id unchanged, no duplicate registration.
+    rc = main(_ws_args(ws.root) + ["status"])
+    assert rc == 0
+    assert ws.workspace_id == wid
+    assert [e.workspace_id for e in registry.list_entries()].count(wid) == 1
+
+
+def test_clone_auto_registers_existing_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A workspace directory that already carries a workspace_id (as if cloned from
+    another machine) is registered under that same id on first open here — the id in
+    workspace.json is authoritative, the registry is per-machine."""
+    from dgml_core import registry
+
+    ws = Workspace(root=tmp_path / "cloned")
+    ws.init()
+    wid = "ws_clonedaaaaaaaaaa"
+    ws.write_meta(name="Cloned", organization="Acme", workspace_id=wid)
+    stamp_schema_version(ws)  # already current: no migration, only ensure_registered
+    assert registry.get(wid) is None  # not in this machine's registry yet
+
+    rc = main(_ws_args(ws.root) + ["status"])
+    assert rc == 0
+    entry = registry.get(wid)
+    assert entry is not None and entry.root == str(ws.root.resolve())
+
+
+def test_workspace_register_updates_moved_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`workspace register` re-points a moved workspace's recorded root while keeping
+    its id — the explicit override the additive auto-registration deliberately won't do."""
+    from dgml_core import registry
+
+    src = tmp_path / "src"
+    main(["workspace", "create", str(src), "--organization", "Acme"])
+    wid = _read_stdout(capsys)["workspace_id"]
+
+    # Simulate a move: copy the directory, then register the new location.
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    for name in ("docsets", "files"):
+        (dest / name).mkdir()
+    (dest / "workspace.json").write_text(
+        (src / "workspace.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    rc = main(["workspace", "register", str(dest)])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["registered"] is True
+    assert payload["workspace_id"] == wid  # id preserved from workspace.json
+    moved = registry.get(wid)
+    assert moved is not None and moved.root == str(dest.resolve())  # root re-pointed
 
 
 def test_workspace_create_requires_organization(

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
 from dgml_core import layout
+from dgml_core import registry as ws_registry
 from dgml_core.classification import (
     ClassificationConfig,
     classify_file,
@@ -39,7 +40,11 @@ from dgml_core.default_config import PROVIDER_MODELS
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import DgmlError, WorkspaceNotInitialized, short_error_message
 from dgml_core.files import AddFileResult, ConflictPolicy, FileStore
-from dgml_core.migrations import MigrationResult, migrate_workspace, stamp_schema_version
+from dgml_core.migrations import (
+    MigrationResult,
+    migrate_workspace,
+    stamp_schema_version,
+)
 from dgml_core.models import DocSet
 from dgml_core.pages import DEFAULT_DPI
 from dgml_core.storage import (
@@ -278,6 +283,27 @@ def _build_parser() -> argparse.ArgumentParser:
             "Human-readable workspace name (identity metadata, stored in workspace.json). "
             "Defaults to the workspace directory name."
         ),
+    )
+    workspace_sub.add_parser(
+        "list",
+        parents=[common],
+        help="List the workspaces registered on this machine (id, name, root).",
+    )
+    ws_register = workspace_sub.add_parser(
+        "register",
+        parents=[common],
+        help=(
+            "Index an existing workspace in this machine's registry so it can be opened "
+            "by id. Mints a workspace_id if the workspace lacks one; updates the recorded "
+            "root for a moved workspace."
+        ),
+    )
+    ws_register.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        default=None,
+        help="Workspace directory. Optional; defaults to the globally-resolved workspace.",
     )
     sub.add_parser("status", parents=[common], help="Show workspace summary.")
 
@@ -1027,8 +1053,11 @@ def main(argv: list[str] | None = None) -> int:
             # Upgrade an older workspace in place before anything reads it. This
             # is the one point every command passes through, so there is no
             # separate migrate step to remember. No-op (one document read) when
-            # the workspace is already current.
+            # the workspace is already current. Migration mints a workspace_id
+            # (store-agnostic); then index it in this machine's registry so it is
+            # openable by id / listed — additive and idempotent.
             _report_migrations(migrate_workspace(ws), ws, args)
+            ws_registry.ensure_registered(ws)
         return _dispatch(args, ws, fmt)
     except DgmlError as exc:
         return _emit_error(exc.code, str(exc), fmt)
@@ -1171,7 +1200,9 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
 
         ws.init()
         name = args.name or ws.root.name
-        ws.write_meta(name=name, organization=args.organization)
+        # Mints the workspace_id, writes it into workspace.json, and indexes the
+        # workspace in this machine's registry so it can be opened by id / listed.
+        workspace_id = ws_registry.register_workspace(ws, name=name, organization=args.organization)
         # Stamp the current layout revision so a brand-new workspace is never
         # mistaken for an old one and re-scanned by the migration on first use.
         stamp_schema_version(ws)
@@ -1180,6 +1211,7 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         config_present = upath.exists()
         payload: dict[str, Any] = {
             "workspace": str(ws.root),
+            "workspace_id": workspace_id,
             "name": name,
             "organization": args.organization,
             "initialized": True,
@@ -1196,6 +1228,47 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                 "Run `dgml init` and set ANTHROPIC_API_KEY / GEMINI_API_KEY.\n"
             )
         _emit(payload, fmt)
+        return 0
+
+    if sub == "list":
+        _emit(
+            {
+                "workspaces": [
+                    {
+                        "workspace_id": e.workspace_id,
+                        "name": e.name,
+                        "organization": e.organization,
+                        "root": e.root,
+                        "created_at": e.created_at,
+                    }
+                    for e in ws_registry.list_entries()
+                ]
+            },
+            fmt,
+        )
+        return 0
+
+    if sub == "register":
+        if args.path is not None:
+            ws = Workspace.resolve(args.path)
+        if not ws.is_initialized():
+            raise WorkspaceNotInitialized(
+                f"workspace at {ws.root} is not initialized — run 'dgml workspace create'"
+            )
+        # Reuses the workspace's own id if it has one (a moved dir keeps its id),
+        # else mints and writes one back. Overwrites the recorded root (the moved-dir
+        # fix), unlike the additive auto-registration on open.
+        wid = ws_registry.register_workspace(ws)
+        _emit(
+            {
+                "workspace": str(ws.root),
+                "workspace_id": wid,
+                "name": ws.display_name,
+                "organization": ws.organization,
+                "registered": True,
+            },
+            fmt,
+        )
         return 0
 
     raise AssertionError(f"unhandled workspace subcommand: {sub}")  # unreachable (required=True)
