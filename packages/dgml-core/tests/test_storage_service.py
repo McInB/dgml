@@ -442,7 +442,7 @@ def test_load_storage_config_flat_is_the_default_service(tmp_path: Path) -> None
 
 
 def test_storage_snapshot_drops_secrets_and_round_trips_fingerprint() -> None:
-    from dgml_core.storage_service import fingerprint_of_snapshot, storage_snapshot
+    from dgml_core.storage_resolve import fingerprint_of_snapshot, storage_snapshot
 
     cfg = StorageConfig(
         provider="p:C",
@@ -456,7 +456,7 @@ def test_storage_snapshot_drops_secrets_and_round_trips_fingerprint() -> None:
 
 
 def test_resolve_store_config_unregistered_is_local(tmp_path: Path) -> None:
-    from dgml_core.storage_service import resolve_store_config
+    from dgml_core.registry import resolve_store_config
 
     ws = Workspace.resolve(tmp_path)  # not in the registry
     cfg = resolve_store_config(ws)

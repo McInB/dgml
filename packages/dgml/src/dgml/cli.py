@@ -56,7 +56,7 @@ from dgml_core.storage import (
     user_config_path,
     write_user_config,
 )
-from dgml_core.storage_service import DEFAULT_STORAGE_SERVICE
+from dgml_core.storage_resolve import DEFAULT_STORAGE_SERVICE
 from dgml_core.text_extraction import TextMode
 
 if TYPE_CHECKING:

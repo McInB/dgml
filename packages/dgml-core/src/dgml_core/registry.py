@@ -44,9 +44,12 @@ import base64
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .storage import Workspace, read_json, user_config_path, write_json_atomic
+
+if TYPE_CHECKING:
+    from .storage_service import StorageConfig
 
 REGISTRY_FILE = "workspaces.json"
 _ID_PREFIX = "ws_"
@@ -225,7 +228,7 @@ def entry_for(
     Store-free — reads the ``config.toml`` template, not the store. (Lazy imports
     keep ``registry`` free of a top-level ``storage_service`` / ``migrations``
     cycle.)"""
-    from .storage_service import load_storage_config, storage_fingerprint, storage_snapshot
+    from .storage_resolve import load_storage_config, storage_fingerprint, storage_snapshot
 
     cfg = load_storage_config(ws, service)
     return RegistryEntry(
@@ -296,7 +299,7 @@ def reregister_workspace(
     template to snapshot; when ``None`` it keeps the entry's current service (else
     ``"default"``). ``name``/``organization`` default to the workspace's own
     identity. (For a brand-new workspace use :func:`register_workspace`.)"""
-    from .storage_service import DEFAULT_STORAGE_SERVICE
+    from .storage_resolve import DEFAULT_STORAGE_SERVICE
 
     existing = get_by_root(ws.root)
     if existing is not None:
@@ -335,7 +338,7 @@ def ensure_registered(ws: Workspace) -> None:
     unregistered workspace opened on this machine runs on the bundled local store,
     so that is what it is being registered as (an explicit ``workspace register
     --storage`` re-seals it to a named service)."""
-    from .storage_service import DEFAULT_STORAGE_SERVICE
+    from .storage_resolve import DEFAULT_STORAGE_SERVICE
 
     wid = ws.workspace_id
     if wid is None or get(wid) is not None:
@@ -364,7 +367,7 @@ def verify_storage_seal(ws: Workspace) -> None:
     Store-free, so it can run before ``Workspace.store`` is first built — a tampered
     entry is caught before its config is used to construct the backend. Raises
     :class:`~dgml_core.errors.StorageBackendMismatch`."""
-    from .storage_service import fingerprint_of_snapshot
+    from .storage_resolve import fingerprint_of_snapshot
 
     entry = get_by_root(ws.root)
     if entry is None or not entry.storage_fingerprint:
@@ -379,3 +382,43 @@ def verify_storage_seal(ws: Workspace) -> None:
             f"`dgml workspace register {ws.root} --storage {entry.storage_service}` to "
             f"re-seal it from your config, or restore the entry."
         )
+
+
+def resolve_store_config(ws: Workspace) -> StorageConfig:
+    """The effective :class:`~dgml_core.storage_service.StorageConfig` for opening
+    ``ws`` — the store selection that :attr:`dgml_core.storage.Workspace.store`
+    builds from.
+
+    For a **registered** workspace the non-secret identity comes from the entry's
+    snapshot (authoritative and self-contained — the store opens even if
+    ``config.toml`` was edited/deleted); only *secret* options are merged in from the
+    entry's named ``config.toml`` template (or the provider SDK's own credential
+    chain when the template is gone). ``config.toml`` never overrides the non-secret
+    identity. An **unregistered** workspace (a raw ``Workspace(root=…)``, or one
+    being created before its entry is written) resolves the ``"default"`` service —
+    the bundled local-disk store with zero config.
+
+    Lives here rather than in :mod:`dgml_core.storage_resolve` because it consults
+    the registry; everything it needs from the resolver (config reading, secret
+    extraction) is imported one-way."""
+    from .errors import StorageConfigInvalid
+    from .storage_resolve import DEFAULT_STORAGE_SERVICE, load_storage_config, secret_options
+    from .storage_service import StorageConfig
+
+    entry = get_by_root(ws.root)  # local read, store-free
+    if entry is None:
+        return load_storage_config(ws, DEFAULT_STORAGE_SERVICE)
+    provider = entry.storage.get("provider") if isinstance(entry.storage, dict) else None
+    if not isinstance(provider, str) or not provider.strip():
+        # Legacy/empty snapshot: fall back to the named template in config.
+        return load_storage_config(ws, entry.storage_service or DEFAULT_STORAGE_SERVICE)
+    non_secret = {k: v for k, v in entry.storage.items() if k != "provider"}
+    try:
+        secret_opts = secret_options(
+            load_storage_config(ws, entry.storage_service or DEFAULT_STORAGE_SERVICE)
+        )
+    except StorageConfigInvalid:
+        # Template gone/renamed — the location is still known; creds may come from
+        # the provider SDK's own chain (env, instance profile, …).
+        secret_opts = {}
+    return StorageConfig(provider=provider, root=ws.root, options={**non_secret, **secret_opts})

@@ -186,17 +186,17 @@ def test_a_cascade_resolves_the_backend_once(
     for fid in ("f1", "f2", "f3"):
         _pair(workspace, "d1", fid)
 
-    import dgml_core.storage_service as storage_service
+    import dgml_core.storage_resolve as storage_resolve
 
     built = 0
-    real_make = storage_service.make_store
+    real_make = storage_resolve.make_store
 
     def counting_make(config: object) -> object:
         nonlocal built
         built += 1
         return real_make(config)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(storage_service, "make_store", counting_make)
+    monkeypatch.setattr(storage_resolve, "make_store", counting_make)
 
     cold = Workspace(root=workspace.root)  # nothing cached yet
     WorkspaceOps(cold).delete_docset("d1")

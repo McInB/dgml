@@ -72,14 +72,16 @@ from .migrations import (
 from .models import DocSet, FileRecord
 from .storage import Workspace
 from .storage_local import LocalStore
-from .storage_service import (
+from .storage_resolve import (
     DEFAULT_STORAGE_PROVIDER,
     DEFAULT_STORAGE_SERVICE,
-    StorageConfig,
-    StorageService,
     load_storage_config,
     make_store,
     storage_fingerprint,
+)
+from .storage_service import (
+    StorageConfig,
+    StorageService,
 )
 from .workspace_ops import WorkspaceOps
 
