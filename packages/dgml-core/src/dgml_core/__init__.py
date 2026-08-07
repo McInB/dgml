@@ -74,6 +74,7 @@ from .storage import Workspace
 from .storage_local import LocalStore
 from .storage_service import (
     DEFAULT_STORAGE_PROVIDER,
+    DEFAULT_STORAGE_SERVICE,
     StorageConfig,
     StorageService,
     load_storage_config,
@@ -86,6 +87,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "DEFAULT_STORAGE_PROVIDER",
+    "DEFAULT_STORAGE_SERVICE",
     "WORKSPACE_SCHEMA_VERSION",
     "AddFileResult",
     "ArtifactKind",

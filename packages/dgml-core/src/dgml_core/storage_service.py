@@ -68,6 +68,10 @@ from .storage import Workspace
 # section. Resolved through the same path as any third-party provider.
 DEFAULT_STORAGE_PROVIDER = "dgml_core.storage_local:LocalStore"
 
+# The storage-service name a workspace uses when none is chosen at create time,
+# and the name a bare (unnamed) ``[storage]`` table resolves as.
+DEFAULT_STORAGE_SERVICE = "default"
+
 # Option keys never folded into the store fingerprint — rotating a credential
 # must not read as "the store moved".
 _SECRET_HINTS = ("key", "secret", "token", "password", "credential")
@@ -414,35 +418,77 @@ def make_store(config: StorageConfig) -> StorageService:
     return cls(cls.parse_config(config))
 
 
-def load_storage_config(workspace: Workspace) -> StorageConfig:
-    """Read and validate the ``[storage]`` section of the workspace config.
-
-    A missing config or missing ``[storage]`` section yields the bundled default
-    (:data:`DEFAULT_STORAGE_PROVIDER`, local disk), so an ordinary workspace runs
-    on local disk with zero config. When present, ``[storage]`` selects a
-    pluggable backend by dotted ``provider`` path, exactly like ``[conversion]``.
-
-    Validates only the *generic shape* — ``provider`` is a non-empty string. It
-    deliberately does **not** import the provider class or run its
-    ``parse_config`` here; provider resolution and field validation happen lazily
-    in :func:`make_store`, so loading the config never imports a backend SDK.
-
-    Raises :class:`StorageConfigInvalid` only for a malformed *shape* (the section
-    isn't a table, or ``provider`` is missing/blank).
-    """
-    root = workspace.root
-    section = load_merged_config(workspace).get(ConfigSection.STORAGE)
-    if section is None:
-        return StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=root)
-    if not isinstance(section, dict):
-        raise StorageConfigInvalid("'storage' must be a table")
+def _config_from(section: Mapping[str, Any], root: Path) -> StorageConfig:
+    """Build a :class:`StorageConfig` from one service table (``provider`` + the
+    rest as ``options``). Raises :class:`StorageConfigInvalid` for a bad shape."""
     provider = section.get("provider")
     if not isinstance(provider, str) or not provider.strip():
         raise StorageConfigInvalid("'storage.provider' must be a non-empty string")
-    # Keep the section verbatim (minus provider); the class is resolved and these
-    # fields validated lazily, in make_store — see the docstring.
     options = {k: v for k, v in section.items() if k != "provider"}
     return StorageConfig(provider=provider, root=root, options=options)
+
+
+def load_storage_config(
+    workspace: Workspace, service: str = DEFAULT_STORAGE_SERVICE
+) -> StorageConfig:
+    """Resolve one **named storage-service template** from the workspace config.
+
+    ``config.toml`` may define several services as ``[storage.<name>]`` subtables;
+    ``service`` selects one. Two forms are accepted for back-compat:
+
+    - **Flat** — a bare ``[storage]`` table with a top-level ``provider`` string is
+      the single ``"default"`` service (the pre-named-services shape). Asking for
+      any other name then raises.
+    - **Named** — ``[storage.<name>]`` subtables. ``service`` selects
+      ``[storage.<name>]``; an absent ``"default"`` falls back to the bundled
+      local-disk store (so an ordinary workspace still needs zero config), while an
+      absent *named* service raises.
+
+    Validates only the *generic shape* — ``provider`` is a non-empty string;
+    provider resolution and field validation happen lazily in :func:`make_store`,
+    so loading the config never imports a backend SDK.
+
+    Raises :class:`StorageConfigInvalid` for a malformed shape or an unknown named
+    service.
+    """
+    root = workspace.root
+    section = load_merged_config(workspace).get(ConfigSection.STORAGE) or {}
+    if not isinstance(section, dict):
+        raise StorageConfigInvalid("'storage' must be a table")
+    # Flat form: a top-level ``provider`` string means the whole table is one
+    # unnamed store — the "default" service. (``provider`` is reserved at the top
+    # of ``[storage]``; a named service is always a subtable.)
+    if isinstance(section.get("provider"), str):
+        if service != DEFAULT_STORAGE_SERVICE:
+            raise StorageConfigInvalid(
+                f"no storage service {service!r}: config has a single [storage] table"
+            )
+        return _config_from(section, root)
+    # Named form.
+    sub = section.get(service)
+    if sub is None:
+        if service == DEFAULT_STORAGE_SERVICE:
+            # zero-config default: an ordinary workspace runs on local disk.
+            return StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=root)
+        raise StorageConfigInvalid(f"no [storage.{service}] configured")
+    if not isinstance(sub, dict):
+        raise StorageConfigInvalid(f"[storage.{service}] must be a table")
+    return _config_from(sub, root)
+
+
+def _identity_hash(provider: str, options: Mapping[str, Any]) -> str:
+    """The canonical credential-free store-identity hash — the one hashing scheme
+    shared by :func:`storage_fingerprint` and :func:`fingerprint_of_snapshot`."""
+    identity = {
+        "provider": provider,
+        "options": {
+            k: v
+            for k, v in sorted(options.items())
+            if not any(hint in k.lower() for hint in _SECRET_HINTS)
+        },
+    }
+    blob = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(blob).hexdigest()
 
 
 def storage_fingerprint(config: StorageConfig) -> str:
@@ -450,16 +496,76 @@ def storage_fingerprint(config: StorageConfig) -> str:
 
     Covers the ``provider`` and its non-secret options (bucket, prefix, endpoint,
     …) so that switching the store trips the guard while rotating a credential
-    does not. Sealed at ``workspace create``; recomputed and compared on open (a
-    mismatch is :class:`~dgml_core.errors.StorageBackendMismatch`).
-    """
-    identity = {
-        "provider": config.provider,
-        "options": {
-            k: v
-            for k, v in sorted(config.options.items())
-            if not any(hint in k.lower() for hint in _SECRET_HINTS)
-        },
+    does not. Sealed at ``workspace create`` into the registry entry's snapshot;
+    recomputed from the entry and compared on open (a mismatch is
+    :class:`~dgml_core.errors.StorageBackendMismatch`)."""
+    return _identity_hash(config.provider, config.options)
+
+
+def storage_snapshot(config: StorageConfig) -> dict[str, Any]:
+    """The **non-secret** store identity as a flat dict — ``{"provider": …, <opt>:
+    …}`` — for persisting into the registry entry. Secret-hinted options are
+    dropped, so credentials never reach the plaintext registry. The inverse pair of
+    :func:`fingerprint_of_snapshot`."""
+    snapshot: dict[str, Any] = {"provider": config.provider}
+    snapshot.update(
+        (k, v)
+        for k, v in config.options.items()
+        if not any(hint in k.lower() for hint in _SECRET_HINTS)
+    )
+    return snapshot
+
+
+def fingerprint_of_snapshot(snapshot: Mapping[str, Any]) -> str:
+    """Recompute the identity hash of a persisted :func:`storage_snapshot`.
+
+    Equal to ``storage_fingerprint`` of the config the snapshot was taken from, so
+    the open-time integrity check ``fingerprint_of_snapshot(entry.storage) ==
+    entry.storage_fingerprint`` holds unless the registry entry was hand-edited."""
+    provider = snapshot.get("provider")
+    if not isinstance(provider, str):
+        return ""
+    options = {k: v for k, v in snapshot.items() if k != "provider"}
+    return _identity_hash(provider, options)
+
+
+def resolve_store_config(workspace: Workspace) -> StorageConfig:
+    """The effective :class:`StorageConfig` for opening ``workspace``.
+
+    For a **registered** workspace the non-secret identity comes from the registry
+    entry's snapshot (authoritative and self-contained — the store opens even if
+    ``config.toml`` was edited/deleted); only *secret* options are merged in from
+    the entry's named ``config.toml`` template (or the provider SDK's own
+    credential chain when the template is gone). ``config.toml`` never overrides the
+    non-secret identity.
+
+    An **unregistered** workspace (a raw ``Workspace(root=…)``, or one being
+    created before its entry is written) resolves the ``"default"`` service — the
+    bundled local-disk store with zero config."""
+    from . import registry
+
+    entry = registry.get_by_root(workspace.root)  # local read, store-free
+    if entry is None:
+        return load_storage_config(workspace, DEFAULT_STORAGE_SERVICE)
+    provider = entry.storage.get("provider") if isinstance(entry.storage, dict) else None
+    if not isinstance(provider, str) or not provider.strip():
+        # Legacy/empty snapshot: fall back to the named template in config.
+        return load_storage_config(workspace, entry.storage_service or DEFAULT_STORAGE_SERVICE)
+    non_secret = {k: v for k, v in entry.storage.items() if k != "provider"}
+    return StorageConfig(
+        provider=provider,
+        root=workspace.root,
+        options={**non_secret, **_secret_options(workspace, entry.storage_service)},
+    )
+
+
+def _secret_options(workspace: Workspace, service: str) -> dict[str, Any]:
+    """The secret-hinted options of ``service``'s ``config.toml`` template (empty
+    when the template is absent — the provider may still find creds via env/SDK)."""
+    try:
+        cfg = load_storage_config(workspace, service or DEFAULT_STORAGE_SERVICE)
+    except StorageConfigInvalid:
+        return {}
+    return {
+        k: v for k, v in cfg.options.items() if any(hint in k.lower() for hint in _SECRET_HINTS)
     }
-    blob = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return "sha256:" + hashlib.sha256(blob).hexdigest()

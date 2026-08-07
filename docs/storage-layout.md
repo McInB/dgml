@@ -150,6 +150,7 @@ on Windows, else `~/.config/dgml/workspaces.json` — and is machine-managed **J
     "name": "Acme Contracts",
     "organization": "Acme",
     "root": "/Users/me/acme-ws",
+    "storage_service": "default",
     "storage": { "provider": "dgml_core.storage_local:LocalStore" },
     "storage_fingerprint": "sha256:…",
     "created_at": "2026-08-05T12:00:00Z",
@@ -161,14 +162,27 @@ on Windows, else `~/.config/dgml/workspaces.json` — and is machine-managed **J
 - The registry is **per-machine**, deliberately separate from `workspace.json`
   (which travels with the directory): the same workspace opened on two machines has
   one `workspace_id` but two registry entries, each with that machine's `root`.
-- `root` is the local store location (used for open-by-id and the reverse lookup);
-  `storage` records the store *identity* (provider + non-secret options) and
-  `storage_fingerprint` a credential-free hash of it. Only `LocalStore` ships today,
-  so every entry has a `root`.
-- Entries are added automatically: `workspace create` registers a new workspace, and
-  the first time any command opens a workspace on a machine it is auto-registered
-  there (additive — it never overwrites an existing entry). `dgml workspace register`
-  is the explicit override that re-points a **moved** directory's recorded `root`.
+- `root` is the local store location (used for open-by-id and the reverse lookup).
+  Only `LocalStore` ships today, so every entry has a `root`.
+- **The entry is self-describing about the workspace's store.** `storage_service`
+  names the [`config.toml` storage template](#storage-services-storage) the
+  workspace was created from (where its secrets live, and the target of a re-seal).
+  `storage` is a **non-secret snapshot** of that template (provider + non-secret
+  options — never credentials) and is *authoritative* for opening the workspace: it
+  opens from this snapshot even if the template is later edited or removed, so the
+  registry alone records where a workspace's data lives. Editing the `config.toml`
+  template does **not** change an existing workspace's store — `dgml workspace
+  register --storage <name>` is the explicit "adopt new config" (re-seal).
+- `storage_fingerprint` is a credential-free hash of the snapshot. On open it is
+  recomputed from the entry and compared: a mismatch means the machine-managed JSON
+  was **hand-edited**, and the command hard-fails with `STORAGE_BACKEND_MISMATCH`
+  (repair with `dgml workspace register … --storage <name>`). It is *not* compared
+  against `config.toml`.
+- Entries are added automatically: `workspace create` records a new workspace
+  (including its storage snapshot), and the first time any command opens a workspace
+  on a machine it is auto-registered there (additive — it never overwrites an
+  existing entry). `dgml workspace register` is the explicit override that re-seals
+  a moved directory's `root` or switches its storage service.
 - Each write is atomic (write-temp-rename); registration is an idempotent upsert by
   id, so a lost update from a concurrent write self-heals on the next open.
 
@@ -206,6 +220,41 @@ and never treated as config.
 There are **no in-code model defaults**: a loader raises its `*_CONFIG_MISSING`
 code when a model can't be resolved from any layer, so DGML never makes a paid
 LLM call you didn't set up.
+
+### Storage services (`[storage]`)
+
+Where a workspace's data physically lives. By default there is nothing to
+configure — a workspace runs on the bundled local-disk store rooted at its own
+directory. To put workspaces on a pluggable backend, define one or more **named
+storage services**; each is selected at `dgml workspace create --storage <name>`
+and snapshotted into that workspace's [registry entry](#per-machine-workspace-registry).
+
+```toml
+# A named service: [storage.<name>]. provider is a dotted "module:Class" path to
+# a StorageService implementation; the remaining keys are that provider's options.
+[storage.acme-s3]
+provider   = "my_pkg.s3:S3Store"
+bucket     = "acme-contracts"
+region     = "us-east-1"
+secret_key = "…"            # credential — stays here / env, never in the registry
+```
+
+- **Named form** — `[storage.<name>]` subtables. `--storage acme-s3` at create
+  selects one; the reserved name **`default`** is what a workspace uses when
+  `--storage` is omitted (falls back to the bundled local store if there is no
+  `[storage.default]`).
+- **Flat form (back-compat)** — a bare `[storage]` table with a top-level
+  `provider` string *is* the `default` service. `provider` is therefore reserved at
+  the top of `[storage]`; a named service is always a subtable.
+- **Secrets vs. identity.** A service's non-secret identity (provider + options like
+  `bucket`/`region`) is snapshotted into the registry entry and is authoritative for
+  opening the workspace. Secret-hinted options (keys containing `key`, `secret`,
+  `token`, `password`, `credential`) are **never** written to the registry; they are
+  read from this template (or the provider SDK's own credential chain) at open and
+  are excluded from the seal fingerprint, so rotating a credential never trips it.
+- **Pinned semantics.** Editing a `[storage.<name>]` template does not change an
+  existing workspace's store — the workspace stays on its recorded snapshot. Use
+  `dgml workspace register --storage <name>` to re-seal it to the current template.
 
 ### The `[models]` tiers
 

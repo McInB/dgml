@@ -152,10 +152,13 @@ class Workspace:
 
     @functools.cached_property
     def store(self) -> StorageService:
-        """The workspace's storage backend, resolved from the ``storage`` section
-        of the config (defaulting to the bundled local-disk store). All workspace
-        data is read/written through this rather than the filesystem directly, so
-        a workspace can live on any pluggable backend.
+        """The workspace's storage backend. For a **registered** workspace the
+        non-secret identity comes from its registry entry's snapshot (authoritative
+        and self-contained), with secrets merged from the named ``config.toml``
+        template; an **unregistered** workspace falls back to the bundled local-disk
+        store (zero config). See :func:`dgml_core.storage_service.resolve_store_config`.
+        All workspace data is read/written through this rather than the filesystem
+        directly, so a workspace can live on any pluggable backend.
 
         **Cached for the lifetime of this ``Workspace``.** Resolving means reading
         and merging config, importing the provider module and constructing it —
@@ -169,9 +172,9 @@ class Workspace:
         is also a *non-data* descriptor, so a test that replaces the class
         attribute with a ``property`` still takes precedence over anything already
         cached."""
-        from .storage_service import load_storage_config, make_store
+        from .storage_service import make_store, resolve_store_config
 
-        return make_store(load_storage_config(self))
+        return make_store(resolve_store_config(self))
 
     def read_meta(self) -> dict[str, Any]:
         """Return the parsed ``workspace.json`` mapping, or ``{}`` when the file

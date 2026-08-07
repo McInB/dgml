@@ -90,19 +90,20 @@ The human-readable report (detected keys, the `[models]` block with inline
 tier→capability comments, next steps) goes to **stderr**; stdout stays the JSON
 contract. `provider` is `null` when no keys were detected.
 
-### `dgml workspace create [PATH] --organization ORG [--name NAME]`
+### `dgml workspace create [PATH] --organization ORG [--name NAME] [--storage NAME]`
 `PATH` is the optional directory to create the workspace in — pass it to avoid
 the redundant global `--workspace` (`dgml workspace create ./ws …`). When
 omitted, the root resolves in the usual order (global `--workspace` → `$DGML_HOME`
 → `./dgml-workspace`); a `PATH` given here overrides that.
 
 Steps:
-1. Creates `docsets/` and `files/`.
-2. Writes the workspace identity (`name` + `organization` + a freshly-minted
-   stable `workspace_id`) to `<workspace>/workspace.json`.
-3. Indexes the workspace in this machine's registry
+1. Indexes the workspace in this machine's registry
    (`~/.config/dgml/workspaces.json`) so it can be listed by
-   `dgml workspace list` and opened by id (`dgml --workspace <workspace_id>`).
+   `dgml workspace list` and opened by id (`dgml --workspace <workspace_id>`),
+   recording which **storage service** it lives on (below).
+2. Creates `docsets/` and `files/` on that storage service.
+3. Writes the workspace identity (`name` + `organization` + a freshly-minted
+   stable `workspace_id`) to `<workspace>/workspace.json`.
 
 Config is owned by `dgml init` and lives at the user level — `workspace create`
 does **not** create or touch it (nor does it write a per-workspace
@@ -118,6 +119,15 @@ identifier for your org (changing it later shifts the namespaces of newly
 generated XML). `--name` is optional human-readable identity metadata and
 defaults to the workspace directory name.
 
+`--storage NAME` selects the **storage service** the workspace is created on — a
+`[storage.<name>]` template in your `config.toml` (see
+[storage-layout.md](storage-layout.md)). A **non-secret snapshot** of that
+service (provider + non-secret options; never credentials) is recorded in the
+registry entry, which becomes the authoritative record of where the workspace's
+data lives. Omit `--storage` for the bundled local-disk default. A `--storage
+NAME` that names no configured service fails with `STORAGE_CONFIG_INVALID` before
+anything is created.
+
 Output (JSON):
 
 ```json
@@ -126,6 +136,7 @@ Output (JSON):
   "workspace_id": "ws_7f3k9q2m4b8xr5wa",
   "name": "dgml-workspace",
   "organization": "Acme",
+  "storage_service": "default",
   "initialized": true,
   "config_path": "~/.config/dgml/config.toml",
   "config_present": true
@@ -155,24 +166,32 @@ Output (JSON), sorted by id:
       "name": "Acme Contracts",
       "organization": "Acme",
       "root": "/Users/me/acme-ws",
+      "storage_service": "default",
       "created_at": "2026-08-05T12:00:00Z"
     }
   ]
 }
 ```
 
-### `dgml workspace register [PATH]`
-Index an existing workspace in this machine's registry — the recovery path when a
-workspace was created elsewhere or its directory **moved**. `PATH` is optional and
-defaults to the globally-resolved workspace. The workspace must already be
-initialized (run `dgml workspace create` otherwise → `WORKSPACE_NOT_INITIALIZED`).
+`storage_service` is the storage template each workspace was created on (see
+[storage-layout.md](storage-layout.md)).
 
-- If `workspace.json` already carries a `workspace_id`, it is re-registered under
-  that same id and the recorded `root` is updated to `PATH` (the moved-directory
-  fix). Unlike the additive auto-registration that happens on any open, this
-  **overwrites** an existing entry's root.
-- If it has no id (a legacy workspace), one is minted, written back to
-  `workspace.json`, and registered.
+### `dgml workspace register [PATH] [--storage NAME]`
+Index an existing workspace in this machine's registry — the recovery path when a
+workspace was created elsewhere, its directory **moved**, or you want to change or
+repair its storage service. `PATH` is optional and defaults to the
+globally-resolved workspace. The workspace must already be initialized (run
+`dgml workspace create` otherwise → `WORKSPACE_NOT_INITIALIZED`).
+
+- If the workspace is already indexed here, its entry is **re-sealed** in place
+  (identity taken from the existing entry, so this works even when the entry's
+  storage snapshot was hand-edited into an unopenable state — the repair for a
+  `STORAGE_BACKEND_MISMATCH`). `--storage NAME` switches the workspace to a
+  different `[storage.<name>]` service and re-snapshots it; omit it to keep the
+  current service.
+- Otherwise (e.g. a moved directory) its `workspace_id` is read from
+  `workspace.json` (minted and written back if absent) and a fresh entry is
+  recorded, re-pointing `root` to `PATH`.
 
 Normal use never needs this: `workspace create` registers new workspaces, and the
 first time any command opens a workspace it is auto-registered on that machine.
@@ -185,6 +204,7 @@ Output (JSON):
   "workspace_id": "ws_7f3k9q2m4b8xr5wa",
   "name": "Acme Contracts",
   "organization": "Acme",
+  "storage_service": "default",
   "registered": true
 }
 ```
@@ -1758,6 +1778,9 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `PDF_SLICE_FAILED` | soft | A PDF page-slice operation failed during generation. |
 | `TEXT_EXTRACTION_FAILED` | soft | pdfminer.six extracted no digital text; recorded (`text_extraction_error`). |
 | `CORRUPT_METADATA` | hard / soft | A `file.json`/`docset.json` is not valid JSON (also reported by `dgml check`). |
+| `STORAGE_CONFIG_INVALID` | hard | A `[storage]` / `[storage.<name>]` table is malformed, or `--storage NAME` names a service that isn't configured. |
+| `STORAGE_PROVIDER_UNRESOLVABLE` | hard | A storage `provider` dotted path (`module:Class`) can't be imported/resolved. |
+| `STORAGE_BACKEND_MISMATCH` | hard | The storage snapshot recorded for a workspace in `~/.config/dgml/workspaces.json` was hand-edited and no longer matches its sealed fingerprint. The registry is machine-managed; re-seal with `dgml workspace register <root> --storage <name>` (or restore the entry). |
 | `NOT_IMPLEMENTED` | hard | A requested mode/path is not implemented. |
 | `DGML_ERROR` | hard | Generic base code; specific codes above are preferred. |
 

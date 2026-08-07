@@ -56,6 +56,7 @@ from dgml_core.storage import (
     user_config_path,
     write_user_config,
 )
+from dgml_core.storage_service import DEFAULT_STORAGE_SERVICE
 from dgml_core.text_extraction import TextMode
 
 if TYPE_CHECKING:
@@ -284,6 +285,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "Defaults to the workspace directory name."
         ),
     )
+    ws_create.add_argument(
+        "--storage",
+        default=None,
+        help=(
+            "Name of the storage service to create this workspace on — a "
+            "[storage.<name>] table in your config.toml. Its non-secret config is "
+            "snapshotted into the workspace's registry entry. Omit for the bundled "
+            "local-disk default."
+        ),
+    )
     workspace_sub.add_parser(
         "list",
         parents=[common],
@@ -304,6 +315,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Workspace directory. Optional; defaults to the globally-resolved workspace.",
+    )
+    ws_register.add_argument(
+        "--storage",
+        default=None,
+        help=(
+            "Re-seal the workspace to this storage service (a [storage.<name>] table in "
+            "config.toml), re-snapshotting its config into the registry. Omit to keep the "
+            "workspace's current service."
+        ),
     )
     sub.add_parser("status", parents=[common], help="Show workspace summary.")
 
@@ -1046,6 +1066,12 @@ def main(argv: list[str] | None = None) -> int:
         # is what actually builds the workspace — so both run before the
         # workspace exists.
         if args.command not in ("init", "workspace"):
+            # Integrity-check the workspace's registry entry BEFORE its storage
+            # config is trusted to build the store — a hand-edited workspaces.json
+            # entry raises here (store-free), rather than silently opening a
+            # tampered backend. `workspace register` (exempt above) is how it is
+            # re-sealed, so it is never blocked by this.
+            ws_registry.verify_storage_seal(ws)
             if not ws.is_initialized():
                 raise WorkspaceNotInitialized(
                     f"workspace at {ws.root} is not initialized — run 'dgml workspace create'"
@@ -1198,11 +1224,18 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         if args.path is not None:
             ws = Workspace.resolve(args.path)
 
-        ws.init()
         name = args.name or ws.root.name
-        # Mints the workspace_id, writes it into workspace.json, and indexes the
-        # workspace in this machine's registry so it can be opened by id / listed.
-        workspace_id = ws_registry.register_workspace(ws, name=name, organization=args.organization)
+        service = args.storage or DEFAULT_STORAGE_SERVICE
+        # Register FIRST — this mints the id and seals the entry store-free, so it
+        # validates the named storage service (a bad --storage raises here before
+        # anything is created) and the entry exists for ws.store below to resolve
+        # the chosen backend.
+        workspace_id = ws_registry.register_workspace(
+            ws, name=name, organization=args.organization, service=service
+        )
+        # Now build the workspace through the selected backend.
+        ws.init()
+        ws.write_meta(name=name, organization=args.organization, workspace_id=workspace_id)
         # Stamp the current layout revision so a brand-new workspace is never
         # mistaken for an old one and re-scanned by the migration on first use.
         stamp_schema_version(ws)
@@ -1214,6 +1247,7 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             "workspace_id": workspace_id,
             "name": name,
             "organization": args.organization,
+            "storage_service": service,
             "initialized": True,
             "config_path": str(upath),
             "config_present": config_present,
@@ -1239,6 +1273,7 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                         "name": e.name,
                         "organization": e.organization,
                         "root": e.root,
+                        "storage_service": e.storage_service,
                         "created_at": e.created_at,
                     }
                     for e in ws_registry.list_entries()
@@ -1256,15 +1291,19 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                 f"workspace at {ws.root} is not initialized — run 'dgml workspace create'"
             )
         # Reuses the workspace's own id if it has one (a moved dir keeps its id),
-        # else mints and writes one back. Overwrites the recorded root (the moved-dir
-        # fix), unlike the additive auto-registration on open.
-        wid = ws_registry.register_workspace(ws)
+        # else mints and writes one back. Overwrites (re-seals) the entry — the
+        # adopt-new-config / repair-a-hand-edited-entry fix — unlike the additive
+        # auto-registration on open. --storage switches the storage service; omitted
+        # keeps the entry's current one.
+        wid = ws_registry.reregister_workspace(ws, service=args.storage)
+        entry = ws_registry.get(wid)
         _emit(
             {
                 "workspace": str(ws.root),
                 "workspace_id": wid,
                 "name": ws.display_name,
                 "organization": ws.organization,
+                "storage_service": entry.storage_service if entry else DEFAULT_STORAGE_SERVICE,
                 "registered": True,
             },
             fmt,

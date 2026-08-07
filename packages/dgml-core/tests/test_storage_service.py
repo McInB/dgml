@@ -395,6 +395,75 @@ def test_load_storage_config_invalid_provider(tmp_path: Path) -> None:
         load_storage_config(ws)
 
 
+def test_load_storage_config_named_service(tmp_path: Path) -> None:
+    from .conftest import write_config
+
+    ws = Workspace.resolve(tmp_path)
+    write_config(
+        ws,
+        {
+            "storage": {
+                "svcA": {"provider": "my_pkg:A", "bucket": "a"},
+                "svcB": {"provider": "my_pkg:B", "bucket": "b"},
+            }
+        },
+    )
+    a = load_storage_config(ws, "svcA")
+    assert (a.provider, a.options) == ("my_pkg:A", {"bucket": "a"})
+    b = load_storage_config(ws, "svcB")
+    assert (b.provider, b.options) == ("my_pkg:B", {"bucket": "b"})
+
+
+def test_load_storage_config_missing_named_service_raises(tmp_path: Path) -> None:
+    from .conftest import write_config
+
+    ws = Workspace.resolve(tmp_path)
+    write_config(ws, {"storage": {"svcA": {"provider": "my_pkg:A"}}})
+    with pytest.raises(StorageConfigInvalid):
+        load_storage_config(ws, "nope")
+    # ...but an absent "default" in named form still falls back to local disk.
+    cfg = load_storage_config(ws, "default")
+    assert cfg.provider == DEFAULT_STORAGE_PROVIDER
+
+
+def test_load_storage_config_flat_is_the_default_service(tmp_path: Path) -> None:
+    from .conftest import write_config
+
+    ws = Workspace.resolve(tmp_path)
+    write_config(ws, {"storage": {"provider": "my_pkg:Flat", "bucket": "b"}})
+    cfg = load_storage_config(ws, "default")
+    assert (cfg.provider, cfg.options) == ("my_pkg:Flat", {"bucket": "b"})
+    # A bare [storage] table cannot also name other services.
+    with pytest.raises(StorageConfigInvalid):
+        load_storage_config(ws, "svcA")
+
+
+# ---------------------------------------------------------- snapshot / resolution
+
+
+def test_storage_snapshot_drops_secrets_and_round_trips_fingerprint() -> None:
+    from dgml_core.storage_service import fingerprint_of_snapshot, storage_snapshot
+
+    cfg = StorageConfig(
+        provider="p:C",
+        root=Path("/tmp/ws"),
+        options={"bucket": "b", "region": "us-east-1", "secret_key": "SHH", "api_token": "T"},
+    )
+    snap = storage_snapshot(cfg)
+    assert snap == {"provider": "p:C", "bucket": "b", "region": "us-east-1"}  # secrets dropped
+    # The snapshot's fingerprint reproduces the config's fingerprint (integrity seal).
+    assert fingerprint_of_snapshot(snap) == storage_fingerprint(cfg)
+
+
+def test_resolve_store_config_unregistered_is_local(tmp_path: Path) -> None:
+    from dgml_core.storage_service import resolve_store_config
+
+    ws = Workspace.resolve(tmp_path)  # not in the registry
+    cfg = resolve_store_config(ws)
+    assert cfg.provider == DEFAULT_STORAGE_PROVIDER
+    assert cfg.root == ws.root
+
+
 # --------------------------------------------------------------------- fingerprint
 
 

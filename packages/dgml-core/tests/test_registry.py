@@ -34,6 +34,7 @@ def _entry(workspace_id: str, root: Path, *, name: str = "W", org: str = "acme")
         name=name,
         organization=org,
         root=str(root),
+        storage_service="default",
         storage={"provider": "dgml_core.storage_local:LocalStore"},
         storage_fingerprint="sha256:deadbeef",
         created_at="2026-08-05T12:00:00Z",
@@ -158,3 +159,36 @@ def test_resolve_path_typed_id_round_trips(tmp_path: Path) -> None:
 def test_workspace_constructed_by_root_has_no_id(tmp_path: Path) -> None:
     ws = Workspace(root=tmp_path / "ws")
     assert ws.workspace_id is None  # no registry / no workspace.json required
+
+
+# ---------------------------------------------------------------- integrity seal
+
+
+def test_verify_storage_seal_passes_and_no_ops(tmp_path: Path) -> None:
+    from dgml_core.errors import StorageBackendMismatch
+
+    ws = Workspace(root=tmp_path / "ws")
+    # Unregistered → trust-on-first-use no-op.
+    registry.verify_storage_seal(ws)
+    # A consistent snapshot/fingerprint pair passes.
+    registry.seal_entry(
+        ws,
+        workspace_id=registry.mint_workspace_id(),
+        name="W",
+        organization="acme",
+        service="default",
+    )
+    registry.verify_storage_seal(ws)  # does not raise
+
+    # An entry with an empty fingerprint is treated as unsealed (no raise).
+    stub = _entry("ws_unsealedxxxxxxxx", tmp_path / "u")
+    registry.register(RegistryEntry(**{**stub.__dict__, "storage_fingerprint": ""}))
+    registry.verify_storage_seal(Workspace(root=tmp_path / "u"))
+
+    # Hand-edit the sealed snapshot without fixing the fingerprint → mismatch.
+    entry = registry.get_by_root(ws.root)
+    assert entry is not None
+    tampered = RegistryEntry(**{**entry.__dict__, "storage": {"provider": "other:Store"}})
+    registry.register(tampered)
+    with pytest.raises(StorageBackendMismatch):
+        registry.verify_storage_seal(ws)

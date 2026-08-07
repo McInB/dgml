@@ -162,6 +162,8 @@ def test_workspace_create(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     # A stable workspace_id is minted at create and echoed in the payload.
     workspace_id = payload["workspace_id"]
     assert workspace_id.startswith("ws_")
+    # With no --storage it lands on the bundled default service.
+    assert payload["storage_service"] == "default"
     assert (ws / "docsets").is_dir()
     assert (ws / "files").is_dir()
     assert not (ws / "config.toml").exists()  # create writes no per-workspace config
@@ -334,6 +336,148 @@ def test_workspace_register_updates_moved_root(
     assert payload["workspace_id"] == wid  # id preserved from workspace.json
     moved = registry.get(wid)
     assert moved is not None and moved.root == str(dest.resolve())  # root re-pointed
+
+
+# A named storage service pointing at the bundled local store — a real, working
+# backend exercised through the named-service path (no fake provider needed).
+_LOCAL = "dgml_core.storage_local:LocalStore"
+
+
+def test_workspace_create_on_named_storage_service(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`create --storage <name>` snapshots that named service into the registry
+    entry, and the workspace opens through it."""
+    from dgml_core import registry
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_ws_config(ws, {"storage": {"svcA": {"provider": _LOCAL}}})
+    rc = main(["workspace", "create", str(ws), "--organization", "Acme", "--storage", "svcA"])
+    assert rc == 0
+    payload = _read_stdout(capsys)
+    assert payload["storage_service"] == "svcA"
+
+    entry = registry.get(payload["workspace_id"])
+    assert entry is not None
+    assert entry.storage_service == "svcA"
+    assert entry.storage == {"provider": _LOCAL}  # non-secret snapshot
+    assert entry.storage_fingerprint.startswith("sha256:")
+
+    # Opens through the sealed service.
+    rc = main(_ws_args(ws) + ["status"])
+    assert rc == 0
+    assert Path(_read_stdout(capsys)["workspace"]) == ws.resolve()
+
+
+def test_workspace_create_unconfigured_storage_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--storage <name>` for a service that isn't in config fails cleanly, before
+    anything is created."""
+    ws = tmp_path / "ws"
+    rc = main(["workspace", "create", str(ws), "--organization", "Acme", "--storage", "nope"])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "STORAGE_CONFIG_INVALID"
+    assert not (ws / "docsets").exists()  # nothing built
+
+
+def test_named_storage_is_self_contained_after_config_deletion(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The registry snapshot records where the data lives, so a workspace still
+    opens after its `[storage.<name>]` template is removed from config.toml."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_ws_config(ws, {"storage": {"svcA": {"provider": _LOCAL}}})
+    main(["workspace", "create", str(ws), "--organization", "Acme", "--storage", "svcA"])
+    capsys.readouterr()
+
+    # Remove the template entirely — the workspace must not be orphaned.
+    Workspace(root=ws).config_path.unlink()
+    rc = main(_ws_args(ws) + ["status"])
+    assert rc == 0
+    assert Path(_read_stdout(capsys)["workspace"]) == ws.resolve()
+
+
+def test_storage_seal_detects_hand_edited_registry(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Hand-editing the storage snapshot in workspaces.json (without fixing its
+    fingerprint) hard-fails the next open; `workspace register` re-seals it."""
+    from dgml_core import registry
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_ws_config(ws, {"storage": {"svcA": {"provider": _LOCAL}}})
+    main(["workspace", "create", str(ws), "--organization", "Acme", "--storage", "svcA"])
+    wid = _read_stdout(capsys)["workspace_id"]
+
+    # Tamper the recorded snapshot, leaving the sealed fingerprint stale.
+    path = registry.registry_path()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data[wid]["storage"]["provider"] = "some.other:Store"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    rc = main(_ws_args(ws) + ["status"])
+    assert rc == 1
+    assert _read_stderr(capsys)["error"]["code"] == "STORAGE_BACKEND_MISMATCH"
+
+    # Re-seal from config (register is exempt from the guard) → opens again.
+    rc = main(["workspace", "register", str(ws), "--storage", "svcA"])
+    assert rc == 0
+    capsys.readouterr()
+    assert main(_ws_args(ws) + ["status"]) == 0
+
+
+def test_config_edit_does_not_trip_the_seal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Editing the config template (not the registry) never trips the seal — the
+    entry's snapshot is authoritative and pinned."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_ws_config(ws, {"storage": {"svcA": {"provider": _LOCAL}}})
+    main(["workspace", "create", str(ws), "--organization", "Acme", "--storage", "svcA"])
+    capsys.readouterr()
+    # Point the template at a different provider — the workspace keeps its snapshot.
+    _write_ws_config(ws, {"storage": {"svcA": {"provider": "some.other:Store"}}})
+    assert main(_ws_args(ws) + ["status"]) == 0
+
+
+def test_workspace_register_switches_storage_service(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`workspace register --storage <name>` re-seals the entry to a different
+    named service."""
+    from dgml_core import registry
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_ws_config(ws, {"storage": {"svcA": {"provider": _LOCAL}, "svcB": {"provider": _LOCAL}}})
+    main(["workspace", "create", str(ws), "--organization", "Acme", "--storage", "svcA"])
+    wid = _read_stdout(capsys)["workspace_id"]
+
+    rc = main(["workspace", "register", str(ws), "--storage", "svcB"])
+    assert rc == 0
+    assert _read_stdout(capsys)["storage_service"] == "svcB"
+    entry = registry.get(wid)
+    assert entry is not None and entry.storage_service == "svcB"
+
+
+def test_workspace_list_shows_storage_service(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _write_ws_config(ws, {"storage": {"svcA": {"provider": _LOCAL}}})
+    main(["workspace", "create", str(ws), "--organization", "Acme", "--storage", "svcA"])
+    wid = _read_stdout(capsys)["workspace_id"]
+
+    rc = main(["workspace", "list"])
+    assert rc == 0
+    rows = {r["workspace_id"]: r for r in _read_stdout(capsys)["workspaces"]}
+    assert rows[wid]["storage_service"] == "svcA"
 
 
 def test_workspace_create_requires_organization(

@@ -24,11 +24,18 @@ workspace opened on two machines has one id but two registry entries with
 different roots. It is machine-managed (JSON, like every other metadata file —
 ``workspace.json``, ``docset.json``), not hand-edited like ``config.toml``.
 
-Today only ``LocalStore`` ships, so every entry records a local ``root`` and is
-opened through it. The ``storage`` identity + ``storage_fingerprint`` are recorded
-now (they cost nothing to compute) so the deferred store-mismatch guard is a small
-follow-up; nothing reads them yet. Reconstructing a *remote* store from
-``entry.storage`` (open-by-id with no local root) lands with the remote store.
+Each entry is **self-describing** about the workspace's store: ``storage_service``
+names the ``config.toml`` ``[storage.<name>]`` template it was created from, and
+``storage`` holds a **non-secret snapshot** of that template (provider + non-secret
+options). The snapshot is *authoritative* for opening the workspace, so it opens
+even if the template is later edited or removed — the registry alone records where a
+workspace's data lives. ``storage_fingerprint`` hashes the snapshot and is
+recomputed on open (:func:`verify_storage_seal`) to detect a hand-edited entry.
+Secrets never enter the registry; they are read from the template/env at open.
+
+Today only ``LocalStore`` ships, so every entry also records a local ``root``.
+Reconstructing a *remote* store from ``entry.storage`` (open-by-id with no local
+root) lands with the remote store.
 """
 
 from __future__ import annotations
@@ -76,18 +83,23 @@ def mint_workspace_id() -> str:
 
 @dataclass(frozen=True)
 class RegistryEntry:
-    """One workspace's row in the registry.
+    """One workspace's row in the registry — its self-describing store record.
 
     ``root`` is the local store location (always set today, since only
-    ``LocalStore`` ships); ``storage`` is the store *identity* (provider +
-    non-secret options) and ``storage_fingerprint`` its credential-free hash —
-    both recorded for the deferred store-mismatch guard.
+    ``LocalStore`` ships). ``storage_service`` names the ``config.toml``
+    ``[storage.<name>]`` template the workspace was created from (where its secrets
+    live, and the target of a re-seal). ``storage`` is the **non-secret snapshot**
+    of that template — provider + non-secret options — which is *authoritative* for
+    opening the workspace (so it opens even if the template is later edited/removed),
+    and ``storage_fingerprint`` is that snapshot's hash: recomputed on open to detect
+    a hand-edited entry (:class:`~dgml_core.errors.StorageBackendMismatch`).
     """
 
     workspace_id: str
     name: str
     organization: str
     root: str | None
+    storage_service: str
     storage: dict[str, Any]
     storage_fingerprint: str
     created_at: str
@@ -97,6 +109,7 @@ class RegistryEntry:
         d: dict[str, Any] = {
             "name": self.name,
             "organization": self.organization,
+            "storage_service": self.storage_service,
             "storage": self.storage,
             "storage_fingerprint": self.storage_fingerprint,
             "created_at": self.created_at,
@@ -108,11 +121,14 @@ class RegistryEntry:
 
     @classmethod
     def from_dict(cls, workspace_id: str, data: dict[str, Any]) -> RegistryEntry:
+        service = data.get("storage_service")
         return cls(
             workspace_id=workspace_id,
             name=str(data.get("name", "")),
             organization=str(data.get("organization", "")),
             root=data.get("root"),
+            # Back-compat: entries written before named services default to "default".
+            storage_service=service if isinstance(service, str) and service else "default",
             storage=data.get("storage", {}) if isinstance(data.get("storage"), dict) else {},
             storage_fingerprint=str(data.get("storage_fingerprint", "")),
             created_at=str(data.get("created_at", "")),
@@ -197,33 +213,42 @@ def entry_for(
     name: str,
     organization: str,
     workspace_id: str,
+    service: str,
     created_at: str,
     schema_version: int,
 ) -> RegistryEntry:
-    """Build the registry entry for ``ws``: its local ``root`` plus the store
-    *identity* (``provider`` — LocalStore carries no options) and a
-    credential-free ``storage_fingerprint``, recorded for the deferred guard.
+    """Build ``ws``'s self-describing registry entry from the named storage
+    ``service``: its local ``root``, the service ``name``, a **non-secret snapshot**
+    of that service's config (the authoritative location record), and the snapshot's
+    ``storage_fingerprint`` (recomputed on open to detect a hand-edited entry).
 
-    (Lazy imports keep ``registry`` free of a top-level ``storage_service`` /
-    ``migrations`` cycle.)"""
-    from .storage_service import load_storage_config, storage_fingerprint
+    Store-free — reads the ``config.toml`` template, not the store. (Lazy imports
+    keep ``registry`` free of a top-level ``storage_service`` / ``migrations``
+    cycle.)"""
+    from .storage_service import load_storage_config, storage_fingerprint, storage_snapshot
 
-    cfg = load_storage_config(ws)
+    cfg = load_storage_config(ws, service)
     return RegistryEntry(
         workspace_id=workspace_id,
         name=name,
         organization=organization,
         root=str(ws.root),
-        storage={"provider": cfg.provider},  # remote will extend this (non-secret conn info)
+        storage_service=service,
+        storage=storage_snapshot(cfg),
         storage_fingerprint=storage_fingerprint(cfg),
         created_at=created_at,
         schema_version=schema_version,
     )
 
 
-def _put_entry(ws: Workspace, *, workspace_id: str, name: str, organization: str) -> None:
-    """Build ``ws``'s registry entry (stamping ``created_at`` / current schema
-    version) and upsert it — the one place the entry is assembled and written."""
+def seal_entry(
+    ws: Workspace, *, workspace_id: str, name: str, organization: str, service: str
+) -> None:
+    """Assemble ``ws``'s entry for the named ``service`` (stamping ``created_at`` /
+    current schema version) and upsert it — the one place an entry is written.
+    Store-free (see :func:`entry_for`), so it is safe to call *before* the store is
+    first used at ``workspace create`` (the entry must exist for ``Workspace.store``
+    to resolve the chosen service)."""
     from .errors import now_iso
     from .migrations import WORKSPACE_SCHEMA_VERSION
 
@@ -233,29 +258,70 @@ def _put_entry(ws: Workspace, *, workspace_id: str, name: str, organization: str
             name=name,
             organization=organization,
             workspace_id=workspace_id,
+            service=service,
             created_at=now_iso(),
             schema_version=WORKSPACE_SCHEMA_VERSION,
         )
     )
 
 
-def register_workspace(
-    ws: Workspace, *, name: str | None = None, organization: str | None = None
-) -> str:
-    """Register ``ws`` on this machine, returning its ``workspace_id``.
+def register_workspace(ws: Workspace, *, name: str, organization: str, service: str) -> str:
+    """Register a **brand-new** workspace on this machine and return its minted
+    ``workspace_id``: mints the id and seals the entry for the named ``service``.
 
-    Mints an id and writes it back into ``workspace.json`` when the workspace lacks
-    one (so the directory self-describes), then upserts the registry entry. This is
-    the *authoritative* register — a repeat call re-points the recorded ``root`` (the
-    moved-directory fix), unlike the additive :func:`ensure_registered`.
-    ``name``/``organization`` default to the workspace's own identity."""
-    name = ws.display_name if name is None else name
-    organization = ws.organization if organization is None else organization
-    wid = ws.workspace_id
-    if wid is None:
-        wid = mint_workspace_id()
-        ws.write_meta(name=name, organization=organization, workspace_id=wid)
-    _put_entry(ws, workspace_id=wid, name=name, organization=organization)
+    Store-free (see :func:`seal_entry`), so it is the *first* step of ``dgml
+    workspace create`` — it runs before ``ws.init()`` / ``ws.write_meta`` so that
+    ``Workspace.store`` resolves the chosen backend when the caller then builds the
+    workspace through it. The caller supplies ``name``/``organization``/``service``;
+    there is no ``workspace.json`` to read yet. To re-register an *existing*
+    workspace instead, use :func:`reregister_workspace`."""
+    wid = mint_workspace_id()
+    seal_entry(ws, workspace_id=wid, name=name, organization=organization, service=service)
+    return wid
+
+
+def reregister_workspace(
+    ws: Workspace,
+    *,
+    name: str | None = None,
+    organization: str | None = None,
+    service: str | None = None,
+) -> str:
+    """Re-register an **already-initialized** ``ws`` on this machine, returning its
+    ``workspace_id`` (minting one into ``workspace.json`` if absent).
+
+    The *authoritative* re-register (``dgml workspace register``) — it re-seals the
+    entry (the moved-directory / adopt-new-config / repair-a-hand-edited-entry fix),
+    unlike the additive :func:`ensure_registered`. ``service`` selects the storage
+    template to snapshot; when ``None`` it keeps the entry's current service (else
+    ``"default"``). ``name``/``organization`` default to the workspace's own
+    identity. (For a brand-new workspace use :func:`register_workspace`.)"""
+    from .storage_service import DEFAULT_STORAGE_SERVICE
+
+    existing = get_by_root(ws.root)
+    if existing is not None:
+        # Already indexed: take identity from the (store-free) entry, so a re-seal
+        # works even when the entry's own storage snapshot was hand-edited into an
+        # unopenable state — that is exactly what this repairs.
+        wid = existing.workspace_id
+        name = existing.name if name is None else name
+        organization = existing.organization if organization is None else organization
+        if service is None:
+            service = existing.storage_service
+    else:
+        # Not indexed here (e.g. a moved directory): read identity from the
+        # workspace itself, minting an id if it lacks one.
+        name = ws.display_name if name is None else name
+        organization = ws.organization if organization is None else organization
+        current = ws.workspace_id
+        if current is None:
+            wid = mint_workspace_id()
+            ws.write_meta(name=name, organization=organization, workspace_id=wid)
+        else:
+            wid = current
+        if service is None:
+            service = DEFAULT_STORAGE_SERVICE
+    seal_entry(ws, workspace_id=wid, name=name, organization=organization, service=service)
     return wid
 
 
@@ -263,10 +329,53 @@ def ensure_registered(ws: Workspace) -> None:
     """Add ``ws`` to this machine's registry if it has an id and isn't indexed yet.
 
     Idempotent and additive: never overwrites an existing entry (that is what
-    :func:`register_workspace` / the explicit ``dgml workspace register`` does). A
+    :func:`reregister_workspace` / the explicit ``dgml workspace register`` does). A
     no-op for a workspace with no ``workspace_id`` (one is minted by the backfill
-    migration on first open)."""
+    migration on first open). Snapshots the ``"default"`` service — an
+    unregistered workspace opened on this machine runs on the bundled local store,
+    so that is what it is being registered as (an explicit ``workspace register
+    --storage`` re-seals it to a named service)."""
+    from .storage_service import DEFAULT_STORAGE_SERVICE
+
     wid = ws.workspace_id
     if wid is None or get(wid) is not None:
         return
-    _put_entry(ws, workspace_id=wid, name=ws.display_name, organization=ws.organization)
+    seal_entry(
+        ws,
+        workspace_id=wid,
+        name=ws.display_name,
+        organization=ws.organization,
+        service=DEFAULT_STORAGE_SERVICE,
+    )
+
+
+def verify_storage_seal(ws: Workspace) -> None:
+    """Refuse to open ``ws`` if its registry entry's ``storage`` snapshot was
+    hand-edited so it no longer matches the ``storage_fingerprint`` sealed beside it.
+
+    An **integrity check on the registry entry itself** — the registry is
+    machine-managed, so a snapshot that doesn't hash to its recorded fingerprint
+    means the JSON was edited out of band, and the workspace's store config can no
+    longer be trusted. Pure local read + recompute; it does **not** consult
+    ``config.toml`` (editing a template never trips this — the entry's snapshot is
+    authoritative). A no-op for an unregistered or unsealed workspace
+    (trust-on-first-use).
+
+    Store-free, so it can run before ``Workspace.store`` is first built — a tampered
+    entry is caught before its config is used to construct the backend. Raises
+    :class:`~dgml_core.errors.StorageBackendMismatch`."""
+    from .storage_service import fingerprint_of_snapshot
+
+    entry = get_by_root(ws.root)
+    if entry is None or not entry.storage_fingerprint:
+        return
+    if fingerprint_of_snapshot(entry.storage) != entry.storage_fingerprint:
+        from .errors import StorageBackendMismatch
+
+        raise StorageBackendMismatch(
+            f"the storage config recorded for this workspace in the registry "
+            f"({registry_path()}) has been modified and no longer matches its sealed "
+            f"fingerprint. The registry is machine-managed — do not hand-edit it. Run "
+            f"`dgml workspace register {ws.root} --storage {entry.storage_service}` to "
+            f"re-seal it from your config, or restore the entry."
+        )
