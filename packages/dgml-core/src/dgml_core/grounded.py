@@ -87,6 +87,7 @@ from .matching import (
 from .models_config import ConfigSection, Tier, resolve_tiered_model
 from .prompts import get as prompt
 from .storage import Workspace
+from .toon import encode_phase3_words
 from .usage import (
     OPERATION_EXTRACT_VALUES,
     OPERATION_SCHEMA_GENERATE,
@@ -1127,9 +1128,13 @@ def _phase3_user_prompt(
         f"- {a['path']}: text={json.dumps(a['text'])} bbox={a['bounding_box']}"
         for a in page_anchors
     ] or ["(none — these are the first values located on this page)"]
+    # The OCR word listing is always rendered as a compact TOON table (see
+    # :mod:`dgml_core.toon`, measured at -72.2% input tokens versus the former
+    # ``json.dumps(..., indent=2)`` array). Lossless; only the words given TO
+    # the model change — the ``submit_locations`` response contract is untouched.
     return prompt("extraction_values_phase3_user").format(
         page_number=page_number,
-        ocr_words=json.dumps(page_words.get("words", []), indent=2),
+        ocr_words=encode_phase3_words(page_words.get("words", [])),
         known_locations="\n".join(anchors_lines),
         needs_locating="\n".join(items_lines),
     )

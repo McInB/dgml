@@ -42,8 +42,10 @@ from dgml_core.generation.prompts import get as get_prompt
 from dgml_core.generation.render import render_xml
 from dgml_core.generation.transcribe import (
     _append_continuation,
+    _parse_window_compact,
     _parse_window_json,
     loads_tolerant,
+    parse_window_any,
 )
 from lxml import etree  # type: ignore[import-untyped]
 
@@ -235,6 +237,204 @@ def test_window_context_gives_section_path_and_open_table_header() -> None:
     assert "4 Payments" not in ctx
     assert "Open table columns: Item | Qty" in ctx
     assert _window_context([]) == ""
+
+
+# ── Pass-A generation compaction (compact tab-delimited "TL" wire format) ────
+
+
+def _tla_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+
+
+def _tla_encode(payload: dict[str, Any]) -> str:
+    """Test-local Pass-A TL encoder mirroring the wire grammar the model is
+    taught (canonical: drops checked entries outside options, like parse_block)."""
+    lines: list[str] = []
+    cont = str(payload.get("continues", "") or "")
+    if cont:
+        lines.append("C\t" + _tla_escape(cont))
+    for b in payload.get("blocks", []):
+        s = b.get("structure")
+        if s == "heading":
+            lines.append(
+                f"H{b.get('level', 1)}\t{_tla_escape(b.get('lim', ''))}"
+                f"\t{_tla_escape(b.get('text', ''))}"
+            )
+        elif s == "item":
+            lines.append(f"I\t{_tla_escape(b.get('lim', ''))}\t{_tla_escape(b.get('text', ''))}")
+        elif s == "row":
+            lines.append("R\t" + "\t".join(_tla_escape(c) for c in b.get("cells", [])))
+        elif s == "field" and b.get("options"):
+            opts: list[str] = []
+            for o in b["options"]:
+                body = _tla_escape(o)
+                if body.startswith("*"):
+                    body = "\\" + body
+                opts.append(("*" if o in b.get("checked", []) else "") + body)
+            lines.append(
+                f"O\t{_tla_escape(b.get('lim', ''))}\t{_tla_escape(b.get('label', ''))}"
+                f"\t{_tla_escape(b.get('value', ''))}\t" + "\t".join(opts)
+            )
+        elif s == "field":
+            lines.append(
+                f"F\t{_tla_escape(b.get('lim', ''))}\t{_tla_escape(b.get('label', ''))}"
+                f"\t{_tla_escape(b.get('value', ''))}"
+            )
+        else:
+            lines.append("P\t" + _tla_escape(b.get("text", "")))
+    return "\n".join(lines)
+
+
+def _canon_blocks(payload: dict[str, Any]) -> list[Block]:
+    """What the pipeline consumes: each raw block through parse_block."""
+    out: list[Block] = []
+    for i, raw_block in enumerate(payload.get("blocks", [])):
+        block = parse_block(raw_block, f"b{i:04d}")
+        if block is not None:
+            out.append(block)
+    return out
+
+
+def test_parse_window_compact_round_trips_every_structure() -> None:
+    """TL-encoded windows decode to payloads that parse_block consumes
+    IDENTICALLY to the equivalent JSON payload — every structure and field."""
+    payload: dict[str, Any] = {
+        "continues": "…finishing the previous window's sentence.",
+        "blocks": [
+            {"structure": "heading", "level": 2, "lim": "2.1", "text": "Deliverables"},
+            {"structure": "heading", "level": 1, "lim": "", "text": "PROPERTY SECTION"},
+            {"structure": "p", "text": "MagicSoft, Inc.\n1648 NW Market St\nSeattle, WA 98107"},
+            {"structure": "p", "text": "tab\there and a back\\slash"},
+            {"structure": "item", "lim": "(a)", "text": "Provide monthly status reports"},
+            {"structure": "row", "cells": ["Software x 50 seats", "", "$105,000"]},
+            {"structure": "field", "lim": "ITEM 3", "label": "Date", "value": "1 July 2025"},
+            {"structure": "field", "lim": "", "label": "AGENCY NAME", "value": ""},
+            {
+                "structure": "field",
+                "label": "POLICY TYPE",
+                "value": "",
+                "options": ["PROPERTY", "INLAND MARINE", "*STARRED PRINT"],
+                "checked": ["INLAND MARINE", "NOT A PRINTED OPTION"],
+            },
+        ],
+    }
+    decoded, dropped = _parse_window_compact(_tla_encode(payload))
+    assert dropped == 0
+    json_payload = _parse_window_json(json.dumps(payload))
+    assert decoded["continues"] == json_payload["continues"]
+    # Canonical equivalence: parse_block drops the hallucinated checked entry
+    # on the JSON path; the encoder never emits it — identical Block lists.
+    assert _canon_blocks(decoded) == _canon_blocks(json_payload)
+    # The literal-asterisk option survives unchecked; the marked one is checked.
+    o_block = decoded["blocks"][-1]
+    assert o_block["options"] == ["PROPERTY", "INLAND MARINE", "*STARRED PRINT"]
+    assert o_block["checked"] == ["INLAND MARINE"]
+
+
+def test_parse_window_compact_rejoins_unescaped_tab_in_free_text() -> None:
+    # The free text is the LAST field: a model-emitted raw tab inside it must
+    # not truncate it — the tab-split tail is re-joined (P text, F value).
+    decoded, dropped = _parse_window_compact("P\tcolumn a\tcolumn b\nF\t\tTOTAL\t1,000\tUSD")
+    assert dropped == 0
+    assert decoded["blocks"][0]["text"] == "column a\tcolumn b"
+    assert decoded["blocks"][1]["value"] == "1,000\tUSD"
+
+
+def test_parse_window_compact_drops_only_malformed_lines() -> None:
+    text = "\n".join(
+        [
+            "C\tfinishes the previous block.",
+            "ZZZ\tunknown sigil",
+            "P\tkept paragraph",
+            "just prose with no tab structure",
+            "H2\t1.\tScope",
+            "trunc",  # a half-written trailing line — the natural salvage case
+        ]
+    )
+    decoded, dropped = _parse_window_compact(text)
+    assert dropped == 3  # each bad line costs itself, never the window
+    assert decoded["continues"] == "finishes the previous block."
+    assert [b["structure"] for b in decoded["blocks"]] == ["p", "heading"]
+
+
+def test_parse_window_any_sniffs_json_and_compact() -> None:
+    payload = {"continues": "", "blocks": [{"structure": "p", "text": "plain"}]}
+    bare = json.dumps(payload)
+    fenced = f"```json\n{bare}\n```"
+    # Legacy JSON replies (bare and fenced) parse exactly as they do today.
+    assert parse_window_any(bare) == _parse_window_json(bare) == payload
+    assert parse_window_any(fenced) == _parse_window_json(fenced) == payload
+    # Compact replies route to the line decoder — bare or fenced.
+    assert parse_window_any("P\tplain") == payload
+    assert parse_window_any("```\nP\tplain\n```") == payload
+    # Damaged JSON still raises, so the caller's _salvage_window_json fallback
+    # runs unchanged.
+    with pytest.raises(json.JSONDecodeError):
+        parse_window_any('{"continues": "", "blocks": [{"structure"')
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "P\tHello world",
+        json.dumps({"continues": "", "blocks": [{"structure": "p", "text": "Hello world"}]}),
+    ],
+    ids=["compact-reply", "legacy-json-reply"],
+)
+def test_transcribe_document_is_unconditionally_compact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reply: str
+) -> None:
+    """Pass A always TELLS the model to emit the compact tab-delimited format —
+    there is no env flag — yet still READS a legacy-JSON reply via content
+    sniffing, so a re-run over cached ``*_wNN_raw.json`` JSON artifacts from
+    older runs keeps parsing."""
+    from dgml_core.generation import document as document_mod
+    from dgml_core.generation import transcribe as transcribe_mod
+    from dgml_core.generation.transcribe import SYSTEM_PROMPT
+
+    seen: list[dict[str, Any]] = []
+
+    def fake_call_continued(config: llm.LLMConfig, **kwargs: object) -> str:
+        seen.append(dict(kwargs))
+        return reply
+
+    monkeypatch.setattr(llm, "call_continued", fake_call_continued)
+    monkeypatch.setattr(transcribe_mod, "_count_pages", lambda _b: 1)
+    monkeypatch.setattr(document_mod, "slice_pdf", lambda b, _pages: b)
+
+    blocks = transcribe_mod.transcribe_document(
+        b"%PDF-fake",
+        doc_name="doc.pdf",
+        config=llm.LLMConfig(model="anthropic/claude-haiku-4-5"),
+        cache_dir=tmp_path,
+        debug=True,
+    )
+    assert [b.text for b in blocks] == ["Hello world"]
+    # The model is unconditionally prompted with the compact system + window
+    # instruction; SYSTEM_PROMPT is that compact prompt.
+    assert [str(k["system_prompt"]) for k in seen] == [get_prompt("transcribe_system_compact")]
+    assert seen[0]["system_prompt"] == SYSTEM_PROMPT
+    assert get_prompt("transcribe_window_compact") in seen[0]["user_content"][0]["text"]
+    # Raw cache artifact keeps its filename regardless of the wire format.
+    assert (tmp_path / "doc_w01_raw.json").read_text(encoding="utf-8") == reply
+    assert (tmp_path / "doc_blocks.json").exists()
+
+
+def test_transcribe_compact_prompt_has_rules_and_worked_example() -> None:
+    """The (now sole) transcription prompt teaches the compact TL grammar by a
+    worked example and carries the verbatim transcription rules, with no JSON
+    contract left behind."""
+    compact = get_prompt("transcribe_system_compact")
+    assert "H1\t" in compact  # worked example rendered with real tabs
+    assert "*INLAND MARINE" in compact  # a checked option demonstrated
+    assert "\\n" in compact  # escaped-newline multiline P demonstrated
+    assert '"structure"' not in compact  # no JSON contract left behind
+    for rule in (
+        "1. Copy text verbatim. Never paraphrase, never skip, never re-order.",
+        "4. Exclude only repeated page decorations (page numbers, running headers).",
+        "roman sub-headings sit one level below the heading that contains them.",
+    ):
+        assert rule in compact
 
 
 # ── labeling ─────────────────────────────────────────────────────────────────
