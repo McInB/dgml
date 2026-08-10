@@ -271,6 +271,14 @@ class LocalStore(StorageService):
                     target = dest / path.relative_to(staging)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     path.replace(target)
+        # The per-render temp dir is gone now; drop the shared scratch parent too so
+        # a workspace isn't left with an empty ``.cache/staging/``. ``rmdir`` removes
+        # only an *empty* directory (atomic on every OS) and raises ``OSError``
+        # otherwise — ``ENOTEMPTY`` on POSIX, the equivalent on Windows — which we
+        # ignore, so a concurrent ``staged_write`` still holding a temp dir here is
+        # safe.
+        with contextlib.suppress(OSError):
+            scratch.rmdir()
 
     @contextlib.contextmanager
     def materialize_dir(self, prefix: str) -> Iterator[Path]:

@@ -623,6 +623,17 @@ def test_staged_write_scratch_is_not_visible_as_blobs(tmp_path: Path) -> None:
     assert store.list_blobs("") == [f"{_PAGES}/page_1.png"]
 
 
+def test_staged_write_cleans_up_empty_scratch_dir(tmp_path: Path) -> None:
+    """LocalStore stages under ``.cache/staging/``; a successful render must not
+    leave that scratch parent behind as an empty directory."""
+    store = local_store(tmp_path)
+    with store.staged_write(_PAGES) as d:
+        (d / "page_1.png").write_bytes(b"img1")
+        assert (tmp_path / ".cache" / "staging").is_dir()  # holds the temp dir mid-flight
+    assert not (tmp_path / ".cache" / "staging").exists()  # removed once empty on exit
+    assert store.get_blob(f"{_PAGES}/page_1.png") == b"img1"  # results still persisted
+
+
 def test_materialize_dir_local_yields_real_dir_zero_copy(tmp_path: Path) -> None:
     store = local_store(tmp_path)
     store.put_blob("files/a/page_images/page_1.png", b"img1")
