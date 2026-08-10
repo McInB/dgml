@@ -98,12 +98,18 @@ class FileStore:
         self.ws = workspace
 
     def list_all(self) -> list[FileRecord]:
-        # find_docs enumerates files/*/file.json (sorted, skipping corrupt),
-        # matching the historical directory scan.
-        return [
-            FileRecord.from_json(data)
-            for data in self.ws.store.find_docs(layout.Collection.FILES, {})
-        ]
+        # Sorted here, not by the store: ``find_docs`` has no defined ordering
+        # (LocalStore returns path order, a document database returns insertion
+        # order). Beyond the user-visible listing, ``_find_conflicts`` scans this
+        # and returns the *first* match, so an unstable order would let the same
+        # duplicate report a different existing id per backend.
+        return sorted(
+            (
+                FileRecord.from_json(data)
+                for data in self.ws.store.find_docs(layout.Collection.FILES, {})
+            ),
+            key=lambda record: record.id,
+        )
 
     def get(self, file_id: str) -> FileRecord:
         if not file_id.strip():

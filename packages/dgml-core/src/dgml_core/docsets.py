@@ -45,12 +45,17 @@ class DocSetStore:
             raise DocSetNotFound(f"docset '{docset_id}' not found")
 
     def list_all(self) -> list[DocSet]:
-        # find_docs enumerates docsets/*/docset.json (sorted, skipping corrupt),
-        # matching the historical directory scan.
-        return [
-            DocSet.from_json(data)
-            for data in self.ws.store.find_docs(layout.Collection.DOCSETS, {})
-        ]
+        # Sorted here, not by the store: ``find_docs`` has no defined ordering
+        # (LocalStore returns path order, a document database returns insertion
+        # order), and this list is user-visible CLI output that must not depend
+        # on which backend the workspace happens to live on.
+        return sorted(
+            (
+                DocSet.from_json(data)
+                for data in self.ws.store.find_docs(layout.Collection.DOCSETS, {})
+            ),
+            key=lambda ds: ds.id,
+        )
 
     def get(self, docset_id: str) -> DocSet:
         if not docset_id.strip():

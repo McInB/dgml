@@ -322,7 +322,12 @@ class StorageService(ABC):
     @abstractmethod
     def find_docs(self, collection: str, query: Mapping[str, Any]) -> list[dict[str, Any]]:
         """All documents in ``collection`` matching every field in ``query``
-        (Mongo ``find``). An empty ``query`` returns the whole collection."""
+        (Mongo ``find``). An empty ``query`` returns the whole collection.
+
+        **Ordering is unspecified.** A path-shaped store returns path order, a
+        document database returns insertion order, and neither is wrong. A
+        caller whose output is user-visible or order-sensitive must sort — see
+        ``FileStore.list_all`` / ``DocSetStore.list_all``."""
 
     @abstractmethod
     def put_doc(self, collection: str, doc_id: str, doc: dict[str, Any]) -> None:

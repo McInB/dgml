@@ -57,6 +57,49 @@ jobs:
           UV_PYTHON: ${{ matrix.python-version }}
       - run: uv run pytest
 
+  storage-parity:
+    # The sample S3+Mongo store, run against real backing services.
+    #
+    # The default `uv run pytest` already runs this suite against in-process
+    # fakes (moto/mongomock), so it is never silently absent. This job points it
+    # at MinIO and MongoDB instead, which is what exercises wire behaviour the
+    # fakes only approximate: genuine list_objects_v2 pagination, real error
+    # codes, multipart. Two of the storage layer's worst defects were invisible
+    # to every local-disk test, so this is the job that stops that recurring.
+    name: Storage parity (S3 + MongoDB)
+    runs-on: ubuntu-latest
+    services:
+      minio:
+        image: bitnami/minio:latest
+        env:
+          MINIO_ROOT_USER: dgmltest
+          MINIO_ROOT_PASSWORD: dgmltest123
+        ports: ["9000:9000"]
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1})'"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ghostscript
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ghostscript
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --dev --locked
+      - run: uv run pytest packages/dgml-storage-s3 -v
+        env:
+          DGML_TEST_S3_ENDPOINT: http://localhost:9000
+          DGML_TEST_MONGO_URI: mongodb://localhost:27017
+          AWS_ACCESS_KEY_ID: dgmltest
+          AWS_SECRET_ACCESS_KEY: dgmltest123
+          AWS_DEFAULT_REGION: us-east-1
+
   license-audit:
     name: License audit
     runs-on: ubuntu-latest
