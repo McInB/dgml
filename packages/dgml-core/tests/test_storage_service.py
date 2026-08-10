@@ -623,6 +623,21 @@ def test_staged_write_scratch_is_not_visible_as_blobs(tmp_path: Path) -> None:
     assert store.list_blobs("") == [f"{_PAGES}/page_1.png"]
 
 
+def test_coverage_report_round_trips_through_local_store(tmp_path: Path) -> None:
+    """The --debug coverage report is a docset-level blob: LocalStore must accept
+    the write, list it, and delete it with the prefix (regression — the allow-list
+    didn't recognise the key, so put_blob rejected it)."""
+    from dgml_core import layout
+
+    store = local_store(tmp_path)
+    key = layout.docset_coverage_report_key("d1")
+    store.put_blob(key, b'{"coverage": 0.9}')  # would raise INVALID_ARGUMENT before the fix
+    assert store.get_blob(key) == b'{"coverage": 0.9}'
+    assert key in store.list_blobs("docsets/d1/")  # visible to readers
+    store.delete_blobs("docsets/d1/")
+    assert not store.blob_exists(key)  # and cleaned up with the docset
+
+
 def test_staged_write_cleans_up_empty_scratch_dir(tmp_path: Path) -> None:
     """LocalStore stages under ``.cache/staging/``; a successful render must not
     leave that scratch parent behind as an empty directory."""

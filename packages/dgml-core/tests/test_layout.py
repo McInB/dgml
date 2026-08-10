@@ -74,11 +74,21 @@ def test_sibling_ids_do_not_share_a_prefix() -> None:
         "docsets/d1/extraction-schema.rnc",
         "docsets/d1/full-schema.rnc",
         "docsets/d1/schema.json",
+        "docsets/d1/coverage_report.json",  # --debug word-coverage report
         "docsets/d1/files/f1/report.dgml.xml",
         "docsets/d1/cache/labeled/doc.json",
     ],
 )
 def test_blob_keys_accepted(key: str) -> None:
+    assert layout.is_blob_key(key) is True
+
+
+def test_coverage_report_key_is_a_writable_blob() -> None:
+    # The builder and the allow-list must agree, so --debug docset generate can
+    # persist the report through the store (regression: it collided with the
+    # allow-list and put_blob rejected it).
+    key = layout.docset_coverage_report_key("d1")
+    assert key == "docsets/d1/coverage_report.json"
     assert layout.is_blob_key(key) is True
 
 

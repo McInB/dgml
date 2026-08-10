@@ -79,6 +79,9 @@ USAGE_FILE = "usage.jsonl"
 GENERATION_SCHEMA_FILE = "schema.json"
 EXTRACTION_SCHEMA_FILE = "extraction-schema.rnc"
 FULL_SCHEMA_FILE = "full-schema.rnc"
+# The optional word-coverage report, written directly under the docset dir only
+# under ``dgml --debug docset generate``.
+COVERAGE_REPORT_FILE = "coverage_report.json"
 PAGE_IMAGE_TEMPLATE = "page_%d.png"
 PAGE_TEXT_TEMPLATE = "page_%d.json"
 DGML_XML_SUFFIX = ".dgml.xml"
@@ -201,6 +204,11 @@ def pair_artifact_key(docset_id: str, file_id: str, filename: str) -> str:
     return f"{docset_pair_prefix(docset_id, file_id)}{filename}"
 
 
+def docset_coverage_report_key(docset_id: str) -> str:
+    """The optional ``--debug`` word-coverage report: ``docsets/<id>/coverage_report.json``."""
+    return f"{docset_prefix(docset_id)}{COVERAGE_REPORT_FILE}"
+
+
 def generation_cache_prefix(docset_id: str) -> str:
     """The generation run's reloadable working cache."""
     return f"{docset_prefix(docset_id)}{GENERATION_CACHE_DIR}/"
@@ -267,6 +275,8 @@ _BLOB_RULES: tuple[re.Pattern[str], ...] = (
         rf"^{DOCSETS_DIR}/{_SEG}/"
         rf"(?:{EXTRACTION_SCHEMA_FILE}|{FULL_SCHEMA_FILE}|{GENERATION_SCHEMA_FILE})$"
     ),
+    # The optional --debug word-coverage report, directly under the docset dir.
+    re.compile(rf"^{DOCSETS_DIR}/{_SEG}/{re.escape(COVERAGE_REPORT_FILE)}$"),
     re.compile(rf"^{DOCSETS_DIR}/{_SEG}/{GENERATION_CACHE_DIR}/.+$"),
     re.compile(rf"^{DOCSETS_DIR}/{_SEG}/{DOCSET_FILES_DIR}/{_SEG}/{_SEG}$"),
     # The stored original / converted PDF sits directly in the file directory,

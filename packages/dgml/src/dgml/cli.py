@@ -2383,7 +2383,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     # didn't pass --no-coverage, but the coverage_report.json *file* is an
     # intermediate artifact persisted only under --debug.
     compute_cov = not args.no_coverage
-    cov_report_key = f"{output_key}/coverage_report.json" if (compute_cov and args.debug) else None
+    cov_report_key = (
+        layout.docset_coverage_report_key(args.docset_id) if (compute_cov and args.debug) else None
+    )
     written: list[dict[str, Any]] = []
     rerendered: list[str] = []
     cov_results: list[dict[str, Any]] = []
