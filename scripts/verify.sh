@@ -57,8 +57,15 @@ if [[ $fast -eq 0 ]]; then
   # that is what CI's storage-parity job does, and where wire behaviour the
   # fakes only approximate (pagination, real error codes) actually gets tested.
   if curl -sf http://localhost:9000/minio/health/live >/dev/null 2>&1; then
+    # boto3 refuses to sign anonymously, so the suite needs credentials even
+    # though MinIO is local. Default to the docker-compose root user; a real
+    # AWS_* already in the environment wins, so this never overrides a
+    # developer pointed at a different endpoint.
     DGML_TEST_S3_ENDPOINT=http://localhost:9000 \
     DGML_TEST_MONGO_URI=mongodb://localhost:27017 \
+    AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-dgmltest}" \
+    AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-dgmltest123}" \
+    AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
       run uv run pytest packages/dgml-storage-s3
   else
     printf '\n· skipping real-service storage parity (MinIO not reachable);\n'

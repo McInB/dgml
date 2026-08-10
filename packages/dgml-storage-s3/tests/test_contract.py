@@ -67,6 +67,44 @@ def test_no_config_field_would_carry_a_credential() -> None:
     assert offenders == [], f"credential-shaped config fields: {offenders}"
 
 
+def test_prefix_option_isolates_workspaces_sharing_a_bucket(s3_config: StorageConfig) -> None:
+    """``prefix`` is what lets several workspaces share one bucket.
+
+    Without it a second workspace inherits the first's blobs while getting a
+    fresh document store, and ``dgml check`` reports them as ``missing_metadata``
+    orphans. The keys must carry the prefix on the wire and have it stripped on
+    the way back, so callers never see it."""
+    import boto3
+
+    opts = dict(s3_config.options)
+    client_kwargs: dict[str, object] = {"region_name": "us-east-1"}
+    if opts.get("endpoint_url"):
+        client_kwargs["endpoint_url"] = opts["endpoint_url"]
+
+    stores = {}
+    for tenant in ("alpha", "beta"):
+        cfg = StorageConfig(s3_config.provider, s3_config.root, {**opts, "prefix": tenant})
+        stores[tenant] = S3MongoStore(S3MongoStore.parse_config(cfg))
+        stores[tenant].put_blob("files/f1/report.pdf", tenant.encode())
+
+    # Same key, different tenants, no collision.
+    for tenant, store_ in stores.items():
+        assert store_.get_blob("files/f1/report.pdf") == tenant.encode()
+        assert store_.list_blobs("files/") == ["files/f1/report.pdf"]  # prefix stripped
+
+    # …and the prefix really is on the wire.
+    raw = boto3.client("s3", **client_kwargs).list_objects_v2(Bucket=opts["bucket"])
+    assert sorted(o["Key"] for o in raw["Contents"]) == [
+        "alpha/files/f1/report.pdf",
+        "beta/files/f1/report.pdf",
+    ]
+
+    # Deleting one tenant's prefix leaves the other intact.
+    stores["alpha"].delete_blobs("files/")
+    assert stores["alpha"].list_blobs("") == []
+    assert stores["beta"].list_blobs("") == ["files/f1/report.pdf"]
+
+
 # ---------------------------------------------------------------------- blobs
 
 
