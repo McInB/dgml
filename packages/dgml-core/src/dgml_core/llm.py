@@ -451,6 +451,40 @@ def _require_supported_model(model: str, api_base: str | None) -> None:
         ) from exc
 
 
+def model_max_output_tokens(model: str, api_base: str | None = None) -> int | None:
+    """The model's documented output-token ceiling, or ``None`` when unknown.
+
+    Read from litellm's model metadata so callers can ask for a model's real
+    ceiling instead of hardcoding one number across a fleet whose limits
+    differ (frontier Claude/Gemini allow 128K; Haiku 4.5 caps at 64K).
+    ``None`` for a custom ``api_base`` (self-hosted/proxy — no metadata) or an
+    id litellm doesn't know, in which case callers keep their own default.
+    """
+    if api_base:
+        return None
+    try:
+        info = litellm.get_model_info(model)
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+    raw = info.get("max_output_tokens") or info.get("max_tokens")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+        return None
+    return int(raw)
+
+
+def _clamp_output_tokens(requested: int, model: str, api_base: str | None) -> int:
+    """Lower *requested* to the model's ceiling when we know it.
+
+    Only ever lowers: asking a model for more output tokens than it supports
+    is a provider 400, and the caller's intent ("give me as much room as this
+    model allows") is served by the ceiling.
+    """
+    ceiling = model_max_output_tokens(model, api_base)
+    return min(requested, ceiling) if ceiling is not None else requested
+
+
 def _build_completion_kwargs(
     config: LLMConfig,
     *,
@@ -480,10 +514,17 @@ def _build_completion_kwargs(
     # default is the only always-safe value.
     if config.temperature is not None and not is_anthropic_model(config.model):
         kwargs["temperature"] = config.temperature
+    # Both caps are clamped to the model's documented ceiling — a request for
+    # more output than the model allows is a provider 400, and callers ask for
+    # the largest useful value rather than tracking per-model limits.
     if config.max_tokens is not None:
-        kwargs["max_tokens"] = config.max_tokens
+        kwargs["max_tokens"] = _clamp_output_tokens(
+            config.max_tokens, config.model, config.api_base
+        )
     if config.max_completion_tokens is not None:
-        kwargs["max_completion_tokens"] = config.max_completion_tokens
+        kwargs["max_completion_tokens"] = _clamp_output_tokens(
+            config.max_completion_tokens, config.model, config.api_base
+        )
     if config.timeout is not None:
         kwargs["timeout"] = config.timeout
     if config.api_key:
