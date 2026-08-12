@@ -51,9 +51,13 @@ config merges across layers.
 │       ├── schema.json               # generation tag schema, written by `generate` (present after generation)
 │       ├── full-schema.rnc           # schema.json as RELAX NG Compact, written by `generate` (see below)
 │       └── files/
-│           └── <file_id>/            # marker dir; <stem>.dgml.xml lands here
-│                                     # (generated tree and/or dg:extraction),
-│                                     # plus its grounded/stats siblings (below)
+│           └── <file_id>/            # one assigned (DocSet, File) pair
+│               ├── assignment.json   # { docset_id, file_id, assigned_at } — the assignment record
+│               └── <stem>.dgml.xml   # generated tree and/or dg:extraction,
+│                                     #   plus its grounded/stats siblings (below)
+├── .cache/                           # workspace-internal scratch; never workspace data,
+│   ├── embeddings/                   #   excluded from the blob namespace and safe to delete
+│   └── staging/                      #   in-flight batch writes (page renders, text extraction)
 └── files/
     └── <file_id>/                    # 12-char base-36 ID
         ├── <original_filename>       # source copied in (a .pdf, or a
@@ -710,7 +714,7 @@ When `generate` ran first, `extract` adds the `dg:extraction` element alongside
 the tree (`full-extraction`); otherwise it writes a minimal `dg:chunk` holding
 only the `dg:extraction` element (`extraction`). `dgml extraction get-values`
 projects the `dg:extraction` element back to values-shape JSON
-(`{tag: {text, value?, locations}}`). Placing this file in the marker dir
+(`{tag: {text, value?, locations}}`). Placing this file in the pair directory
 (rather than at the docset root) makes the artifact path deterministic
 and unique per file, which is what file attestation
 ([packages/dgml/src/dgml/file_attestation.py](../packages/dgml/src/dgml/file_attestation.py))
@@ -846,13 +850,20 @@ when something goes wrong.
 
 ## DocSet ↔ File assignments
 
-When a File is assigned to a DocSet, an empty directory named after the
-file's ID is created under `<workspace>/docsets/<docset_id>/files/`.
-Future revisions may put per-(DocSet, File) data inside, but for now those
-directories exist only as cross-reference markers.
+When a File is assigned to a DocSet, an `assignment.json` is written to
+`<workspace>/docsets/<docset_id>/files/<file_id>/`, holding
+`{ docset_id, file_id, assigned_at }`. The pair directory also holds that
+pair's generated artifacts (`<stem>.dgml.xml`, `extraction_stats.json`).
+
+Earlier revisions recorded the assignment as the *bare existence* of that
+directory, with no file inside. That could not survive its own deletion —
+removing the record meant removing the directory, and therefore the generated
+artifacts with it — so the record is now a document like any other. A workspace
+written before this change is upgraded automatically on first use — see
+`schema_version` under [`workspace.json`](#workspacejson).
 
 - Removing a **File** deletes its directory under `files/` AND every
-  marker directory under `docsets/*/files/<file_id>/`.
+  pair directory under `docsets/*/files/<file_id>/`.
 - Removing a **DocSet** leaves the underlying Files untouched.
 - The `replace` conflict policy on `dgml file add` deletes the existing
   File entirely, which means its DocSet assignments are also dropped. Use
