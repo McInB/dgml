@@ -457,3 +457,44 @@ def test_api_base_skips_model_validation() -> None:
     kwargs = llm._build_completion_kwargs(cfg, messages=[{"role": "user", "content": "hi"}])
     assert kwargs["model"] == "my-local/whatever-model"
     assert kwargs["api_base"] == "http://localhost:11434"
+
+
+# ── Model-aware output-token ceiling ────────────────────────────────────────
+
+
+def test_model_max_output_tokens_reads_litellm_metadata() -> None:
+    # Real metadata: frontier models allow more output than older ones.
+    assert llm.model_max_output_tokens("anthropic/claude-sonnet-5") == 128000
+    assert llm.model_max_output_tokens("anthropic/claude-haiku-4-5") == 64000
+    # Unknown id and custom api_base both fall back to "caller keeps its own".
+    assert llm.model_max_output_tokens("not-a-real-model-xyz") is None
+    assert llm.model_max_output_tokens("anthropic/claude-sonnet-5", "http://localhost:1234") is None
+
+
+def test_output_tokens_clamped_to_model_ceiling() -> None:
+    """A request for more output than the model allows is a provider 400 —
+    the builder lowers it to the model's own ceiling instead."""
+    msgs = [{"role": "user", "content": "hi"}]
+    # Haiku caps at 64K: an ask for 128K is clamped down.
+    kwargs = llm._build_completion_kwargs(
+        llm.LLMConfig(model="anthropic/claude-haiku-4-5", max_completion_tokens=128000),
+        messages=msgs,
+    )
+    assert kwargs["max_completion_tokens"] == 64000
+    # Sonnet 5 allows the full 128K — passed through untouched.
+    kwargs = llm._build_completion_kwargs(
+        llm.LLMConfig(model="anthropic/claude-sonnet-5", max_completion_tokens=128000),
+        messages=msgs,
+    )
+    assert kwargs["max_completion_tokens"] == 128000
+    # Clamping only ever lowers: a modest ask is never raised.
+    kwargs = llm._build_completion_kwargs(
+        llm.LLMConfig(model="anthropic/claude-sonnet-5", max_completion_tokens=4096),
+        messages=msgs,
+    )
+    assert kwargs["max_completion_tokens"] == 4096
+    # max_tokens follows the same rule.
+    kwargs = llm._build_completion_kwargs(
+        llm.LLMConfig(model="anthropic/claude-haiku-4-5", max_tokens=128000), messages=msgs
+    )
+    assert kwargs["max_tokens"] == 64000
