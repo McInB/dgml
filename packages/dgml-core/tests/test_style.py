@@ -266,7 +266,7 @@ def test_annotate_style_from_image(tmp_path: Path, monkeypatch) -> None:  # type
     ws = Workspace(root=tmp_path / "ws")
     ws.init()
     file_id = "ocrfile12345"
-    ws.store.put_blob(layout.file_page_image_key(file_id, 1), b"\x89PNG\r\n\x1a\n fake")
+    ws.blobs.put_blob(layout.file_page_image_key(file_id, 1), b"\x89PNG\r\n\x1a\n fake")
 
     root = etree.fromstring(
         '<dg:chunk xmlns:dg="http://dgml.io/ns/dg#">'
@@ -431,7 +431,7 @@ def test_ground_honors_style_config_for_ocr(tmp_path: Path, monkeypatch) -> None
     ws = Workspace(root=tmp_path / "ws")
     ws.init()
     fid = "ocrwire12345"
-    ws.store.put_doc(
+    ws.docs.put_doc(
         "files",
         fid,
         FileRecord(
@@ -444,7 +444,7 @@ def test_ground_honors_style_config_for_ocr(tmp_path: Path, monkeypatch) -> None
             text_mode="ocr",  # the gate
         ).to_json(),
     )
-    ws.store.put_blob(
+    ws.blobs.put_blob(
         layout.file_page_text_key(fid, 1),
         json.dumps(
             {
@@ -460,7 +460,7 @@ def test_ground_honors_style_config_for_ocr(tmp_path: Path, monkeypatch) -> None
             }
         ).encode(),
     )
-    ws.store.put_blob(layout.file_page_image_key(fid, 1), b"\x89PNG\r\n\x1a\n fake")
+    ws.blobs.put_blob(layout.file_page_image_key(fid, 1), b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
         dump_toml({"style": {"enabled": True, "model": "anthropic/claude-haiku-4-5"}}),
         encoding="utf-8",
@@ -502,7 +502,7 @@ def _seed_ocr_style_workspace(tmp_path: Path):  # type: ignore[no-untyped-def]
     ws = Workspace(root=tmp_path / "ws")
     ws.init()
     fid = "ocrwireusage"
-    ws.store.put_doc(
+    ws.docs.put_doc(
         "files",
         fid,
         FileRecord(
@@ -515,7 +515,7 @@ def _seed_ocr_style_workspace(tmp_path: Path):  # type: ignore[no-untyped-def]
             text_mode="ocr",
         ).to_json(),
     )
-    ws.store.put_blob(
+    ws.blobs.put_blob(
         layout.file_page_text_key(fid, 1),
         json.dumps(
             {
@@ -527,7 +527,7 @@ def _seed_ocr_style_workspace(tmp_path: Path):  # type: ignore[no-untyped-def]
             }
         ).encode(),
     )
-    ws.store.put_blob(layout.file_page_image_key(fid, 1), b"\x89PNG\r\n\x1a\n fake")
+    ws.blobs.put_blob(layout.file_page_image_key(fid, 1), b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
         dump_toml({"style": {"enabled": True, "model": "anthropic/claude-haiku-4-5"}}),
         encoding="utf-8",
@@ -592,7 +592,7 @@ def test_ground_skips_style_config_when_disabled(tmp_path: Path, monkeypatch) ->
     ws = Workspace(root=tmp_path / "ws")
     ws.init()
     fid = "ocrwire67890"
-    ws.store.put_doc(
+    ws.docs.put_doc(
         "files",
         fid,
         FileRecord(
@@ -605,7 +605,7 @@ def test_ground_skips_style_config_when_disabled(tmp_path: Path, monkeypatch) ->
             text_mode="ocr",
         ).to_json(),
     )
-    ws.store.put_blob(
+    ws.blobs.put_blob(
         layout.file_page_text_key(fid, 1),
         json.dumps(
             {
@@ -647,7 +647,7 @@ def test_style_credential_failure_preserves_grounding(tmp_path: Path, monkeypatc
     ws = Workspace(root=tmp_path / "ws")
     ws.init()
     fid = "ocrwireauth1"
-    ws.store.put_doc(
+    ws.docs.put_doc(
         "files",
         fid,
         FileRecord(
@@ -660,7 +660,7 @@ def test_style_credential_failure_preserves_grounding(tmp_path: Path, monkeypatc
             text_mode="ocr",  # the gate
         ).to_json(),
     )
-    ws.store.put_blob(
+    ws.blobs.put_blob(
         layout.file_page_text_key(fid, 1),
         json.dumps(
             {
@@ -675,7 +675,7 @@ def test_style_credential_failure_preserves_grounding(tmp_path: Path, monkeypatc
             }
         ).encode(),
     )
-    ws.store.put_blob(layout.file_page_image_key(fid, 1), b"\x89PNG\r\n\x1a\n fake")
+    ws.blobs.put_blob(layout.file_page_image_key(fid, 1), b"\x89PNG\r\n\x1a\n fake")
     # `api_key_env` points at an env var we make sure is unset -> resolve_api_key
     # raises AuthError inside the style pass at grounding time.
     monkeypatch.delenv("DGML_STYLE_KEY_MISSING", raising=False)
@@ -725,7 +725,7 @@ def _multipage_style_tree(
     file_id = "multipagestyl"
     pages = range(1, n_pages + 1)
     for page in images_for if images_for is not None else pages:
-        ws.store.put_blob(layout.file_page_image_key(file_id, page), b"\x89PNG\r\n\x1a\n fake")
+        ws.blobs.put_blob(layout.file_page_image_key(file_id, page), b"\x89PNG\r\n\x1a\n fake")
 
     headings = "".join(f'<Heading dg:origin="{p} 10 20 30 40">TITLE {p}</Heading>' for p in pages)
     root = etree.fromstring(f'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#">{headings}</dg:chunk>')
@@ -912,7 +912,7 @@ def test_ground_records_one_style_usage_row_per_page(tmp_path: Path, monkeypatch
     ws.init()
     fid = "ocrmultipage1"
     n_pages = 3
-    ws.store.put_doc(
+    ws.docs.put_doc(
         "files",
         fid,
         FileRecord(
@@ -926,7 +926,7 @@ def test_ground_records_one_style_usage_row_per_page(tmp_path: Path, monkeypatch
         ).to_json(),
     )
     for page in range(1, n_pages + 1):
-        ws.store.put_blob(
+        ws.blobs.put_blob(
             layout.file_page_text_key(fid, page),
             json.dumps(
                 {
@@ -938,7 +938,7 @@ def test_ground_records_one_style_usage_row_per_page(tmp_path: Path, monkeypatch
                 }
             ).encode(),
         )
-        ws.store.put_blob(layout.file_page_image_key(fid, page), b"\x89PNG\r\n\x1a\n fake")
+        ws.blobs.put_blob(layout.file_page_image_key(fid, page), b"\x89PNG\r\n\x1a\n fake")
     ws.config_path.write_text(
         dump_toml({"style": {"enabled": True, "model": "anthropic/claude-haiku-4-5"}}),
         encoding="utf-8",

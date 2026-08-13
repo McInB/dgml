@@ -93,7 +93,7 @@ def record_usage(workspace: Workspace, event: UsageEvent) -> None:
     the user's PDF is still ingested / classified / extracted.
     """
     try:
-        workspace.store.append_doc(layout.Collection.USAGE, event.to_json())
+        workspace.docs.append_doc(layout.Collection.USAGE, event.to_json())
     except Exception:
         # Intentional broad catch: never let logging take down the
         # caller. The usage log is best-effort telemetry.
@@ -183,4 +183,4 @@ def add_partial(acc: dict[str, Any], inc: dict[str, Any]) -> None:
 def read_events(workspace: Workspace) -> list[dict[str, Any]]:
     """Read all events from the workspace's ``usage`` log. Tolerates corrupt
     lines (skips them silently) and a missing log (returns ``[]``)."""
-    return workspace.store.find_docs(layout.Collection.USAGE, {})
+    return workspace.docs.find_docs(layout.Collection.USAGE, {})

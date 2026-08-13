@@ -297,11 +297,11 @@ def get_page_words(
 
 def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
     """Return the bytes of the single ``*.pdf`` stored for ``file_id``."""
-    keys = workspace.store.list_blobs(layout.file_prefix(file_id))
+    keys = workspace.blobs.list_blobs(layout.file_prefix(file_id))
     pdfs = [k for k in keys if k.endswith(".pdf")]
     if not pdfs:
         raise FileNotFound(f"file '{file_id}' has no source PDF")
-    return workspace.store.get_blob(pdfs[0])
+    return workspace.blobs.get_blob(pdfs[0])
 
 
 def _pdf_content_block(pdf_bytes: bytes) -> dict[str, Any]:
@@ -689,8 +689,8 @@ def extract_values(
         stem = Path(FileStore(workspace).get(file_id).original_filename).stem
         xml_key = layout.dgml_xml_key(docset_id, file_id, stem)
         existing = (
-            workspace.store.get_blob(xml_key).decode("utf-8")
-            if workspace.store.blob_exists(xml_key)
+            workspace.blobs.get_blob(xml_key).decode("utf-8")
+            if workspace.blobs.blob_exists(xml_key)
             else None
         )
         if existing is not None and has_document_tree(existing):
@@ -701,7 +701,7 @@ def extract_values(
             # No tree (fresh, or a prior extraction-only file) — (re)write standalone.
             mode = "extraction"
             doc = standalone_extraction_doc(final_values, vocab=vocab)
-        workspace.store.put_blob(xml_key, doc.encode("utf-8"))
+        workspace.blobs.put_blob(xml_key, doc.encode("utf-8"))
         outcome = OUTCOME_OK
         return ExtractionResult(
             values=final_values, tool_calls=tool_calls_total, xml_key=xml_key, mode=mode
@@ -859,7 +859,7 @@ def _write_extraction_stats(
         # array (some models drop optional tool-call parameters).
         "phase1_layout": phase1_layout,
     }
-    workspace.store.put_doc(
+    workspace.docs.put_doc(
         layout.Collection.EXTRACTION_STATS, layout.pair_id(docset_id, file_id), stats
     )
 
@@ -969,7 +969,7 @@ def _phase3_call_for_page(
     premium for a read that cannot arrive — the same reasoning that keeps the
     PDF and image blocks untagged."""
     image_key = layout.file_page_image_key(file_id, page_number)
-    if not workspace.store.blob_exists(image_key):
+    if not workspace.blobs.blob_exists(image_key):
         raise ValuesExtractionFailed(
             f"phase 3: no page image for file '{file_id}' page {page_number}"
         )
@@ -991,7 +991,7 @@ def _phase3_call_for_page(
             "role": "user",
             "content": [
                 {"type": "text", "text": user_text},
-                _image_content_block(workspace.store.get_blob(image_key)),
+                _image_content_block(workspace.blobs.get_blob(image_key)),
             ],
         },
     ]

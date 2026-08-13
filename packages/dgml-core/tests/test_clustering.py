@@ -66,7 +66,7 @@ def _seed_file(workspace: Workspace, file_id: str) -> None:
         page_count=1,
         text_mode="digital",
     )
-    workspace.store.put_doc("files", file_id, record.to_json())
+    workspace.docs.put_doc("files", file_id, record.to_json())
 
 
 def _seed_page_image(workspace: Workspace, file_id: str) -> None:
@@ -77,7 +77,7 @@ def _seed_page_image(workspace: Workspace, file_id: str) -> None:
 
     buf = BytesIO()
     Image.new("RGB", (8, 8), color=(123, 200, 50)).save(buf, "PNG")
-    workspace.store.put_blob(layout.file_page_image_key(file_id, 1), buf.getvalue())
+    workspace.blobs.put_blob(layout.file_page_image_key(file_id, 1), buf.getvalue())
 
 
 @pytest.fixture

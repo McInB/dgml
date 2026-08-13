@@ -56,7 +56,7 @@ xmlns:docset="http://dgml.io/ns/dgml/test">
 
 
 def _seed(ws: Workspace, file_id: str = "f001", docset_id: str = "ds01") -> None:
-    ws.store.put_doc(
+    ws.docs.put_doc(
         "files",
         file_id,
         {
@@ -69,12 +69,12 @@ def _seed(ws: Workspace, file_id: str = "f001", docset_id: str = "ds01") -> None
             "text_mode": "digital",
         },
     )
-    ws.store.put_doc(
+    ws.docs.put_doc(
         "docsets",
         docset_id,
         {"id": docset_id, "name": "Test", "description": "", "key_questions": []},
     )
-    ws.store.put_blob(layout.dgml_xml_key(docset_id, file_id, "ledger"), DGML_XML)
+    ws.blobs.put_blob(layout.dgml_xml_key(docset_id, file_id, "ledger"), DGML_XML)
 
 
 # --- export -------------------------------------------------------------------
@@ -153,7 +153,7 @@ def test_export_missing_file_docset_or_xml(workspace: Workspace) -> None:
     with pytest.raises(DocSetNotFound):
         export_node(workspace, "f001", "nope", leaf_index=0)
     # Docset exists but the pair has no generated XML.
-    workspace.store.put_doc("docsets", "ds02", {"id": "ds02"})
+    workspace.docs.put_doc("docsets", "ds02", {"id": "ds02"})
     with pytest.raises(NotFoundError, match="no generated DGML XML"):
         export_node(workspace, "f001", "ds02", leaf_index=0)
 
@@ -212,7 +212,7 @@ def test_prove_detects_node_tamper(workspace: Workspace) -> None:
     _seed(workspace)
     att = export_node(workspace, "f001", "ds01", xpath="/dg:chunk/docset:Header")
 
-    workspace.store.put_blob(
+    workspace.blobs.put_blob(
         layout.dgml_xml_key("ds01", "f001", "ledger"),
         DGML_XML.replace(b"Resident Ledger", b"TAMPERED"),
     )
@@ -234,7 +234,7 @@ def test_prove_detects_wrong_root(workspace: Workspace) -> None:
 def test_prove_raises_when_document_restructured(workspace: Workspace) -> None:
     _seed(workspace)
     att = export_node(workspace, "f001", "ds01", leaf_index=8)
-    workspace.store.put_blob(
+    workspace.blobs.put_blob(
         layout.dgml_xml_key("ds01", "f001", "ledger"),
         b"<dg:chunk xmlns:dg='http://dgml.io/ns/dg#'/>",
     )

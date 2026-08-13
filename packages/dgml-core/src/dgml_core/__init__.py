@@ -75,13 +75,15 @@ from .storage_local import LocalStore
 from .storage_resolve import (
     DEFAULT_STORAGE_PROVIDER,
     DEFAULT_STORAGE_SERVICE,
-    load_storage_config,
-    make_store,
+    load_store_configs,
+    make_blob_store,
+    make_doc_store,
     storage_fingerprint,
 )
 from .storage_service import (
+    BlobStore,
+    DocStore,
     StorageConfig,
-    StorageService,
 )
 from .workspace_ops import WorkspaceOps
 
@@ -96,6 +98,7 @@ __all__ = [
     "ArtifactRef",
     "AttestationEntry",
     "AttestationInventory",
+    "BlobStore",
     "CheckReport",
     "Collection",
     "ConflictError",
@@ -109,6 +112,7 @@ __all__ = [
     "DocSet",
     "DocSetNotFound",
     "DocSetStore",
+    "DocStore",
     "FileAttestation",
     "FileNotFound",
     "FileRecord",
@@ -123,7 +127,6 @@ __all__ = [
     "MigrationResult",
     "PageRenderFailed",
     "StorageConfig",
-    "StorageService",
     "UnsupportedFileType",
     "VerifyResult",
     "Workspace",
@@ -139,9 +142,10 @@ __all__ = [
     "export_attestation",
     "layout",
     "load_conversion_config",
-    "load_storage_config",
+    "load_store_configs",
+    "make_blob_store",
     "make_converter",
-    "make_store",
+    "make_doc_store",
     "migrate_workspace",
     "pending_migrations",
     "read_attestation",

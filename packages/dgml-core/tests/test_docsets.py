@@ -83,7 +83,7 @@ def test_from_json_tolerates_missing_key_questions(workspace: Workspace) -> None
     ds = store.create(name="X")
     # A docset.json that omits the optional key_questions field.
     minimal = {"id": ds.id, "name": "Minimal", "description": "no key_questions"}
-    workspace.store.put_doc("docsets", ds.id, minimal)
+    workspace.docs.put_doc("docsets", ds.id, minimal)
     loaded = store.get(ds.id)
     assert loaded.key_questions == []
     assert loaded.name == "Minimal"
@@ -137,7 +137,7 @@ def test_add_remove_file_reference(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "abcdefghijkl"
-    workspace.store.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc("files", fid, {"id": fid})
     store.add_file(ds.id, fid)
     assert store.list_files(ds.id) == [fid]
     store.remove_file(ds.id, fid)
@@ -242,7 +242,7 @@ def test_schema_set_and_roundtrip(workspace: Workspace) -> None:
     # Persisted on disk as extraction-schema.rnc in the docset directory.
     schema_key = layout.docset_extraction_schema_key(ds.id)
     assert schema_key.endswith("extraction-schema.rnc")
-    assert workspace.store.get_blob(schema_key).decode("utf-8") == _RNC
+    assert workspace.blobs.get_blob(schema_key).decode("utf-8") == _RNC
 
 
 def test_schema_set_replaces_previous(workspace: Workspace) -> None:
@@ -332,10 +332,10 @@ def _assigned_pair(workspace: Workspace) -> tuple[DocSetStore, str, str]:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "abcdefghijkl"
-    workspace.store.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc("files", fid, {"id": fid})
     store.add_file(ds.id, fid)
-    workspace.store.put_blob(f"docsets/{ds.id}/files/{fid}/report.dgml.xml", b"<x/>")
-    workspace.store.put_doc("extraction_stats", f"{ds.id}/{fid}", {"matched": 3})
+    workspace.blobs.put_blob(f"docsets/{ds.id}/files/{fid}/report.dgml.xml", b"<x/>")
+    workspace.docs.put_doc("extraction_stats", f"{ds.id}/{fid}", {"matched": 3})
     return store, ds.id, fid
 
 
@@ -343,10 +343,10 @@ def test_add_file_records_an_assignment_document(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "abcdefghijkl"
-    workspace.store.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc("files", fid, {"id": fid})
     store.add_file(ds.id, fid)
 
-    doc = workspace.store.get_doc("assignments", f"{ds.id}/{fid}")
+    doc = workspace.docs.get_doc("assignments", f"{ds.id}/{fid}")
     assert doc is not None
     assert doc["docset_id"] == ds.id
     assert doc["file_id"] == fid
@@ -362,9 +362,9 @@ def test_unassign_removes_record_and_pair_artifacts(workspace: Workspace) -> Non
     store, did, fid = _assigned_pair(workspace)
     WorkspaceOps(workspace).unassign(did, fid)
 
-    assert workspace.store.get_doc("assignments", f"{did}/{fid}") is None
-    assert not workspace.store.blob_exists(f"docsets/{did}/files/{fid}/report.dgml.xml")
-    assert workspace.store.get_doc("extraction_stats", f"{did}/{fid}") is None
+    assert workspace.docs.get_doc("assignments", f"{did}/{fid}") is None
+    assert not workspace.blobs.blob_exists(f"docsets/{did}/files/{fid}/report.dgml.xml")
+    assert workspace.docs.get_doc("extraction_stats", f"{did}/{fid}") is None
     assert store.list_files(did) == []
 
 
@@ -372,24 +372,24 @@ def test_remove_file_removes_pair_artifacts(workspace: Workspace) -> None:
     store, did, fid = _assigned_pair(workspace)
     store.remove_file(did, fid)
     assert store.list_files(did) == []
-    assert not workspace.store.blob_exists(f"docsets/{did}/files/{fid}/report.dgml.xml")
-    assert workspace.store.get_doc("extraction_stats", f"{did}/{fid}") is None
+    assert not workspace.blobs.blob_exists(f"docsets/{did}/files/{fid}/report.dgml.xml")
+    assert workspace.docs.get_doc("extraction_stats", f"{did}/{fid}") is None
 
 
 def test_docset_delete_removes_every_assignment_and_artifact(workspace: Workspace) -> None:
     store, did, fid = _assigned_pair(workspace)
     store.delete(did)
-    assert workspace.store.get_doc("assignments", f"{did}/{fid}") is None
-    assert workspace.store.find_docs("assignments", {"docset_id": did}) == []
-    assert workspace.store.list_blobs(f"docsets/{did}/") == []
+    assert workspace.docs.get_doc("assignments", f"{did}/{fid}") is None
+    assert workspace.docs.find_docs("assignments", {"docset_id": did}) == []
+    assert workspace.blobs.list_blobs(f"docsets/{did}/") == []
     # the underlying file is untouched
-    assert workspace.store.get_doc("files", fid) is not None
+    assert workspace.docs.get_doc("files", fid) is not None
 
 
 def test_reassign_is_idempotent(workspace: Workspace) -> None:
     store, did, fid = _assigned_pair(workspace)
     store.add_file(did, fid)  # re-adding replaces the same document
     assert store.list_files(did) == [fid]
-    assert len(workspace.store.find_docs("assignments", {"docset_id": did})) == 1
+    assert len(workspace.docs.find_docs("assignments", {"docset_id": did})) == 1
     # and it must not disturb the pair's generated artifacts
-    assert workspace.store.blob_exists(f"docsets/{did}/files/{fid}/report.dgml.xml")
+    assert workspace.blobs.blob_exists(f"docsets/{did}/files/{fid}/report.dgml.xml")

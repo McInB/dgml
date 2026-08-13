@@ -109,10 +109,10 @@ def test_write_docset_rnc(workspace: Workspace) -> None:
     assert write_docset_rnc(ws, did) is None  # no schema.json yet
 
     # The generation schema is a blob (exact Schema.save bytes), not a document.
-    ws.store.put_blob(layout.docset_generation_schema_key(did), json.dumps(_SCHEMA).encode("utf-8"))
-    ws.store.put_doc("docsets", did, {"id": did, "name": "synthetic"})
-    ws.store.put_blob("docsets/d1/files/f1/doc.dgml.xml", _XML.encode("utf-8"))
+    ws.blobs.put_blob(layout.docset_generation_schema_key(did), json.dumps(_SCHEMA).encode("utf-8"))
+    ws.docs.put_doc("docsets", did, {"id": did, "name": "synthetic"})
+    ws.blobs.put_blob("docsets/d1/files/f1/doc.dgml.xml", _XML.encode("utf-8"))
 
     key = write_docset_rnc(ws, did)
     assert key == "docsets/d1/full-schema.rnc"
-    assert rnc_to_schema_dict(ws.store.get_blob(key).decode("utf-8")) == _SCHEMA
+    assert rnc_to_schema_dict(ws.blobs.get_blob(key).decode("utf-8")) == _SCHEMA

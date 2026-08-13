@@ -145,16 +145,16 @@ def load_subtree_root(ws: Workspace, file_id: str, docset_id: str) -> _Element:
         raise InvalidArgument("file id must not be empty")
     if not docset_id.strip():
         raise InvalidArgument("docset id must not be empty")
-    record_data = ws.store.get_doc(layout.Collection.FILES, file_id)
+    record_data = ws.docs.get_doc(layout.Collection.FILES, file_id)
     if record_data is None:
         raise FileNotFound(f"file '{file_id}' not found in workspace")
-    if ws.store.get_doc(layout.Collection.DOCSETS, docset_id) is None:
+    if ws.docs.get_doc(layout.Collection.DOCSETS, docset_id) is None:
         raise DocSetNotFound(f"docset '{docset_id}' not found in workspace")
 
     record = FileRecord.from_json(record_data)
     stem = Path(record.original_filename).stem
     xml_key = layout.dgml_xml_key(docset_id, file_id, stem)
-    if not ws.store.blob_exists(xml_key):
+    if not ws.blobs.blob_exists(xml_key):
         raise NotFoundError(
             f"no generated DGML XML for file '{file_id}' in docset '{docset_id}' "
             f"(expected {xml_key})"
@@ -162,10 +162,10 @@ def load_subtree_root(ws: Workspace, file_id: str, docset_id: str) -> _Element:
 
     # Prefer the grounded variant (``<stem>.dgml.grounded.xml``) if present.
     grounded_key = layout.dgml_grounded_xml_key(docset_id, file_id, stem)
-    preferred = grounded_key if ws.store.blob_exists(grounded_key) else xml_key
+    preferred = grounded_key if ws.blobs.blob_exists(grounded_key) else xml_key
 
     try:
-        root: _Element = etree.fromstring(ws.store.get_blob(preferred))
+        root: _Element = etree.fromstring(ws.blobs.get_blob(preferred))
     except etree.XMLSyntaxError as exc:
         raise ValueError(f"{preferred} is not well-formed XML: {exc}") from exc
     return root

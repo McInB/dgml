@@ -24,14 +24,16 @@ workspace opened on two machines has one id but two registry entries with
 different roots. It is machine-managed (JSON, like every other metadata file —
 ``workspace.json``, ``docset.json``), not hand-edited like ``config.toml``.
 
-Each entry is **self-describing** about the workspace's store: ``storage_service``
+Each entry is **self-describing** about the workspace's stores: ``storage_service``
 names the ``config.toml`` ``[storage.<name>]`` template it was created from, and
-``storage`` holds a **non-secret snapshot** of that template (provider + non-secret
-options). The snapshot is *authoritative* for opening the workspace, so it opens
-even if the template is later edited or removed — the registry alone records where a
-workspace's data lives. ``storage_fingerprint`` hashes the snapshot and is
-recomputed on open (:func:`verify_storage_seal`) to detect a hand-edited entry.
-Secrets never enter the registry; they are read from the template/env at open.
+``storage`` holds a **non-secret snapshot pair** of that template —
+``{"blobs": {provider, …}, "docs": {provider, …}}``, one per backend role (a
+workspace configures its blob store and its document store independently). The
+snapshot is *authoritative* for opening the workspace, so it opens even if the
+template is later edited or removed — the registry alone records where a workspace's
+data lives. ``storage_fingerprint`` hashes the pair and is recomputed on open
+(:func:`verify_storage_seal`) to detect a hand-edited entry. Secrets never enter the
+registry; they are read from the template/env at open.
 
 Today only ``LocalStore`` ships, so every entry also records a local ``root``.
 Reconstructing a *remote* store from ``entry.storage`` (open-by-id with no local
@@ -88,14 +90,15 @@ def mint_workspace_id() -> str:
 class RegistryEntry:
     """One workspace's row in the registry — its self-describing store record.
 
-    ``root`` is the local store location (always set today, since only
-    ``LocalStore`` ships). ``storage_service`` names the ``config.toml``
-    ``[storage.<name>]`` template the workspace was created from (where its secrets
-    live, and the target of a re-seal). ``storage`` is the **non-secret snapshot**
-    of that template — provider + non-secret options — which is *authoritative* for
-    opening the workspace (so it opens even if the template is later edited/removed),
-    and ``storage_fingerprint`` is that snapshot's hash: recomputed on open to detect
-    a hand-edited entry (:class:`~dgml_core.errors.StorageBackendMismatch`).
+    ``root`` is the local store location. ``storage_service`` names the
+    ``config.toml`` ``[storage.<name>]`` template the workspace was created from
+    (where its secrets live, and the target of a re-seal). ``storage`` is the
+    **non-secret snapshot pair** of that template —
+    ``{"blobs": {provider, …}, "docs": {provider, …}}`` — which is *authoritative*
+    for opening the workspace (so it opens even if the template is later
+    edited/removed), and ``storage_fingerprint`` is that pair's hash: recomputed on
+    open to detect a hand-edited entry
+    (:class:`~dgml_core.errors.StorageBackendMismatch`).
     """
 
     workspace_id: str
@@ -125,6 +128,12 @@ class RegistryEntry:
     @classmethod
     def from_dict(cls, workspace_id: str, data: dict[str, Any]) -> RegistryEntry:
         service = data.get("storage_service")
+        raw_storage = data.get("storage")
+        storage = raw_storage if isinstance(raw_storage, dict) else {}
+        # Back-compat: a single-provider snapshot (``{"provider": …}``, pre blob/doc
+        # split) becomes the same backend for both roles.
+        if "provider" in storage:
+            storage = {"blobs": storage, "docs": storage}
         return cls(
             workspace_id=workspace_id,
             name=str(data.get("name", "")),
@@ -132,7 +141,7 @@ class RegistryEntry:
             root=data.get("root"),
             # Back-compat: entries written before named services default to "default".
             storage_service=service if isinstance(service, str) and service else "default",
-            storage=data.get("storage", {}) if isinstance(data.get("storage"), dict) else {},
+            storage=storage,
             storage_fingerprint=str(data.get("storage_fingerprint", "")),
             created_at=str(data.get("created_at", "")),
             schema_version=int(data["schema_version"])
@@ -225,20 +234,23 @@ def entry_for(
     of that service's config (the authoritative location record), and the snapshot's
     ``storage_fingerprint`` (recomputed on open to detect a hand-edited entry).
 
+    The ``storage`` snapshot is a **pair** — ``{"blobs": …, "docs": …}`` — one
+    non-secret snapshot per role; ``storage_fingerprint`` hashes the pair.
     Store-free — reads the ``config.toml`` template, not the store. (Lazy imports
     keep ``registry`` free of a top-level ``storage_service`` / ``migrations``
     cycle.)"""
-    from .storage_resolve import load_storage_config, storage_fingerprint, storage_snapshot
+    from .storage_resolve import fingerprint_pair, load_store_configs, snapshot_pair
 
-    cfg = load_storage_config(ws, service)
+    blob_cfg, doc_cfg = load_store_configs(ws, service)
+    snapshot = snapshot_pair(blob_cfg, doc_cfg)
     return RegistryEntry(
         workspace_id=workspace_id,
         name=name,
         organization=organization,
         root=str(ws.root),
         storage_service=service,
-        storage=storage_snapshot(cfg),
-        storage_fingerprint=storage_fingerprint(cfg),
+        storage=snapshot,
+        storage_fingerprint=fingerprint_pair(snapshot),
         created_at=created_at,
         schema_version=schema_version,
     )
@@ -364,15 +376,15 @@ def verify_storage_seal(ws: Workspace) -> None:
     authoritative). A no-op for an unregistered or unsealed workspace
     (trust-on-first-use).
 
-    Store-free, so it can run before ``Workspace.store`` is first built — a tampered
-    entry is caught before its config is used to construct the backend. Raises
+    Store-free, so it can run before the stores are first built — a tampered
+    entry is caught before its config is used to construct a backend. Raises
     :class:`~dgml_core.errors.StorageBackendMismatch`."""
-    from .storage_resolve import fingerprint_of_snapshot
+    from .storage_resolve import fingerprint_pair
 
     entry = get_by_root(ws.root)
     if entry is None or not entry.storage_fingerprint:
         return
-    if fingerprint_of_snapshot(entry.storage) != entry.storage_fingerprint:
+    if fingerprint_pair(entry.storage) != entry.storage_fingerprint:
         from .errors import StorageBackendMismatch
 
         raise StorageBackendMismatch(
@@ -384,41 +396,55 @@ def verify_storage_seal(ws: Workspace) -> None:
         )
 
 
-def resolve_store_config(ws: Workspace) -> StorageConfig:
-    """The effective :class:`~dgml_core.storage_service.StorageConfig` for opening
-    ``ws`` — the store selection that :attr:`dgml_core.storage.Workspace.store`
-    builds from.
+def resolve_store_configs(ws: Workspace) -> tuple[StorageConfig, StorageConfig]:
+    """The effective ``(blob_cfg, doc_cfg)`` pair for opening ``ws`` — the store
+    selection that :attr:`dgml_core.storage.Workspace.blobs` /
+    :attr:`~dgml_core.storage.Workspace.docs` build from.
 
-    For a **registered** workspace the non-secret identity comes from the entry's
-    snapshot (authoritative and self-contained — the store opens even if
-    ``config.toml`` was edited/deleted); only *secret* options are merged in from the
-    entry's named ``config.toml`` template (or the provider SDK's own credential
-    chain when the template is gone). ``config.toml`` never overrides the non-secret
+    For a **registered** workspace each role's non-secret identity comes from the
+    entry's snapshot (authoritative and self-contained — the stores open even if
+    ``config.toml`` was edited/deleted); only *secret* options are merged in from
+    that role's ``config.toml`` template (or the provider SDK's own credential chain
+    when the template is gone). ``config.toml`` never overrides the non-secret
     identity. An **unregistered** workspace (a raw ``Workspace(root=…)``, or one
     being created before its entry is written) resolves the ``"default"`` service —
-    the bundled local-disk store with zero config.
+    both roles on the bundled local-disk store, zero config.
 
     Lives here rather than in :mod:`dgml_core.storage_resolve` because it consults
-    the registry; everything it needs from the resolver (config reading, secret
-    extraction) is imported one-way."""
+    the registry; everything it needs from the resolver is imported one-way."""
     from .errors import StorageConfigInvalid
-    from .storage_resolve import DEFAULT_STORAGE_SERVICE, load_storage_config, secret_options
-    from .storage_service import StorageConfig
+    from .storage_resolve import DEFAULT_STORAGE_SERVICE, load_store_configs
 
     entry = get_by_root(ws.root)  # local read, store-free
     if entry is None:
-        return load_storage_config(ws, DEFAULT_STORAGE_SERVICE)
-    provider = entry.storage.get("provider") if isinstance(entry.storage, dict) else None
-    if not isinstance(provider, str) or not provider.strip():
-        # Legacy/empty snapshot: fall back to the named template in config.
-        return load_storage_config(ws, entry.storage_service or DEFAULT_STORAGE_SERVICE)
-    non_secret = {k: v for k, v in entry.storage.items() if k != "provider"}
+        return load_store_configs(ws, DEFAULT_STORAGE_SERVICE)
+    service = entry.storage_service or DEFAULT_STORAGE_SERVICE
+    tmpl_blob: StorageConfig | None
+    tmpl_doc: StorageConfig | None
     try:
-        secret_opts = secret_options(
-            load_storage_config(ws, entry.storage_service or DEFAULT_STORAGE_SERVICE)
-        )
+        tmpl_blob, tmpl_doc = load_store_configs(ws, service)
     except StorageConfigInvalid:
-        # Template gone/renamed — the location is still known; creds may come from
-        # the provider SDK's own chain (env, instance profile, …).
-        secret_opts = {}
-    return StorageConfig(provider=provider, root=ws.root, options={**non_secret, **secret_opts})
+        # Template gone/renamed — the location is still known from the snapshot;
+        # creds may come from the provider SDK's own chain (env, instance role, …).
+        tmpl_blob = tmpl_doc = None
+    storage = entry.storage if isinstance(entry.storage, dict) else {}
+    return (
+        _role_from_entry(ws, storage.get("blobs"), tmpl_blob),
+        _role_from_entry(ws, storage.get("docs"), tmpl_doc),
+    )
+
+
+def _role_from_entry(ws: Workspace, snapshot: Any, template: StorageConfig | None) -> StorageConfig:
+    """One role's effective config: non-secret identity from the entry ``snapshot``
+    (authoritative), secrets merged from that role's ``template`` config. Falls back
+    to the template (then the bundled local store) when the snapshot has no usable
+    provider."""
+    from .storage_resolve import DEFAULT_STORAGE_PROVIDER, secret_options
+    from .storage_service import StorageConfig
+
+    provider = snapshot.get("provider") if isinstance(snapshot, dict) else None
+    if not isinstance(provider, str) or not provider.strip():
+        return template or StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=ws.root)
+    non_secret = {k: v for k, v in snapshot.items() if k != "provider"}
+    secrets = secret_options(template) if template is not None else {}
+    return StorageConfig(provider=provider, root=ws.root, options={**non_secret, **secrets})

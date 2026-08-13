@@ -93,8 +93,8 @@ def _entity_ids(ws: Workspace, collection: str, blob_prefix: str) -> list[str]:
     is the store analogue of the old ``iterdir`` scan: an entity "exists" when it
     has a manifest *or* artifacts, not when a bare directory is present (a
     concept no remote store has)."""
-    ids = {str(doc["id"]) for doc in ws.store.find_docs(collection, {})}
-    for key in ws.store.list_blobs(blob_prefix):
+    ids = {str(doc["id"]) for doc in ws.docs.find_docs(collection, {})}
+    for key in ws.blobs.list_blobs(blob_prefix):
         segment = key[len(blob_prefix) :].split("/", 1)[0]
         if segment:
             ids.add(segment)
@@ -146,7 +146,7 @@ def _check_file(
         clear_recorded_errors(ws, file_id)
 
     try:
-        record_data = ws.store.get_doc(layout.Collection.FILES, file_id)
+        record_data = ws.docs.get_doc(layout.Collection.FILES, file_id)
     except CorruptMetadata as exc:
         report.issues.append(
             Issue(
@@ -186,7 +186,7 @@ def _check_file(
         return
 
     source_key = layout.file_source_key(file_id, original_filename)
-    if not ws.store.blob_exists(source_key):
+    if not ws.blobs.blob_exists(source_key):
         report.issues.append(
             Issue(
                 kind="missing_pdf",
@@ -198,7 +198,7 @@ def _check_file(
         return
 
     if sha:
-        actual_sha = ws.store.sha256_blob(source_key)
+        actual_sha = ws.blobs.sha256_blob(source_key)
         if actual_sha != sha:
             report.issues.append(
                 Issue(
@@ -213,7 +213,7 @@ def _check_file(
     permanent_ops = {e.operation for e in recorded if e.permanent}
 
     pages_prefix = layout.file_pages_prefix(file_id)
-    rendered = len(ws.store.list_blobs(pages_prefix))
+    rendered = len(ws.blobs.list_blobs(pages_prefix))
 
     expected: int | None
     # A stored ``page_count`` of 0 is never legitimate — every PDF has at
@@ -256,7 +256,7 @@ def _check_file(
             if not recovered:
                 return  # issue already recorded by the helper
             expected = recovered
-            rendered = len(ws.store.list_blobs(pages_prefix))
+            rendered = len(ws.blobs.list_blobs(pages_prefix))
 
     _check_page_rendering(
         ws=ws,
@@ -299,7 +299,7 @@ def _render(ws: Workspace, source_key: str, pages_prefix: str, dpi: int) -> int:
     itself. ``dpi`` reproduces the file's existing render resolution so repaired
     pages stay aligned with the ``page_text/`` boxes already stored. Returns the
     page count."""
-    with ws.store.materialize(source_key) as pdf_path, ws.store.staged_write(pages_prefix) as tmp:
+    with ws.blobs.materialize(source_key) as pdf_path, ws.blobs.staged_write(pages_prefix) as tmp:
         return render_pages(pdf_path, tmp, dpi=dpi)
 
 
@@ -490,7 +490,7 @@ def _check_text_extraction(
     debug: bool,
     report: CheckReport,
 ) -> None:
-    text_keys = ws.store.list_blobs(layout.file_text_prefix(file_id))
+    text_keys = ws.blobs.list_blobs(layout.file_text_prefix(file_id))
     corrupt = [k for k in text_keys if not _is_valid_text_json(ws, k)]
     for k in corrupt:
         report.issues.append(
@@ -607,12 +607,12 @@ def _reextract(
     text_prefix = layout.file_text_prefix(file_id)
     pages_prefix = layout.file_pages_prefix(file_id)
     with (
-        ws.store.materialize(source_key) as pdf_path,
-        ws.store.staged_write(text_prefix) as text_dir,
+        ws.blobs.materialize(source_key) as pdf_path,
+        ws.blobs.staged_write(text_prefix) as text_dir,
     ):
         if text_mode == TextMode.OCR.value:
             config = load_ocr_config(ws)
-            with ws.store.materialize_dir(pages_prefix) as pages_dir:
+            with ws.blobs.materialize_dir(pages_prefix) as pages_dir:
                 return extract_text_ocr(
                     pdf_path,
                     text_dir,
@@ -623,7 +623,7 @@ def _reextract(
         if text_mode == TextMode.HYBRID.value:
             config = load_ocr_config(ws)
             text_extraction_config = load_text_extraction_config(ws)
-            with ws.store.materialize_dir(pages_prefix) as pages_dir:
+            with ws.blobs.materialize_dir(pages_prefix) as pages_dir:
                 return extract_text_hybrid(
                     pdf_path,
                     text_dir,
@@ -641,7 +641,7 @@ def _reextract(
 
 def _is_valid_text_json(ws: Workspace, key: str) -> bool:
     try:
-        data = json.loads(ws.store.get_blob(key))
+        data = json.loads(ws.blobs.get_blob(key))
     except (ValueError, FileNotFoundError):
         return False
     return isinstance(data, dict) and "words" in data and "page" in data
@@ -653,16 +653,16 @@ def _file_present(ws: Workspace, file_id: str) -> bool:
     that has a manifest (even a broken one) or stored blobs is not "dangling"
     (its own corruption is reported by :func:`_check_file`)."""
     try:
-        if ws.store.get_doc(layout.Collection.FILES, file_id) is not None:
+        if ws.docs.get_doc(layout.Collection.FILES, file_id) is not None:
             return True
     except CorruptMetadata:
         return True
-    return bool(ws.store.list_blobs(layout.file_prefix(file_id)))
+    return bool(ws.blobs.list_blobs(layout.file_prefix(file_id)))
 
 
 def _check_docset(ws: Workspace, docset_id: str, *, report: CheckReport) -> None:
     try:
-        record_data = ws.store.get_doc(layout.Collection.DOCSETS, docset_id)
+        record_data = ws.docs.get_doc(layout.Collection.DOCSETS, docset_id)
     except CorruptMetadata as exc:
         report.issues.append(
             Issue(
@@ -685,7 +685,7 @@ def _check_docset(ws: Workspace, docset_id: str, *, report: CheckReport) -> None
         )
         return
 
-    for assignment in ws.store.find_docs(layout.Collection.ASSIGNMENTS, {"docset_id": docset_id}):
+    for assignment in ws.docs.find_docs(layout.Collection.ASSIGNMENTS, {"docset_id": docset_id}):
         file_id = str(assignment["file_id"])
         if not _file_present(ws, file_id):
             report.issues.append(
@@ -713,11 +713,11 @@ def _check_computed_attribution(
     is owned by the generation/extraction writers, not this check."""
     from .extraction_xml import unattributed_computed_fields
 
-    for key in sorted(ws.store.list_blobs(layout.docset_pair_prefix(docset_id, file_id))):
+    for key in sorted(ws.blobs.list_blobs(layout.docset_pair_prefix(docset_id, file_id))):
         if not key.endswith(".dgml.xml"):
             continue
         try:
-            tags = unattributed_computed_fields(ws.store.get_blob(key))
+            tags = unattributed_computed_fields(ws.blobs.get_blob(key))
         except Exception:
             continue
         if tags:

@@ -49,8 +49,8 @@ def _seed_file_and_text(
         page_count=page,
         text_mode="digital",
     )
-    workspace.store.put_doc("files", file_id, record.to_json())
-    workspace.store.put_blob(
+    workspace.docs.put_doc("files", file_id, record.to_json())
+    workspace.blobs.put_blob(
         layout.file_page_text_key(file_id, page),
         json.dumps(
             {"file_id": file_id, "page": page, "width": width, "height": height, "words": words}
@@ -205,7 +205,7 @@ def test_no_page_text_falls_through_to_unmatched(workspace: Workspace) -> None:
         page_count=1,
         text_mode="digital",
     )
-    workspace.store.put_doc("files", "f1aaaaaaaaaa", record.to_json())
+    workspace.docs.put_doc("files", "f1aaaaaaaaaa", record.to_json())
 
     phase1 = {"title": {"text": "Hello", "locations": [{"page_number": 1}]}}
     result = run_phase2_matching(workspace, "f1aaaaaaaaaa", phase1)

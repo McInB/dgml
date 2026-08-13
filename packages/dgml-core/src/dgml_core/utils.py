@@ -35,8 +35,8 @@ def gather_file_pages(workspace: Workspace, file_id: str, max_pages: int) -> lis
     soft-fails; a future OCR helper may treat it as a precondition).
     """
     prefix = layout.file_pages_prefix(file_id)
-    keys = workspace.store.list_blobs(prefix)[:max_pages]
-    return [workspace.store.get_blob(k) for k in keys]
+    keys = workspace.blobs.list_blobs(prefix)[:max_pages]
+    return [workspace.blobs.get_blob(k) for k in keys]
 
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"

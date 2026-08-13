@@ -102,7 +102,7 @@ def _load_workspace(tmp_path: Path, case: str) -> tuple[Workspace, dict[str, Any
     file_id = inputs["source"]["file_id"]
     text_prefix = layout.file_text_prefix(file_id)
     for page_text in sorted((FIXTURES / case / "page_text").glob("page_*.json")):
-        ws.store.put_blob(f"{text_prefix}{page_text.name}", page_text.read_bytes())
+        ws.blobs.put_blob(f"{text_prefix}{page_text.name}", page_text.read_bytes())
     return ws, inputs
 
 

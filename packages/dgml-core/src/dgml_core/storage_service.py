@@ -10,42 +10,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pluggable workspace storage — a blob + JSON ``StorageService``.
+"""Pluggable workspace storage — two independent stores, blobs and documents.
 
-The service handles two kinds of data, each with a small, familiar API:
+A workspace's data is two unrelated kinds, each with its own small, familiar API
+and its own pluggable backend:
 
-- **Blobs** (opaque bytes — page images, PDFs, XML, schema files): modeled on
-  the S3 object API (``put_blob`` / ``get_blob`` / ``list_blobs`` / …).
-- **JSON documents** (manifests, page text, assignments, usage): modeled on the
-  MongoDB collection API (``put_doc`` / ``get_doc`` / ``find_docs`` / …).
+- :class:`BlobStore` — opaque bytes (page images, PDFs, XML, schema files),
+  modeled on the S3 object API (``put_blob`` / ``get_blob`` / ``list_blobs`` / …),
+  plus a concrete path bridge for tools that demand a real filesystem path.
+- :class:`DocStore` — JSON documents (manifests, page text, assignments, usage),
+  modeled on the MongoDB collection API (``put_doc`` / ``get_doc`` / ``find_docs``
+  / …).
 
-Both kinds support create / read / update / delete.
+The two are configured and resolved **independently**: a workspace can put its
+blobs on one backend and its documents on another (e.g. S3 blobs + Mongo docs),
+or run both on the bundled :class:`dgml_core.storage_local.LocalStore` — which
+implements *both* interfaces over one directory (the zero-config default).
 
-This module is **only the abstraction** — the ``StorageService`` interface a
-third party implements, plus the :class:`StorageConfig` it receives. Turning
-configuration into a live store (reading ``[storage.<name>]`` templates,
-importing the ``provider`` dotted path, constructing the store, and hashing its
-identity) is the resolver's job and lives in
-:mod:`dgml_core.storage_resolve`; the one bundled implementation,
-:class:`dgml_core.storage_local.LocalStore`, is referenced by its dotted path
-like any third party's own.
+This module is **only the abstraction** — the two interfaces a third party
+implements, plus the :class:`StorageConfig` each receives. Turning configuration
+into live stores (reading ``[storage.<name>.blobs]`` / ``.docs`` templates,
+importing the ``provider`` dotted paths, constructing the stores, and hashing
+their identity) is the resolver's job and lives in
+:mod:`dgml_core.storage_resolve`.
 
 Writing your own store
 ----------------------
 
 1. ``pip install dgml`` (the wheel — no repo clone).
-2. Subclass :class:`StorageService`, implementing :meth:`~StorageService.parse_config`
-   (call :meth:`~StorageService._check_no_extra_fields` first), ``__init__`` (lazy
-   SDK import — raise an actionable error if a dependency is missing), and the blob
-   and document methods.
+2. Subclass :class:`BlobStore` **or** :class:`DocStore` (or both, like
+   ``LocalStore``), implementing :meth:`~_StoreBase.parse_config` (call
+   :meth:`~_StoreBase._check_no_extra_fields` first), ``__init__`` (lazy SDK
+   import — raise an actionable error if a dependency is missing), and that
+   interface's methods.
 3. Make the class importable by the interpreter running dgml.
-4. Set ``storage.provider`` to ``"your_pkg.mod:YourStore"`` in a ``[storage]`` (or
-   ``[storage.<name>]``) table of ``config.toml`` — see
-   :func:`dgml_core.storage_resolve.load_storage_config`.
+4. Point ``config.toml`` at it — ``[storage.<name>.blobs] provider =
+   "your_pkg.mod:YourBlobStore"`` and/or ``[storage.<name>.docs] provider = …`` —
+   see :func:`dgml_core.storage_resolve.load_store_configs`.
 
-The path bridge (:meth:`~StorageService.materialize` and friends) and
-:meth:`~StorageService.sha256_blob` are concrete — you get working versions from
-the abstract methods above and only override them if your backend can do better.
+For a :class:`BlobStore`, the path bridge (:meth:`~BlobStore.materialize` and
+friends) and :meth:`~BlobStore.sha256_blob` are concrete — you get working
+versions from the abstract blob methods and only override them if your backend
+can do better.
 """
 
 from __future__ import annotations
@@ -65,14 +71,14 @@ from .hashing import sha256_file
 
 @dataclass(frozen=True)
 class StorageConfig:
-    """A resolved ``storage`` config section.
+    """A resolved single-role ``storage`` config section (blobs *or* docs).
 
     ``provider`` is the dotted path identifying the store class. ``options`` holds
     the section's remaining (non-``provider``) fields verbatim — a provider's own
-    settings (``bucket``, ``endpoint_url``, …). ``root`` is the local workspace
-    root, always available as bootstrap (``config.json`` names the store, so it
-    cannot live inside it); a ``LocalStore`` writes under it, and a remote store
-    may use it for temp staging.
+    settings (``bucket``, ``endpoint_url``, ``mongo_database``, …). ``root`` is the
+    local workspace root, always available as bootstrap (the config names the store,
+    so it cannot live inside it); a ``LocalStore`` writes under it, and a remote
+    store may use it for temp staging.
     """
 
     provider: str
@@ -80,12 +86,15 @@ class StorageConfig:
     options: Mapping[str, Any] = field(default_factory=dict)
 
 
-class StorageService(ABC):
-    """Common interface for pluggable workspace storage backends.
+class _StoreBase(ABC):
+    """Config machinery shared by :class:`BlobStore` and :class:`DocStore`.
 
-    Subclasses declare ``config_fields`` — the JSON keys they accept under
-    ``storage.*`` besides the universal ``provider`` — and are rejected for any
-    other key by :meth:`_check_no_extra_fields` (catches typos and stale fields).
+    Subclasses declare ``config_fields`` — the JSON keys they accept under a
+    ``storage`` sub-table besides the universal ``provider`` — and are rejected for
+    any other key by :meth:`_check_no_extra_fields` (catches typos and stale
+    fields). A concrete class may implement one interface (an S3 blob store) or
+    both (``LocalStore``); it provides one ``parse_config`` / ``__init__`` either
+    way.
     """
 
     name: ClassVar[str]
@@ -113,6 +122,15 @@ class StorageService(ABC):
     def __init__(self, config: StorageConfig) -> None:
         """Set the store up from ``config``. Lazy-import any SDK here and raise an
         actionable :class:`dgml_core.errors.DgmlError` if it is missing."""
+
+
+class BlobStore(_StoreBase):
+    """A pluggable **blob** backend — opaque bytes addressed by key.
+
+    Modeled on the S3 object API. The path bridge (:meth:`materialize` and friends)
+    and :meth:`sha256_blob` are concrete, built purely on the abstract blob
+    primitives, so every blob store gets working versions for free.
+    """
 
     # ---- Blobs — modeled on the S3 object API (key -> bytes) ----
 
@@ -151,6 +169,23 @@ class StorageService(ABC):
     @abstractmethod
     def download_blob(self, key: str, dest: Path) -> None:
         """Write the blob ``key`` to the local path ``dest`` (S3 ``download_file``)."""
+
+    @abstractmethod
+    def delete_blobs(self, prefix: str) -> None:
+        """Delete every blob whose key is under ``prefix`` (an object store: list +
+        batch-delete; ``LocalStore``: remove the blob files and prune now-empty
+        directories). Documents are left untouched — a cascade delete composes this
+        with ``delete_doc`` / ``delete_docs`` in the caller, so each store only ever
+        does operations native to it (no store needs the blob/document layout). A
+        prefix that matches nothing is a no-op.
+
+        Callers must run this **last** in a cascade. That is the contract
+        :class:`dgml_core.workspace_ops.WorkspaceOps` implements — *the
+        authoritative record dies first*, so an interrupted cascade leaves
+        orphaned bytes (recoverable) rather than a record pointing at bytes that
+        are gone (indistinguishable from a valid entity). It also happens to be
+        what lets ``LocalStore`` prune the emptied container, which it can only
+        do once the documents beside those blobs are gone."""
 
     # ---- Path bridge — for tools that demand a real filesystem path ----
     #
@@ -298,6 +333,15 @@ class StorageService(ABC):
         with self.materialize(key) as path:
             return sha256_file(path)
 
+
+class DocStore(_StoreBase):
+    """A pluggable **document** backend — JSON documents in named collections.
+
+    Modeled on the MongoDB collection API. Documents carry no store-managed id in
+    their body: a store keys them by ``(collection, doc_id)`` and never leaks its
+    own ``_id`` into the returned dict.
+    """
+
     # ---- JSON documents — modeled on the MongoDB collection API ----
 
     @abstractmethod
@@ -342,20 +386,3 @@ class StorageService(ABC):
     def delete_docs(self, collection: str, query: Mapping[str, Any]) -> int:
         """Delete every document in ``collection`` matching ``query`` (Mongo
         ``delete_many``). Returns the number deleted."""
-
-    @abstractmethod
-    def delete_blobs(self, prefix: str) -> None:
-        """Delete every **blob** whose key is under ``prefix`` (an object store: list
-        + batch-delete; ``LocalStore``: remove the blob files and prune now-empty
-        directories). Documents are left untouched — a cascade delete composes this
-        with ``delete_doc`` / ``delete_docs`` in the caller, so each store only ever
-        does operations native to it (no store needs the blob/document layout). A
-        prefix that matches nothing is a no-op.
-
-        Callers must run this **last** in a cascade. That is the contract
-        :class:`dgml_core.workspace_ops.WorkspaceOps` implements — *the
-        authoritative record dies first*, so an interrupted cascade leaves
-        orphaned bytes (recoverable) rather than a record pointing at bytes that
-        are gone (indistinguishable from a valid entity). It also happens to be
-        what lets ``LocalStore`` prune the emptied container, which it can only
-        do once the documents beside those blobs are gone."""

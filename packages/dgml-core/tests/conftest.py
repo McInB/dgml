@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from dgml_core import DEFAULT_STORAGE_PROVIDER, LocalStore, StorageConfig, StorageService
+from dgml_core import DEFAULT_STORAGE_PROVIDER, BlobStore, LocalStore, StorageConfig
 from dgml_core.pages import GS_BINARIES
 from dgml_core.storage import Workspace
 
@@ -43,10 +43,10 @@ class DefaultBridgeStore(LocalStore):
     Attestation hashes through the path bridge, so this is also what proves the
     remote-store code path produces identical leaf hashes and roots."""
 
-    materialize = StorageService.materialize
-    staged_write = StorageService.staged_write
-    materialize_dir = StorageService.materialize_dir
-    working_dir = StorageService.working_dir
+    materialize = BlobStore.materialize
+    staged_write = BlobStore.staged_write
+    materialize_dir = BlobStore.materialize_dir
+    working_dir = BlobStore.working_dir
 
 
 def default_bridge_store(root: Path) -> DefaultBridgeStore:

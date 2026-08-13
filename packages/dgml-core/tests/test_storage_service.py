@@ -10,7 +10,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the pluggable StorageService: LocalStore, resolver, config, fingerprint."""
+"""Tests for the pluggable BlobStore/DocStore: LocalStore, resolver, config, fingerprint."""
 
 from __future__ import annotations
 
@@ -22,12 +22,14 @@ from pathlib import Path
 import pytest
 from dgml_core import (
     DEFAULT_STORAGE_PROVIDER,
+    BlobStore,
+    DocStore,
     LocalStore,
     StorageConfig,
-    StorageService,
     Workspace,
-    load_storage_config,
-    make_store,
+    load_store_configs,
+    make_blob_store,
+    make_doc_store,
     storage_fingerprint,
 )
 from dgml_core.errors import (
@@ -337,21 +339,25 @@ def test_usage_tolerates_corrupt_tail(tmp_path: Path) -> None:
 
 
 def test_make_store_default_is_local(tmp_path: Path) -> None:
-    store = make_store(StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=tmp_path))
-    assert isinstance(store, LocalStore)
-    assert isinstance(store, StorageService)
+    cfg = StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=tmp_path)
+    blobs = make_blob_store(cfg)
+    docs = make_doc_store(cfg)
+    assert isinstance(blobs, LocalStore) and isinstance(blobs, BlobStore)
+    assert isinstance(docs, LocalStore) and isinstance(docs, DocStore)
 
 
 def test_make_store_bad_provider() -> None:
     for bad in ["noColon", "no.module.here.at.all:Class", "json:Nonexistent"]:
         with pytest.raises(StorageProviderUnresolvable):
-            make_store(StorageConfig(provider=bad, root=Path(".")))
+            make_blob_store(StorageConfig(provider=bad, root=Path(".")))
 
 
 def test_make_store_not_a_storage_subclass() -> None:
-    # importable + resolvable, but not a StorageService
+    # importable + resolvable, but not a BlobStore / DocStore
     with pytest.raises(StorageProviderUnresolvable):
-        make_store(StorageConfig(provider="json:JSONDecoder", root=Path(".")))
+        make_blob_store(StorageConfig(provider="json:JSONDecoder", root=Path(".")))
+    with pytest.raises(StorageProviderUnresolvable):
+        make_doc_store(StorageConfig(provider="json:JSONDecoder", root=Path(".")))
 
 
 def test_local_store_rejects_unknown_options(tmp_path: Path) -> None:
@@ -361,41 +367,39 @@ def test_local_store_rejects_unknown_options(tmp_path: Path) -> None:
         )
 
 
-def test_load_storage_config_defaults_to_local(tmp_path: Path) -> None:
+def test_load_store_configs_defaults_to_local(tmp_path: Path) -> None:
+    # No [storage] section → both roles on the bundled local-disk default.
     ws = Workspace.resolve(tmp_path)
-    cfg = load_storage_config(ws)
-    assert cfg.provider == DEFAULT_STORAGE_PROVIDER
-    assert cfg.root == ws.root
+    blob_cfg, doc_cfg = load_store_configs(ws)
+    assert blob_cfg.provider == doc_cfg.provider == DEFAULT_STORAGE_PROVIDER
+    assert blob_cfg.root == doc_cfg.root == ws.root
+    assert blob_cfg.options == doc_cfg.options == {}
 
 
-def test_load_storage_config_absent_defaults_local(tmp_path: Path) -> None:
-    # No [storage] section → the bundled local-disk default, zero config needed.
-    ws = Workspace.resolve(tmp_path)
-    cfg = load_storage_config(ws)
-    assert cfg.provider == DEFAULT_STORAGE_PROVIDER
-    assert cfg.options == {}
-
-
-def test_load_storage_config_reads_section(tmp_path: Path) -> None:
+def test_load_store_configs_flat_serves_both_roles(tmp_path: Path) -> None:
     from .conftest import write_config
 
     ws = Workspace.resolve(tmp_path)
     write_config(ws, {"storage": {"provider": "my_pkg.store:MyStore", "bucket": "b1"}})
-    cfg = load_storage_config(ws)
-    assert cfg.provider == "my_pkg.store:MyStore"
-    assert cfg.options == {"bucket": "b1"}
+    blob_cfg, doc_cfg = load_store_configs(ws)
+    for cfg in (blob_cfg, doc_cfg):
+        assert cfg.provider == "my_pkg.store:MyStore"
+        assert cfg.options == {"bucket": "b1"}
+    # A bare [storage] table cannot also name other services.
+    with pytest.raises(StorageConfigInvalid):
+        load_store_configs(ws, "svcA")
 
 
-def test_load_storage_config_invalid_provider(tmp_path: Path) -> None:
+def test_load_store_configs_invalid_provider(tmp_path: Path) -> None:
     from .conftest import write_config
 
     ws = Workspace.resolve(tmp_path)
     write_config(ws, {"storage": {"provider": ""}})
     with pytest.raises(StorageConfigInvalid):
-        load_storage_config(ws)
+        load_store_configs(ws)
 
 
-def test_load_storage_config_named_service(tmp_path: Path) -> None:
+def test_load_store_configs_per_role_subtables(tmp_path: Path) -> None:
     from .conftest import write_config
 
     ws = Workspace.resolve(tmp_path)
@@ -403,39 +407,51 @@ def test_load_storage_config_named_service(tmp_path: Path) -> None:
         ws,
         {
             "storage": {
-                "svcA": {"provider": "my_pkg:A", "bucket": "a"},
-                "svcB": {"provider": "my_pkg:B", "bucket": "b"},
+                "mix": {
+                    "blobs": {"provider": "pkg:S3", "bucket": "b"},
+                    "docs": {"provider": "pkg:Mongo", "mongo_database": "d"},
+                }
             }
         },
     )
-    a = load_storage_config(ws, "svcA")
-    assert (a.provider, a.options) == ("my_pkg:A", {"bucket": "a"})
-    b = load_storage_config(ws, "svcB")
-    assert (b.provider, b.options) == ("my_pkg:B", {"bucket": "b"})
+    blob_cfg, doc_cfg = load_store_configs(ws, "mix")
+    assert (blob_cfg.provider, blob_cfg.options) == ("pkg:S3", {"bucket": "b"})
+    assert (doc_cfg.provider, doc_cfg.options) == ("pkg:Mongo", {"mongo_database": "d"})
 
 
-def test_load_storage_config_missing_named_service_raises(tmp_path: Path) -> None:
+def test_load_store_configs_omitted_role_falls_back_to_local(tmp_path: Path) -> None:
+    from .conftest import write_config
+
+    ws = Workspace.resolve(tmp_path)
+    # Only the blob role is a named backend; docs default to local disk.
+    write_config(ws, {"storage": {"mix": {"blobs": {"provider": "pkg:S3", "bucket": "b"}}}})
+    blob_cfg, doc_cfg = load_store_configs(ws, "mix")
+    assert blob_cfg.provider == "pkg:S3"
+    assert doc_cfg.provider == DEFAULT_STORAGE_PROVIDER
+
+
+def test_load_store_configs_rejects_mixed_form(tmp_path: Path) -> None:
+    from .conftest import write_config
+
+    ws = Workspace.resolve(tmp_path)
+    write_config(
+        ws,
+        {"storage": {"mix": {"provider": "pkg:Both", "blobs": {"provider": "pkg:S3"}}}},
+    )
+    with pytest.raises(StorageConfigInvalid):
+        load_store_configs(ws, "mix")
+
+
+def test_load_store_configs_missing_named_service_raises(tmp_path: Path) -> None:
     from .conftest import write_config
 
     ws = Workspace.resolve(tmp_path)
     write_config(ws, {"storage": {"svcA": {"provider": "my_pkg:A"}}})
     with pytest.raises(StorageConfigInvalid):
-        load_storage_config(ws, "nope")
+        load_store_configs(ws, "nope")
     # ...but an absent "default" in named form still falls back to local disk.
-    cfg = load_storage_config(ws, "default")
-    assert cfg.provider == DEFAULT_STORAGE_PROVIDER
-
-
-def test_load_storage_config_flat_is_the_default_service(tmp_path: Path) -> None:
-    from .conftest import write_config
-
-    ws = Workspace.resolve(tmp_path)
-    write_config(ws, {"storage": {"provider": "my_pkg:Flat", "bucket": "b"}})
-    cfg = load_storage_config(ws, "default")
-    assert (cfg.provider, cfg.options) == ("my_pkg:Flat", {"bucket": "b"})
-    # A bare [storage] table cannot also name other services.
-    with pytest.raises(StorageConfigInvalid):
-        load_storage_config(ws, "svcA")
+    blob_cfg, doc_cfg = load_store_configs(ws, "default")
+    assert blob_cfg.provider == doc_cfg.provider == DEFAULT_STORAGE_PROVIDER
 
 
 # ---------------------------------------------------------- snapshot / resolution
@@ -455,13 +471,30 @@ def test_storage_snapshot_drops_secrets_and_round_trips_fingerprint() -> None:
     assert fingerprint_of_snapshot(snap) == storage_fingerprint(cfg)
 
 
-def test_resolve_store_config_unregistered_is_local(tmp_path: Path) -> None:
-    from dgml_core.registry import resolve_store_config
+def test_fingerprint_pair_over_two_snapshots() -> None:
+    from dgml_core.storage_resolve import fingerprint_pair, snapshot_pair
+
+    blob = StorageConfig(provider="pkg:S3", root=Path("/w"), options={"bucket": "b"})
+    doc = StorageConfig(provider="pkg:Mongo", root=Path("/w"), options={"mongo_database": "d"})
+    pair = snapshot_pair(blob, doc)
+    assert pair == {
+        "blobs": {"provider": "pkg:S3", "bucket": "b"},
+        "docs": {"provider": "pkg:Mongo", "mongo_database": "d"},
+    }
+    assert fingerprint_pair(pair).startswith("sha256:")
+    # Empty pair reads as unsealed (trust-on-first-use).
+    assert fingerprint_pair({}) == ""
+    # Swapping the two backends changes the fingerprint (order matters).
+    assert fingerprint_pair(pair) != fingerprint_pair(snapshot_pair(doc, blob))
+
+
+def test_resolve_store_configs_unregistered_is_local(tmp_path: Path) -> None:
+    from dgml_core.registry import resolve_store_configs
 
     ws = Workspace.resolve(tmp_path)  # not in the registry
-    cfg = resolve_store_config(ws)
-    assert cfg.provider == DEFAULT_STORAGE_PROVIDER
-    assert cfg.root == ws.root
+    blob_cfg, doc_cfg = resolve_store_configs(ws)
+    assert blob_cfg.provider == doc_cfg.provider == DEFAULT_STORAGE_PROVIDER
+    assert blob_cfg.root == doc_cfg.root == ws.root
 
 
 # --------------------------------------------------------------------- fingerprint
@@ -489,7 +522,8 @@ def test_third_party_plugin_resolves_by_dotted_path() -> None:
     # dgml_core.storage_local:LocalStore is resolved exactly like a third party's
     # own dotted path — proving the plug-in mechanism end to end.
     cfg = StorageConfig(provider="dgml_core.storage_local:LocalStore", root=Path("."))
-    assert isinstance(make_store(cfg), LocalStore)
+    assert isinstance(make_blob_store(cfg), LocalStore)
+    assert isinstance(make_doc_store(cfg), LocalStore)
 
 
 # --------------------------------------------------------------------------- path bridge

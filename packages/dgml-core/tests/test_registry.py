@@ -35,7 +35,10 @@ def _entry(workspace_id: str, root: Path, *, name: str = "W", org: str = "acme")
         organization=org,
         root=str(root),
         storage_service="default",
-        storage={"provider": "dgml_core.storage_local:LocalStore"},
+        storage={
+            "blobs": {"provider": "dgml_core.storage_local:LocalStore"},
+            "docs": {"provider": "dgml_core.storage_local:LocalStore"},
+        },
         storage_fingerprint="sha256:deadbeef",
         created_at="2026-08-05T12:00:00Z",
         schema_version=1,
@@ -188,7 +191,12 @@ def test_verify_storage_seal_passes_and_no_ops(tmp_path: Path) -> None:
     # Hand-edit the sealed snapshot without fixing the fingerprint → mismatch.
     entry = registry.get_by_root(ws.root)
     assert entry is not None
-    tampered = RegistryEntry(**{**entry.__dict__, "storage": {"provider": "other:Store"}})
+    tampered = RegistryEntry(
+        **{
+            **entry.__dict__,
+            "storage": {"blobs": {"provider": "other:Store"}, "docs": entry.storage["docs"]},
+        }
+    )
     registry.register(tampered)
     with pytest.raises(StorageBackendMismatch):
         registry.verify_storage_seal(ws)

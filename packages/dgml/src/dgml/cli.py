@@ -1920,10 +1920,10 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         # core <stem>.dgml.xml — the single *.dgml.xml blob in the pair's prefix.
         dgml_keys = sorted(
             k
-            for k in ws.store.list_blobs(layout.docset_pair_prefix(args.docset_id, args.file_id))
+            for k in ws.blobs.list_blobs(layout.docset_pair_prefix(args.docset_id, args.file_id))
             if k.endswith(".dgml.xml")
         )
-        xml = ws.store.get_blob(dgml_keys[0]).decode("utf-8") if dgml_keys else ""
+        xml = ws.blobs.get_blob(dgml_keys[0]).decode("utf-8") if dgml_keys else ""
         if not xml or not has_extraction(xml):
             return _emit_error(
                 "VALUES_NOT_FOUND",
@@ -2308,8 +2308,8 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         # Both are store blobs under the file's prefix; materialized to a real
         # path for transcription just before convert_batch (below).
         if not (
-            ws.store.blob_exists(layout.file_source_key(fid, f"{stem}.pdf"))
-            or ws.store.blob_exists(layout.file_source_key(fid, name))
+            ws.blobs.blob_exists(layout.file_source_key(fid, f"{stem}.pdf"))
+            or ws.blobs.blob_exists(layout.file_source_key(fid, name))
         ):
             failed_results.append(
                 _file_result(
@@ -2325,8 +2325,8 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             _diag(f"Source missing for {name} (file '{fid}') — reported as failed")
             continue
         out_xml_key = layout.dgml_xml_key(args.docset_id, fid, stem)
-        if ws.store.blob_exists(out_xml_key) and _has_generated_tree(
-            ws.store.get_blob(out_xml_key).decode("utf-8")
+        if ws.blobs.blob_exists(out_xml_key) and _has_generated_tree(
+            ws.blobs.get_blob(out_xml_key).decode("utf-8")
         ):
             # Skip only when a generated document tree is present. An
             # extraction-only file (`extraction extract` ran before
@@ -2340,7 +2340,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             continue
         pt_prefix = layout.file_text_prefix(fid)
         candidates.setdefault(name, []).append(
-            (fid, out_xml_key, pt_prefix if ws.store.list_blobs(pt_prefix) else None)
+            (fid, out_xml_key, pt_prefix if ws.blobs.list_blobs(pt_prefix) else None)
         )
 
     # Same-basename collision: the typed-block pipeline keys documents by
@@ -2421,14 +2421,14 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         # file being re-rendered. Capture its dg:extraction before the fresh
         # render overwrites it; re-embedded below after grounding + semlinks.
         prior_with_extraction: str | None = None
-        if ws.store.blob_exists(xml_key):
+        if ws.blobs.blob_exists(xml_key):
             try:
-                prior_text = ws.store.get_blob(xml_key).decode("utf-8")
+                prior_text = ws.blobs.get_blob(xml_key).decode("utf-8")
                 if has_extraction(prior_text):
                     prior_with_extraction = prior_text
             except Exception:
                 prior_with_extraction = None  # unparseable prior — nothing to carry
-        ws.store.put_blob(xml_key, xml.encode("utf-8"))
+        ws.blobs.put_blob(xml_key, xml.encode("utf-8"))
         # Ground in place: re-parse the just-written tree, align it against the
         # file's page OCR, and rewrite <stem>.dgml.xml with dg:origin boxes.
         # Deterministic and free; a file with no page_text is left ungrounded.
@@ -2438,7 +2438,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         # persist the result (and its stats sidecar) back through the store.
         grounding: dict[str, Any]
         try:
-            with ws.store.materialize(xml_key) as gpath:
+            with ws.blobs.materialize(xml_key) as gpath:
                 res = ground_dgml_xml(
                     ws,
                     name_to_fid[name],
@@ -2448,9 +2448,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                     write_stats=args.debug,
                     debug=args.debug,
                 )
-                ws.store.put_blob(xml_key, gpath.read_bytes())
+                ws.blobs.put_blob(xml_key, gpath.read_bytes())
                 if res.stats_path is not None and res.stats_path.exists():
-                    ws.store.put_blob(
+                    ws.blobs.put_blob(
                         layout.pair_artifact_key(
                             args.docset_id, name_to_fid[name], res.stats_path.name
                         ),
@@ -2477,8 +2477,8 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         links_added = 0
         if not args.no_semlinks:
             try:
-                linked, applied = add_links(ws.store.get_blob(xml_key).decode("utf-8"), link_config)
-                ws.store.put_blob(xml_key, linked.encode("utf-8"))
+                linked, applied = add_links(ws.blobs.get_blob(xml_key).decode("utf-8"), link_config)
+                ws.blobs.put_blob(xml_key, linked.encode("utf-8"))
                 links_added = len(applied)
                 _diag(f"[semlinks] {name}: {links_added} link(s)")
             except Exception as exc:  # a link-pass failure must not lose the DGML
@@ -2489,9 +2489,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         if prior_with_extraction is not None:
             try:
                 merged = carry_extraction_over(
-                    prior_with_extraction, ws.store.get_blob(xml_key).decode("utf-8")
+                    prior_with_extraction, ws.blobs.get_blob(xml_key).decode("utf-8")
                 )
-                ws.store.put_blob(xml_key, merged.encode("utf-8"))
+                ws.blobs.put_blob(xml_key, merged.encode("utf-8"))
                 _diag(f"[extraction] {name}: carried dg:extraction over into the fresh render")
             except Exception as exc:  # never lose the fresh DGML over the merge
                 _diag(f"[extraction] {name}: dg:extraction NOT carried over ({exc})")
@@ -2535,16 +2535,16 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 cache_dir = Path(args.cache_dir)
             else:
                 cache_dir = _cache_stack.enter_context(
-                    ws.store.working_dir(layout.generation_cache_prefix(args.docset_id))
+                    ws.blobs.working_dir(layout.generation_cache_prefix(args.docset_id))
                 )
             schema_key = layout.docset_generation_schema_key(args.docset_id)
             schema_json_local = cache_dir.parent / "schema.json"
             if (
                 not args.cache_dir
                 and not schema_json_local.exists()
-                and ws.store.blob_exists(schema_key)
+                and ws.blobs.blob_exists(schema_key)
             ):
-                ws.store.download_blob(schema_key, schema_json_local)
+                ws.blobs.download_blob(schema_key, schema_json_local)
             roster_path = Path(cache_dir) / "concept_roster.json"
             schema_seed = None
             roster_seed: dict[str, str] | None = None
@@ -2583,7 +2583,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             for stem, blocks in load_labeled_docs_from_cache(cache_dir, list(prior_stems)).items():
                 nm = prior_stems[stem]
                 prior_docs[nm] = blocks
-                prior_outputs[nm] = ws.store.get_blob(prior_out_paths[nm]).decode("utf-8")
+                prior_outputs[nm] = ws.blobs.get_blob(prior_out_paths[nm]).decode("utf-8")
                 dgml_xml_keys[nm] = prior_out_paths[nm]
 
             # Materialize each file's page_text/ into a local dir the pipeline
@@ -2592,14 +2592,14 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             # the whole batch. Populate the same dict `_on_output` closes over.
             with contextlib.ExitStack() as pt_stack:
                 for nm, pref in page_text_prefixes.items():
-                    page_text_dirs[nm] = pt_stack.enter_context(ws.store.materialize_dir(pref))
+                    page_text_dirs[nm] = pt_stack.enter_context(ws.blobs.materialize_dir(pref))
                 # Materialize each file's source dir so transcription's path tools
                 # (load_document_as_pdf → ghostscript) get the original + its
                 # persisted sibling <stem>.pdf on disk. LocalStore yields the real
                 # dir (zero-copy); a remote store downloads it for the batch.
                 pdf_paths: list[Path | str] = [
                     pt_stack.enter_context(
-                        ws.store.materialize_dir(layout.file_prefix(filename_to_fid[nm]))
+                        ws.blobs.materialize_dir(layout.file_prefix(filename_to_fid[nm]))
                     )
                     / nm
                     for nm in convert_names
@@ -2655,22 +2655,22 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 # Merge into any existing report so an incremental run keeps the
                 # already-generated docs' coverage instead of overwriting it.
                 existing_docs: list[dict[str, Any]] = []
-                if ws.store.blob_exists(cov_report_key):
+                if ws.blobs.blob_exists(cov_report_key):
                     try:
-                        existing_docs = json.loads(ws.store.get_blob(cov_report_key)).get(
+                        existing_docs = json.loads(ws.blobs.get_blob(cov_report_key)).get(
                             "documents", []
                         )
                     except json.JSONDecodeError:
                         existing_docs = []
                 merged = cov_mod.merge_coverage_documents(existing_docs, cov_results)
-                ws.store.put_blob(
+                ws.blobs.put_blob(
                     cov_report_key, cov_mod.dump_coverage_report(merged).encode("utf-8")
                 )
             # Persist schema.json (labeling wrote it next to the cache) as the
             # docset's generation-schema blob — exact bytes, before write_docset_rnc
             # reads it back — then flush the cache working dir to the store.
             if not args.cache_dir and schema_json_local.exists():
-                ws.store.put_blob(schema_key, schema_json_local.read_bytes())
+                ws.blobs.put_blob(schema_key, schema_json_local.read_bytes())
     else:
         _diag("Nothing to convert — every file is already converted, missing, or a duplicate name.")
 

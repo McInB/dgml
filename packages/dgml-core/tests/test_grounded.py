@@ -98,8 +98,8 @@ def _seed_file(
         page_count=page_count,
         text_mode="digital",
     )
-    workspace.store.put_doc("files", file_id, record.to_json())
-    workspace.store.put_blob(layout.file_source_key(file_id, filename), pdf_bytes)
+    workspace.docs.put_doc("files", file_id, record.to_json())
+    workspace.blobs.put_blob(layout.file_source_key(file_id, filename), pdf_bytes)
 
 
 def _seed_page_text(
@@ -126,13 +126,13 @@ def _seed_page_text(
         "height": height,
         "words": words,
     }
-    workspace.store.put_blob(layout.file_page_text_key(file_id, page), json.dumps(payload).encode())
+    workspace.blobs.put_blob(layout.file_page_text_key(file_id, page), json.dumps(payload).encode())
 
 
 def _seed_page_image(workspace: Workspace, file_id: str, page: int) -> None:
     """Drop a minimal PNG so phase-3 ``image_path.exists()`` passes.
     Bytes never reach a real decoder — litellm is mocked in these tests."""
-    workspace.store.put_blob(layout.file_page_image_key(file_id, page), b"\x89PNG\r\n\x1a\n")
+    workspace.blobs.put_blob(layout.file_page_image_key(file_id, page), b"\x89PNG\r\n\x1a\n")
 
 
 def _tool_call_response(
@@ -749,7 +749,7 @@ def test_extract_values_direct_submit(workspace: Workspace) -> None:
     # (no separate file). With no prior document tree, mode is "extraction".
     assert result.mode == "extraction"
     assert result.xml_key == layout.dgml_xml_key(ds_id, fid, "doc")
-    xml = workspace.store.get_blob(result.xml_key).decode("utf-8")
+    xml = workspace.blobs.get_blob(result.xml_key).decode("utf-8")
     assert "<dg:extraction>" in xml
     vocab = parse_rnc(DocSetStore(workspace).get_schema(ds_id))
     assert dgml_xml_to_values(xml, vocab=vocab) == result.values
@@ -764,7 +764,7 @@ def test_extract_values_full_extraction_embeds_in_existing_tree(workspace: Works
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
 
     # Simulate a prior `docset generate`: a core file with a document tree.
-    workspace.store.put_blob(
+    workspace.blobs.put_blob(
         layout.dgml_xml_key(ds_id, fid, "doc"),
         b'<?xml version="1.0" encoding="utf-8"?>\n'
         b'<dg:chunk xmlns:dg="http://dgml.io/ns/dg#">\n'
@@ -782,7 +782,7 @@ def test_extract_values_full_extraction_embeds_in_existing_tree(workspace: Works
 
     assert result.mode == "full-extraction"
     assert result.xml_key == layout.dgml_xml_key(ds_id, fid, "doc")
-    xml = workspace.store.get_blob(layout.dgml_xml_key(ds_id, fid, "doc")).decode("utf-8")
+    xml = workspace.blobs.get_blob(layout.dgml_xml_key(ds_id, fid, "doc")).decode("utf-8")
     assert "the generated document tree" in xml  # tree preserved
     assert xml.count("<dg:extraction>") == 1  # extraction added once
 
@@ -931,7 +931,7 @@ def test_extract_values_phase3_merges_costs_across_parallel_pages(
         extract_values(workspace, ds_id, fid, config=config)
 
     assert mock_completion.call_count == 3
-    stats = workspace.store.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None
     # Phase 3 ran two parallel page-calls; merged cost == sum of both.
     assert stats["phases"]["phase3"]["page_calls"] == 2
@@ -963,7 +963,7 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
     ):
         extract_values(workspace, ds_id, fid, config=config)
 
-    stats = workspace.store.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None
     # Lock the top-level shape — this file is read by the UX
     # (StatsPanel) and is part of the on-disk surface.
@@ -1030,8 +1030,8 @@ def test_extract_values_write_stats_false_suppresses_file(workspace: Workspace) 
     ):
         extract_values(workspace, ds_id, fid, config=config, write_stats=False)
 
-    assert workspace.store.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
-    assert workspace.store.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc"))
+    assert workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}") is None
+    assert workspace.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc"))
 
 
 def test_extract_values_no_tool_call_errors(workspace: Workspace) -> None:
@@ -1472,7 +1472,7 @@ def test_extract_values_computed_field_end_to_end(workspace: Workspace) -> None:
     assert mock_completion.call_count == 1
     assert result.values["word_count"] == phase1_values["word_count"]
 
-    xml = workspace.store.get_blob(result.xml_key).decode("utf-8")
+    xml = workspace.blobs.get_blob(result.xml_key).decode("utf-8")
     assert 'dg:origin="computed"' in xml
     assert 'xsi:type="integer" dg:value="2"' in xml
     assert 'dg:itemprop="computedFrom"' in xml
@@ -1482,7 +1482,7 @@ def test_extract_values_computed_field_end_to_end(workspace: Workspace) -> None:
     vocab = parse_rnc(DocSetStore(workspace).get_schema(ds.id))
     assert dgml_xml_to_values(xml, vocab=vocab) == result.values
 
-    stats = workspace.store.get_doc("extraction_stats", f"{ds.id}/{fid}")
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds.id}/{fid}")
     assert stats is not None
     assert stats["matching"] == {
         "total_locations": 1,
@@ -1523,7 +1523,7 @@ def test_extract_values_counts_dropped_refs_in_stats(workspace: Workspace) -> No
     ):
         extract_values(workspace, ds.id, fid, config=config)
 
-    stats = workspace.store.get_doc("extraction_stats", f"{ds.id}/{fid}")
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds.id}/{fid}")
     assert stats is not None
     assert stats["matching"]["computed_fields"] == 1
     assert stats["matching"]["dropped_refs"] == 2

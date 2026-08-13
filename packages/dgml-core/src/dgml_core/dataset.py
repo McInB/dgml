@@ -81,19 +81,19 @@ class WorkspaceFileDataset(DocumentDataset):
 
         file_id = self.file_ids[index]
         ws = self.workspace
-        page_keys = ws.store.list_blobs(layout.file_pages_prefix(file_id))
+        page_keys = ws.blobs.list_blobs(layout.file_pages_prefix(file_id))
         if not page_keys:
             raise FileNotFoundError(f"no rendered page images for file '{file_id}'")
         # Load the first ``max_pages`` renders for optional multi-page pooling,
         # reading each through the store (zero-copy on LocalStore). ``page_keys``
         # is sorted, so this is pages 1..max_pages in order.
         page_images = tuple(
-            Image.open(io.BytesIO(ws.store.get_blob(k))).convert("RGB")
+            Image.open(io.BytesIO(ws.blobs.get_blob(k))).convert("RGB")
             for k in page_keys[: self.max_pages]
         )
         # `_build_text` reads `<file_dir>/page_text/*.json`; hand it a materialized
         # copy of the file's artifacts (the real dir on LocalStore, zero-copy).
-        with ws.store.materialize_dir(layout.file_prefix(file_id)) as file_dir:
+        with ws.blobs.materialize_dir(layout.file_prefix(file_id)) as file_dir:
             text = _build_text(file_dir, view=self.text_view)
         return DocumentRecord(
             doc_id=file_id,

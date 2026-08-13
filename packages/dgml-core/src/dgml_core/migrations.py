@@ -110,7 +110,7 @@ def _upgrade_assignments_to_documents(ws: Workspace) -> int:
     from .layout import ASSIGNMENT_MANIFEST, DOCSET_FILES_DIR, Collection, pair_id
     from .storage_local import LocalStore
 
-    store = ws.store
+    store = ws.docs  # LocalStore is both a BlobStore and a DocStore
     if not isinstance(store, LocalStore):
         return 0
 
@@ -177,7 +177,7 @@ def stamp_schema_version(ws: Workspace, version: int = WORKSPACE_SCHEMA_VERSION)
 
     meta = dict(ws.read_meta())
     meta[_VERSION_FIELD] = version
-    ws.store.put_doc(Collection.WORKSPACE, Collection.WORKSPACE, meta)
+    ws.docs.put_doc(Collection.WORKSPACE, Collection.WORKSPACE, meta)
 
 
 def pending_migrations(ws: Workspace) -> list[Migration]:

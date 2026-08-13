@@ -65,21 +65,21 @@ def test_migration_upgrades_legacy_assignments(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     for fid in ("aaaaaaaaaaaa", "bbbbbbbbbbbb"):
-        workspace.store.put_doc("files", fid, {"id": fid})
+        workspace.docs.put_doc("files", fid, {"id": fid})
         _legacy_assignment(workspace, ds.id, fid)
     # a generated artifact in one pair — the migration must not disturb it
-    workspace.store.put_blob(f"docsets/{ds.id}/files/aaaaaaaaaaaa/r.dgml.xml", b"<x/>")
+    workspace.blobs.put_blob(f"docsets/{ds.id}/files/aaaaaaaaaaaa/r.dgml.xml", b"<x/>")
 
     assert store.list_files(ds.id) == []  # invisible before migrating
 
     migrate_workspace(workspace)
 
     assert store.list_files(ds.id) == ["aaaaaaaaaaaa", "bbbbbbbbbbbb"]
-    assert workspace.store.get_doc("assignments", f"{ds.id}/aaaaaaaaaaaa") == {
+    assert workspace.docs.get_doc("assignments", f"{ds.id}/aaaaaaaaaaaa") == {
         "docset_id": ds.id,
         "file_id": "aaaaaaaaaaaa",
     }
-    assert workspace.store.get_blob(f"docsets/{ds.id}/files/aaaaaaaaaaaa/r.dgml.xml") == b"<x/>"
+    assert workspace.blobs.get_blob(f"docsets/{ds.id}/files/aaaaaaaaaaaa/r.dgml.xml") == b"<x/>"
     # The same v1 migration also backfilled the workspace_id (store-agnostic part).
     assert workspace.workspace_id is not None
     assert workspace_schema_version(workspace) == WORKSPACE_SCHEMA_VERSION
@@ -91,7 +91,7 @@ def test_migration_is_idempotent(workspace: Workspace) -> None:
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "aaaaaaaaaaaa"
-    workspace.store.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc("files", fid, {"id": fid})
     _legacy_assignment(workspace, ds.id, fid)
 
     migrate_workspace(workspace)
@@ -111,16 +111,16 @@ def test_migration_does_not_touch_existing_assignment_documents(workspace: Works
     store = DocSetStore(workspace)
     ds = store.create(name="X")
     fid = "aaaaaaaaaaaa"
-    workspace.store.put_doc("files", fid, {"id": fid})
+    workspace.docs.put_doc("files", fid, {"id": fid})
     store.add_file(ds.id, fid)
-    before = workspace.store.get_doc("assignments", f"{ds.id}/{fid}")
+    before = workspace.docs.get_doc("assignments", f"{ds.id}/{fid}")
     assert before is not None and before["assigned_at"]
 
     stamp_schema_version(workspace, 0)
     migrate_workspace(workspace)
     # The migration leaves an assignment document written by current code untouched
     # (in particular it keeps its assigned_at) rather than flattening it.
-    assert workspace.store.get_doc("assignments", f"{ds.id}/{fid}") == before
+    assert workspace.docs.get_doc("assignments", f"{ds.id}/{fid}") == before
 
 
 def test_migration_ignores_non_pair_directories(workspace: Workspace) -> None:
@@ -132,13 +132,13 @@ def test_migration_ignores_non_pair_directories(workspace: Workspace) -> None:
     (workspace.docsets_dir / ds.id / "scratch").mkdir(parents=True, exist_ok=True)
 
     migrate_workspace(workspace)
-    assert workspace.store.find_docs("assignments", {}) == []
+    assert workspace.docs.find_docs("assignments", {}) == []
 
 
 def test_empty_workspace_migrates_cleanly(workspace: Workspace) -> None:
     migrate_workspace(workspace)
     assert workspace_schema_version(workspace) == WORKSPACE_SCHEMA_VERSION
-    assert workspace.store.find_docs("assignments", {}) == []  # nothing to upgrade
+    assert workspace.docs.find_docs("assignments", {}) == []  # nothing to upgrade
 
 
 def test_backfill_workspace_id_mints_and_is_idempotent(workspace: Workspace) -> None:

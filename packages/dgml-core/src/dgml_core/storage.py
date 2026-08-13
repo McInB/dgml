@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from . import layout
 
 if TYPE_CHECKING:
-    from .storage_service import StorageService
+    from .storage_service import BlobStore, DocStore
 
 from .default_config import PROVIDER_MODELS
 
@@ -123,7 +123,7 @@ class Workspace:
 
         key = layout.file_page_text_key(file_id, page)
         try:
-            data = self.store.get_blob(key)
+            data = self.blobs.get_blob(key)
         except FileNotFoundError:
             return None
         try:
@@ -151,36 +151,41 @@ class Workspace:
         return self.root / layout.WORKSPACE_FILE
 
     @functools.cached_property
-    def store(self) -> StorageService:
-        """The workspace's storage backend. For a **registered** workspace the
-        non-secret identity comes from its registry entry's snapshot (authoritative
-        and self-contained), with secrets merged from the named ``config.toml``
-        template; an **unregistered** workspace falls back to the bundled local-disk
-        store (zero config). See :func:`dgml_core.registry.resolve_store_config`.
-        All workspace data is read/written through this rather than the filesystem
-        directly, so a workspace can live on any pluggable backend.
+    def blobs(self) -> BlobStore:
+        """The workspace's **blob** backend (page images, PDFs, XML, schemas).
 
-        **Cached for the lifetime of this ``Workspace``.** Resolving means reading
-        and merging config, importing the provider module and constructing it —
-        cheap enough on local disk, but a fresh SDK client per call on a remote
-        backend, and this is reached through on the order of a hundred call sites.
-        A workspace's store is a single static choice, so re-deriving it per
-        access bought nothing.
+        For a **registered** workspace the non-secret identity comes from its
+        registry entry's snapshot (authoritative and self-contained), with secrets
+        merged from the named ``config.toml`` template; an **unregistered**
+        workspace falls back to the bundled local-disk store (zero config). See
+        :func:`dgml_core.registry.resolve_store_configs`. All blob data flows through
+        this rather than the filesystem directly, so it can live on any pluggable
+        backend.
 
-        Caching works on this frozen dataclass because ``cached_property`` writes
-        straight into ``__dict__`` rather than going through ``__setattr__``. It
-        is also a *non-data* descriptor, so a test that replaces the class
-        attribute with a ``property`` still takes precedence over anything already
-        cached."""
+        **Cached for the lifetime of this ``Workspace``.** Caching works on this
+        frozen dataclass because ``cached_property`` writes straight into
+        ``__dict__`` rather than through ``__setattr__``, and it is a *non-data*
+        descriptor, so a test that replaces the class attribute still takes
+        precedence."""
         from . import registry
-        from .storage_resolve import make_store
+        from .storage_resolve import make_blob_store
 
-        return make_store(registry.resolve_store_config(self))
+        return make_blob_store(registry.resolve_store_configs(self)[0])
+
+    @functools.cached_property
+    def docs(self) -> DocStore:
+        """The workspace's **document** backend (manifests, page text, assignments,
+        usage). Resolved independently of :attr:`blobs` — see it for the
+        registered/unregistered resolution and caching notes."""
+        from . import registry
+        from .storage_resolve import make_doc_store
+
+        return make_doc_store(registry.resolve_store_configs(self)[1])
 
     def read_meta(self) -> dict[str, Any]:
         """Return the parsed ``workspace.json`` mapping, or ``{}`` when the file
         is absent (workspaces created before ``workspace.json`` existed)."""
-        data = self.store.get_doc(layout.Collection.WORKSPACE, layout.Collection.WORKSPACE)
+        data = self.docs.get_doc(layout.Collection.WORKSPACE, layout.Collection.WORKSPACE)
         return data if isinstance(data, dict) else {}
 
     def write_meta(self, *, name: str, organization: str, workspace_id: str | None = None) -> None:
@@ -196,7 +201,7 @@ class Workspace:
         meta["organization"] = organization
         if workspace_id is not None:
             meta["workspace_id"] = workspace_id
-        self.store.put_doc(layout.Collection.WORKSPACE, layout.Collection.WORKSPACE, meta)
+        self.docs.put_doc(layout.Collection.WORKSPACE, layout.Collection.WORKSPACE, meta)
 
     @property
     def workspace_id(self) -> str | None:

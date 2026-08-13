@@ -40,7 +40,7 @@ from .concurrency import map_concurrent
 from .errors import short_error_message
 from .generation.transcribe import strip_fences
 from .storage import Workspace
-from .storage_service import StorageService
+from .storage_service import BlobStore
 from .style import ALLOWED, merge_styles, validate_style
 from .usage import OPERATION_STYLE_ANNOTATE
 
@@ -65,7 +65,7 @@ class _PageJob:
     ``snippets`` are already-extracted strings and ``config`` already carries
     this page's recording context. ``elements`` rides along only so the calling
     thread can line results back up with their targets — the worker must not
-    read it. The page image is read lazily in the worker via ``store`` +
+    read it. The page image is read lazily in the worker via ``blobs`` +
     ``image_key`` (not prefetched), capping resident image bytes at the pool size.
     """
 
@@ -73,7 +73,7 @@ class _PageJob:
     elements: list[Any]
     snippets: list[str]
     image_key: str
-    store: StorageService
+    blobs: BlobStore
     config: llm.LLMConfig
 
 
@@ -98,7 +98,7 @@ def _styles_for_page(job: _PageJob) -> _PageResult:
     aborts.
     """
     try:
-        styles = _request_styles(job.config, job.store.get_blob(job.image_key), job.snippets)
+        styles = _request_styles(job.config, job.blobs.get_blob(job.image_key), job.snippets)
     except Exception as exc:
         return _PageResult(None, exc, llm.is_model_reachability_error(exc))
     return _PageResult(styles, None, False)
@@ -127,7 +127,7 @@ def annotate_style_from_image(
     page's failure ever affects another: :func:`_styles_for_page` returns its
     error rather than raising, so nothing is ever cancelled and every page runs.
     The thread split is strict — workers see only a ``str`` image key, the
-    ``StorageService`` to read it from, and an ``LLMConfig``, and return plain
+    ``BlobStore`` to read it from, and an ``LLMConfig``, and return plain
     data; **every read of and write to the XML tree happens on this thread**, in
     ``by_page`` order, so output is byte-identical whatever the worker count and
     whatever order the calls complete in. Page images are read inside the workers
@@ -162,7 +162,7 @@ def annotate_style_from_image(
     jobs: list[_PageJob] = []
     for page, pairs in by_page.items():
         image_key = layout.file_page_image_key(file_id, page)
-        if not workspace.store.blob_exists(image_key):
+        if not workspace.blobs.blob_exists(image_key):
             continue
         capped = pairs[:_MAX_SNIPPETS_PER_PAGE]
         jobs.append(
@@ -171,7 +171,7 @@ def annotate_style_from_image(
                 elements=[el for el, _ in capped],
                 snippets=[text for _, text in capped],
                 image_key=image_key,
-                store=workspace.store,
+                blobs=workspace.blobs,
                 # One call per page → one usage row per page, via the recording
                 # context on this page's own config (gated on --debug in the
                 # call layer). The per-page copy also keeps that recording state

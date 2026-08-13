@@ -106,7 +106,7 @@ class FileStore:
         return sorted(
             (
                 FileRecord.from_json(data)
-                for data in self.ws.store.find_docs(layout.Collection.FILES, {})
+                for data in self.ws.docs.find_docs(layout.Collection.FILES, {})
             ),
             key=lambda record: record.id,
         )
@@ -114,7 +114,7 @@ class FileStore:
     def get(self, file_id: str) -> FileRecord:
         if not file_id.strip():
             raise InvalidArgument("file id must not be empty")
-        data = self.ws.store.get_doc(layout.Collection.FILES, file_id)
+        data = self.ws.docs.get_doc(layout.Collection.FILES, file_id)
         if data is None:
             raise FileNotFound(f"file '{file_id}' not found")
         return FileRecord.from_json(data)
@@ -276,7 +276,7 @@ class FileStore:
         # `<stem>.pdf` by _ensure_pdf) to drive page rendering / count / text
         # extraction; generation later reuses that same persisted PDF.
         source_key = layout.file_source_key(file_id, source_path.name)
-        self.ws.store.upload_blob(source_key, source_path)
+        self.ws.blobs.upload_blob(source_key, source_path)
 
         pdf_key, conversion_error, pdf_converter = self._ensure_pdf(source_key, file_id)
         if pdf_key is None:
@@ -290,7 +290,7 @@ class FileStore:
                 text_mode=text_mode.value,
                 pdf_converter=pdf_converter,
             )
-            self.ws.store.put_doc(layout.Collection.FILES, file_id, record.to_json())
+            self.ws.docs.put_doc(layout.Collection.FILES, file_id, record.to_json())
             return AddFileResult(
                 record=record,
                 created=True,
@@ -301,7 +301,7 @@ class FileStore:
         # Page count, render, and text extraction all need a real PDF path; one
         # materialize yields it (zero-copy on LocalStore, a temp download on a
         # remote store) and all three share it.
-        with self.ws.store.materialize(pdf_key) as pdf_path:
+        with self.ws.blobs.materialize(pdf_key) as pdf_path:
             page_count, page_count_error = self._safe_page_count(pdf_path, file_id)
             page_render_error = self._render_pages(pdf_path, file_id, expected=page_count, dpi=dpi)
             text_extraction_error, text_summary = self._extract_text(
@@ -326,7 +326,7 @@ class FileStore:
             page_image_renderer=RENDERER_NAME,
             pdf_converter=pdf_converter,
         )
-        self.ws.store.put_doc(layout.Collection.FILES, file_id, record.to_json())
+        self.ws.docs.put_doc(layout.Collection.FILES, file_id, record.to_json())
         return AddFileResult(
             record=record,
             created=True,
@@ -365,7 +365,7 @@ class FileStore:
             return source_key, None, None
 
         converters = load_conversion_config(self.ws)
-        with self.ws.store.materialize(source_key) as src:
+        with self.ws.blobs.materialize(source_key) as src:
             converter_name = converter_name_for_path(src, converters)
             try:
                 pdf_bytes = convert_to_pdf_bytes(src, converters)
@@ -384,7 +384,7 @@ class FileStore:
                 return None, message, converter_name
 
         pdf_key = Path(source_key).with_suffix(".pdf").as_posix()
-        self.ws.store.put_blob(pdf_key, pdf_bytes)
+        self.ws.blobs.put_blob(pdf_key, pdf_bytes)
         return pdf_key, None, converter_name
 
     def _safe_page_count(self, pdf_path: Path, file_id: str) -> tuple[int | None, str | None]:
@@ -413,7 +413,7 @@ class FileStore:
         message on failure or partial success, or ``None`` on full success."""
         try:
             pages_prefix = layout.file_pages_prefix(file_id)
-            with self.ws.store.staged_write(pages_prefix) as pages_dir:
+            with self.ws.blobs.staged_write(pages_prefix) as pages_dir:
                 rendered = render_pages(pdf_path, pages_dir, dpi=dpi)
         except PageRenderFailed as exc:
             append_recorded_error(
@@ -486,7 +486,7 @@ class FileStore:
     ) -> tuple[str | None, dict[str, Any] | None]:
         text_prefix = layout.file_text_prefix(file_id)
         try:
-            with self.ws.store.staged_write(text_prefix) as text_dir:
+            with self.ws.blobs.staged_write(text_prefix) as text_dir:
                 result = extract_text_digital(pdf_path, text_dir, file_id=file_id, dpi=dpi)
         except TextExtractionFailed as exc:
             return self._record_text_failure(file_id, str(exc), permanent=True), None
@@ -510,8 +510,8 @@ class FileStore:
         pages_prefix = layout.file_pages_prefix(file_id)
         try:
             with (
-                self.ws.store.materialize_dir(pages_prefix) as pages_dir,
-                self.ws.store.staged_write(text_prefix) as text_dir,
+                self.ws.blobs.materialize_dir(pages_prefix) as pages_dir,
+                self.ws.blobs.staged_write(text_prefix) as text_dir,
             ):
                 result = extract_text_ocr(
                     pdf_path,
@@ -548,8 +548,8 @@ class FileStore:
         pages_prefix = layout.file_pages_prefix(file_id)
         try:
             with (
-                self.ws.store.materialize_dir(pages_prefix) as pages_dir,
-                self.ws.store.staged_write(text_prefix) as text_dir,
+                self.ws.blobs.materialize_dir(pages_prefix) as pages_dir,
+                self.ws.blobs.staged_write(text_prefix) as text_dir,
             ):
                 result = extract_text_hybrid(
                     pdf_path,

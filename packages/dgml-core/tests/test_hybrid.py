@@ -606,7 +606,7 @@ def test_file_add_hybrid_records_hybrid_mode_and_summary(
 
     texts = [
         k
-        for k in workspace.store.list_blobs(layout.file_text_prefix(result.record.id))
+        for k in workspace.blobs.list_blobs(layout.file_text_prefix(result.record.id))
         if k.endswith(".json")
     ]
     assert len(texts) == 2

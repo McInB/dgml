@@ -68,12 +68,12 @@ def _seed_file(workspace: Workspace, file_id: str) -> None:
         page_count=1,
         text_mode="digital",
     )
-    workspace.store.put_doc("files", file_id, record.to_json())
+    workspace.docs.put_doc("files", file_id, record.to_json())
 
 
 def _seed_page_image(workspace: Workspace, file_id: str) -> None:
     """Write a valid single-page PNG so ``gather_file_pages`` finds one page."""
-    workspace.store.put_blob(layout.file_page_image_key(file_id, 1), make_fake_png(8, 8))
+    workspace.blobs.put_blob(layout.file_page_image_key(file_id, 1), make_fake_png(8, 8))
 
 
 def _seed(workspace: Workspace, file_id: str, *, with_page: bool = True) -> None:

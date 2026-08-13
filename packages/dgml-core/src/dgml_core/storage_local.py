@@ -10,9 +10,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The bundled local-disk :class:`StorageService`.
+"""The bundled local-disk store — a :class:`BlobStore` **and** a :class:`DocStore`.
 
-Maps both APIs onto the **existing** workspace directory layout (see
+Implements both interfaces over one directory, so the zero-config default keeps
+blobs and documents on local disk. Maps both APIs onto the **existing** workspace
+directory layout (see
 ``docs/storage-layout.md``), so a local workspace on disk is byte-for-byte what
 it is today — no migration, and everything that reads the tree directly
 (``dgml check``, attestation, DGMLX bundles, external tooling) keeps working.
@@ -62,7 +64,7 @@ from .layout import (
     is_blob_key,
 )
 from .storage import read_json
-from .storage_service import StorageConfig, StorageService
+from .storage_service import BlobStore, DocStore, StorageConfig
 
 # The layout — collections, key shapes, document placement and blob
 # classification — lives in ``layout.py``, shared with ``Workspace`` and the
@@ -114,7 +116,7 @@ def _matches(doc: Mapping[str, Any], query: Mapping[str, Any]) -> bool:
     return all(doc.get(k) == v for k, v in query.items())
 
 
-class LocalStore(StorageService):
+class LocalStore(BlobStore, DocStore):
     """Local-disk store over today's workspace layout. Takes no options; its
     location is the workspace root."""
 

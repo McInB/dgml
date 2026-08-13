@@ -155,7 +155,10 @@ on Windows, else `~/.config/dgml/workspaces.json` — and is machine-managed **J
     "organization": "Acme",
     "root": "/Users/me/acme-ws",
     "storage_service": "default",
-    "storage": { "provider": "dgml_core.storage_local:LocalStore" },
+    "storage": {
+      "blobs": { "provider": "dgml_core.storage_local:LocalStore" },
+      "docs": { "provider": "dgml_core.storage_local:LocalStore" }
+    },
     "storage_fingerprint": "sha256:…",
     "created_at": "2026-08-05T12:00:00Z",
     "schema_version": 1
@@ -168,15 +171,17 @@ on Windows, else `~/.config/dgml/workspaces.json` — and is machine-managed **J
   one `workspace_id` but two registry entries, each with that machine's `root`.
 - `root` is the local store location (used for open-by-id and the reverse lookup).
   Only `LocalStore` ships today, so every entry has a `root`.
-- **The entry is self-describing about the workspace's store.** `storage_service`
+- **The entry is self-describing about the workspace's stores.** `storage_service`
   names the [`config.toml` storage template](#storage-services-storage) the
   workspace was created from (where its secrets live, and the target of a re-seal).
-  `storage` is a **non-secret snapshot** of that template (provider + non-secret
-  options — never credentials) and is *authoritative* for opening the workspace: it
-  opens from this snapshot even if the template is later edited or removed, so the
-  registry alone records where a workspace's data lives. Editing the `config.toml`
-  template does **not** change an existing workspace's store — `dgml workspace
-  register --storage <name>` is the explicit "adopt new config" (re-seal).
+  `storage` is a **non-secret snapshot pair** of that template — one snapshot each
+  for the `blobs` and `docs` roles (provider + non-secret options — never
+  credentials), since a workspace configures its blob store and document store
+  independently. It is *authoritative* for opening the workspace: it opens from this
+  snapshot even if the template is later edited or removed, so the registry alone
+  records where a workspace's data lives. Editing the `config.toml` template does
+  **not** change an existing workspace's stores — `dgml workspace register --storage
+  <name>` is the explicit "adopt new config" (re-seal).
 - `storage_fingerprint` is a credential-free hash of the snapshot. On open it is
   recomputed from the entry and compared: a mismatch means the machine-managed JSON
   was **hand-edited**, and the command hard-fails with `STORAGE_BACKEND_MISMATCH`
@@ -227,37 +232,48 @@ LLM call you didn't set up.
 
 ### Storage services (`[storage]`)
 
-Where a workspace's data physically lives. By default there is nothing to
-configure — a workspace runs on the bundled local-disk store rooted at its own
-directory. To put workspaces on a pluggable backend, define one or more **named
-storage services**; each is selected at `dgml workspace create --storage <name>`
-and snapshotted into that workspace's [registry entry](#per-machine-workspace-registry).
+Where a workspace's data physically lives. A workspace has **two independently
+configured backends** — a **blob** store (page images, PDFs, XML, schemas) and a
+**document** store (manifests, page text, assignments, the usage log) — so it can
+mix them (e.g. S3 blobs + Mongo docs, or S3 blobs + local docs). By default there
+is nothing to configure — both run on the bundled local-disk store. To use a
+pluggable backend, define one or more **named storage services**; each is selected
+at `dgml workspace create --storage <name>` and snapshotted into that workspace's
+[registry entry](#per-machine-workspace-registry).
 
 ```toml
-# A named service: [storage.<name>]. provider is a dotted "module:Class" path to
-# a StorageService implementation; the remaining keys are that provider's options.
-[storage.acme-s3]
-provider   = "my_pkg.s3:S3Store"
-bucket     = "acme-contracts"
-region     = "us-east-1"
-secret_key = "…"            # credential — stays here / env, never in the registry
+# A named service with a backend per role. Each provider is a dotted "module:Class"
+# path; the remaining keys are that provider's own options.
+[storage.acme.blobs]
+provider     = "dgml_storage_s3:S3BlobStore"
+bucket       = "acme-contracts"
+region       = "us-east-1"
+
+[storage.acme.docs]
+provider       = "dgml_storage_mongo:MongoDocStore"
+mongo_database = "dgml"
 ```
 
-- **Named form** — `[storage.<name>]` subtables. `--storage acme-s3` at create
-  selects one; the reserved name **`default`** is what a workspace uses when
-  `--storage` is omitted (falls back to the bundled local store if there is no
-  `[storage.default]`).
-- **Flat form (back-compat)** — a bare `[storage]` table with a top-level
-  `provider` string *is* the `default` service. `provider` is therefore reserved at
-  the top of `[storage]`; a named service is always a subtable.
-- **Secrets vs. identity.** A service's non-secret identity (provider + options like
-  `bucket`/`region`) is snapshotted into the registry entry and is authoritative for
-  opening the workspace. Secret-hinted options (keys containing `key`, `secret`,
+- **Per-role form** — `[storage.<name>.blobs]` / `[storage.<name>.docs]` subtables,
+  each with its own `provider` + options. A role you omit falls back to the bundled
+  local store, so `[storage.<name>.blobs]` alone puts blobs on the backend and keeps
+  documents on local disk.
+- **Flat form** — a `[storage.<name>]` with a single top-level `provider` (and no
+  `blobs`/`docs` subtables) uses that one class for **both** roles; it must implement
+  both `BlobStore` and `DocStore` (the bundled `LocalStore` does). A table may not
+  set both a top-level `provider` and role subtables.
+- **`default` and back-compat** — the reserved name **`default`** is what a workspace
+  uses when `--storage` is omitted; a bare `[storage]` (flat or with `blobs`/`docs`)
+  *is* the `default` service, and no `[storage]` at all is the zero-config local
+  store for both roles.
+- **Secrets vs. identity.** Each backend's non-secret identity (provider + options
+  like `bucket`/`region`) is snapshotted into the registry entry and is authoritative
+  for opening the workspace. Secret-hinted options (keys containing `key`, `secret`,
   `token`, `password`, `credential`) are **never** written to the registry; they are
   read from this template (or the provider SDK's own credential chain) at open and
   are excluded from the seal fingerprint, so rotating a credential never trips it.
 - **Pinned semantics.** Editing a `[storage.<name>]` template does not change an
-  existing workspace's store — the workspace stays on its recorded snapshot. Use
+  existing workspace's stores — the workspace stays on its recorded snapshot. Use
   `dgml workspace register --storage <name>` to re-seal it to the current template.
 
 ### The `[models]` tiers

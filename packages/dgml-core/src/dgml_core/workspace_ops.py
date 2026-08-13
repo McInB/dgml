@@ -50,18 +50,19 @@ from __future__ import annotations
 from . import layout
 from .errors import DocSetNotFound, FileNotFound, InvalidArgument
 from .storage import Workspace
-from .storage_service import StorageService
+from .storage_service import BlobStore, DocStore
 
 
 class WorkspaceOps:
     """Cascading deletes over a workspace, composed from native store calls.
 
-    Constructed per operation (or per command); holds one :class:`StorageService`
-    for the lifetime of the instance."""
+    Constructed per operation (or per command); holds the workspace's blob and
+    document stores for the lifetime of the instance."""
 
     def __init__(self, workspace: Workspace) -> None:
         self.ws = workspace
-        self.store: StorageService = workspace.store
+        self.blobs: BlobStore = workspace.blobs
+        self.docs: DocStore = workspace.docs
 
     # ---- assignments ----
 
@@ -73,9 +74,9 @@ class WorkspaceOps:
         describes, so an interrupted run leaves regenerable outputs with no
         assignment rather than an assignment whose outputs vanished."""
         pair = layout.pair_id(docset_id, file_id)
-        self.store.delete_doc(layout.Collection.ASSIGNMENTS, pair)
-        self.store.delete_doc(layout.Collection.EXTRACTION_STATS, pair)
-        self.store.delete_blobs(layout.docset_pair_prefix(docset_id, file_id))
+        self.docs.delete_doc(layout.Collection.ASSIGNMENTS, pair)
+        self.docs.delete_doc(layout.Collection.EXTRACTION_STATS, pair)
+        self.blobs.delete_blobs(layout.docset_pair_prefix(docset_id, file_id))
 
     # ---- entities ----
 
@@ -88,13 +89,13 @@ class WorkspaceOps:
         directory, not docsets pointing at a file that no longer exists."""
         if not file_id.strip():
             raise InvalidArgument("file id must not be empty")
-        if self.store.get_doc(layout.Collection.FILES, file_id) is None:
+        if self.docs.get_doc(layout.Collection.FILES, file_id) is None:
             raise FileNotFound(f"file '{file_id}' not found")
-        for assignment in self.store.find_docs(layout.Collection.ASSIGNMENTS, {"file_id": file_id}):
+        for assignment in self.docs.find_docs(layout.Collection.ASSIGNMENTS, {"file_id": file_id}):
             self.unassign(str(assignment["docset_id"]), file_id)
-        self.store.delete_doc(layout.Collection.FILES, file_id)
-        self.store.delete_doc(layout.Collection.ERRORS, file_id)
-        self.store.delete_blobs(layout.file_prefix(file_id))
+        self.docs.delete_doc(layout.Collection.FILES, file_id)
+        self.docs.delete_doc(layout.Collection.ERRORS, file_id)
+        self.blobs.delete_blobs(layout.file_prefix(file_id))
 
     def delete_docset(self, docset_id: str) -> None:
         """Delete a docset: every assignment to it (with each pair's outputs),
@@ -104,11 +105,11 @@ class WorkspaceOps:
         docset is a grouping, not an owner."""
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
-        if self.store.get_doc(layout.Collection.DOCSETS, docset_id) is None:
+        if self.docs.get_doc(layout.Collection.DOCSETS, docset_id) is None:
             raise DocSetNotFound(f"docset '{docset_id}' not found")
-        for assignment in self.store.find_docs(
+        for assignment in self.docs.find_docs(
             layout.Collection.ASSIGNMENTS, {"docset_id": docset_id}
         ):
             self.unassign(docset_id, str(assignment["file_id"]))
-        self.store.delete_doc(layout.Collection.DOCSETS, docset_id)
-        self.store.delete_blobs(layout.docset_prefix(docset_id))
+        self.docs.delete_doc(layout.Collection.DOCSETS, docset_id)
+        self.blobs.delete_blobs(layout.docset_prefix(docset_id))

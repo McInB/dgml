@@ -307,14 +307,14 @@ def write_docset_rnc(ws: Workspace, docset_id: str) -> str | None:
     DGMLX bundles ship and attest (superseding schema.json there).
     """
     schema_key = layout.docset_generation_schema_key(docset_id)
-    if not ws.store.blob_exists(schema_key):
+    if not ws.blobs.blob_exists(schema_key):
         return None
-    schema_data = json.loads(ws.store.get_blob(schema_key))
-    docset_data = ws.store.get_doc(layout.Collection.DOCSETS, docset_id)
+    schema_data = json.loads(ws.blobs.get_blob(schema_key))
+    docset_data = ws.docs.get_doc(layout.Collection.DOCSETS, docset_id)
     label = str(docset_data.get("name", docset_id)) if docset_data else docset_id
-    with ws.store.materialize_dir(layout.docset_files_prefix(docset_id)) as files_dir:
+    with ws.blobs.materialize_dir(layout.docset_files_prefix(docset_id)) as files_dir:
         xml_paths = sorted(files_dir.glob("*/*.dgml.xml"))
         rendered = build_rnc(schema_data, xml_paths, label=label)
     full_key = layout.docset_full_schema_key(docset_id)
-    ws.store.put_blob(full_key, rendered.encode("utf-8"))
+    ws.blobs.put_blob(full_key, rendered.encode("utf-8"))
     return full_key

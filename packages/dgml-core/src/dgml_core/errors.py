@@ -327,7 +327,7 @@ def short_error_message(exc: BaseException, *, limit: int = 300) -> str:
 
 def load_recorded_errors(workspace: Workspace, file_id: str) -> list[RecordedError]:
     try:
-        doc = workspace.store.get_doc(layout.Collection.ERRORS, file_id)
+        doc = workspace.docs.get_doc(layout.Collection.ERRORS, file_id)
     except CorruptMetadata:
         # Graceful: a corrupt errors.json should not block the consistency
         # check that reads it. Treat as "no errors recorded" — the caller
@@ -341,7 +341,7 @@ def load_recorded_errors(workspace: Workspace, file_id: str) -> list[RecordedErr
 def append_recorded_error(workspace: Workspace, file_id: str, err: RecordedError) -> None:
     existing = load_recorded_errors(workspace, file_id)
     existing.append(err)
-    workspace.store.put_doc(
+    workspace.docs.put_doc(
         layout.Collection.ERRORS, file_id, {"errors": [e.to_json() for e in existing]}
     )
 
@@ -355,14 +355,14 @@ def clear_recorded_errors(
     if not existing:
         return 0
     if operations is None:
-        workspace.store.delete_doc(layout.Collection.ERRORS, file_id)
+        workspace.docs.delete_doc(layout.Collection.ERRORS, file_id)
         return len(existing)
     ops = set(operations)
     keep = [e for e in existing if e.operation not in ops]
     if not keep:
-        workspace.store.delete_doc(layout.Collection.ERRORS, file_id)
+        workspace.docs.delete_doc(layout.Collection.ERRORS, file_id)
     else:
-        workspace.store.put_doc(
+        workspace.docs.put_doc(
             layout.Collection.ERRORS, file_id, {"errors": [e.to_json() for e in keep]}
         )
     return len(existing) - len(keep)

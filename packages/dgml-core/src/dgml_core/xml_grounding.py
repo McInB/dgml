@@ -291,7 +291,7 @@ def _list_pages(workspace: Workspace, file_id: str) -> list[int]:
     prefix = layout.file_text_prefix(file_id)
     pages = sorted(
         int(m.group(1))
-        for key in workspace.store.list_blobs(prefix)
+        for key in workspace.blobs.list_blobs(prefix)
         if (m := re.fullmatch(r"page_(\d+)", Path(key).stem)) is not None
     )
     if not pages:

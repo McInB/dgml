@@ -64,11 +64,11 @@ def _seed_file(workspace: Workspace, file_id: str, *, filename: str = "doc.pdf")
         page_count=1,
         text_mode="digital",
     )
-    workspace.store.put_doc("files", file_id, record.to_json())
+    workspace.docs.put_doc("files", file_id, record.to_json())
 
 
 def _seed_page_image(workspace: Workspace, file_id: str, page: int, content: bytes) -> None:
-    workspace.store.put_blob(layout.file_page_image_key(file_id, page), content)
+    workspace.blobs.put_blob(layout.file_page_image_key(file_id, page), content)
 
 
 def _tool_call_response(name: str, arguments: dict[str, Any]) -> SimpleNamespace:

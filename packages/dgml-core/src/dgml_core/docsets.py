@@ -41,7 +41,7 @@ class DocSetStore:
         Existence is defined by the ``docset.json`` document, not a directory —
         so the check works on any store (a remote backend has no ``docsets/<id>/``
         directory to stat)."""
-        if self.ws.store.get_doc(layout.Collection.DOCSETS, docset_id) is None:
+        if self.ws.docs.get_doc(layout.Collection.DOCSETS, docset_id) is None:
             raise DocSetNotFound(f"docset '{docset_id}' not found")
 
     def list_all(self) -> list[DocSet]:
@@ -52,7 +52,7 @@ class DocSetStore:
         return sorted(
             (
                 DocSet.from_json(data)
-                for data in self.ws.store.find_docs(layout.Collection.DOCSETS, {})
+                for data in self.ws.docs.find_docs(layout.Collection.DOCSETS, {})
             ),
             key=lambda ds: ds.id,
         )
@@ -60,7 +60,7 @@ class DocSetStore:
     def get(self, docset_id: str) -> DocSet:
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
-        data = self.ws.store.get_doc(layout.Collection.DOCSETS, docset_id)
+        data = self.ws.docs.get_doc(layout.Collection.DOCSETS, docset_id)
         if data is None:
             raise DocSetNotFound(f"docset '{docset_id}' not found")
         return DocSet.from_json(data)
@@ -83,7 +83,7 @@ class DocSetStore:
         )
         # No directory is created up front — the store owns container creation
         # (put_doc writes the manifest). A fresh new_id never collides.
-        self.ws.store.put_doc(layout.Collection.DOCSETS, docset_id, ds.to_json())
+        self.ws.docs.put_doc(layout.Collection.DOCSETS, docset_id, ds.to_json())
         return ds
 
     def update(
@@ -103,7 +103,7 @@ class DocSetStore:
             ds.description = description
         if key_questions is not None:
             ds.key_questions = list(key_questions)
-        self.ws.store.put_doc(layout.Collection.DOCSETS, docset_id, ds.to_json())
+        self.ws.docs.put_doc(layout.Collection.DOCSETS, docset_id, ds.to_json())
         return ds
 
     def delete(self, docset_id: str) -> None:
@@ -115,7 +115,7 @@ class DocSetStore:
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
         self._require_docset(docset_id)
-        assignments = self.ws.store.find_docs(
+        assignments = self.ws.docs.find_docs(
             layout.Collection.ASSIGNMENTS, {"docset_id": docset_id}
         )
         return sorted(str(a["file_id"]) for a in assignments)
@@ -126,11 +126,11 @@ class DocSetStore:
         if not file_id.strip():
             raise InvalidArgument("file id must not be empty")
         self._require_docset(docset_id)
-        if self.ws.store.get_doc(layout.Collection.FILES, file_id) is None:
+        if self.ws.docs.get_doc(layout.Collection.FILES, file_id) is None:
             raise FileNotFound(f"file '{file_id}' not found")
         # An assignment is a document keyed by the (docset, file) pair. Re-adding
         # is idempotent — it replaces the same document, refreshing assigned_at.
-        self.ws.store.put_doc(
+        self.ws.docs.put_doc(
             layout.Collection.ASSIGNMENTS,
             layout.pair_id(docset_id, file_id),
             {"docset_id": docset_id, "file_id": file_id, "assigned_at": now_iso()},
@@ -143,7 +143,7 @@ class DocSetStore:
             raise InvalidArgument("file id must not be empty")
         self._require_docset(docset_id)
         if (
-            self.ws.store.get_doc(layout.Collection.ASSIGNMENTS, layout.pair_id(docset_id, file_id))
+            self.ws.docs.get_doc(layout.Collection.ASSIGNMENTS, layout.pair_id(docset_id, file_id))
             is None
         ):
             raise FileNotFound(f"file '{file_id}' is not assigned to docset '{docset_id}'")
@@ -163,14 +163,14 @@ class DocSetStore:
         self._require_docset(docset_id)
         key = layout.docset_extraction_schema_key(docset_id)
         try:
-            return self.ws.store.get_blob(key).decode("utf-8")
+            return self.ws.blobs.get_blob(key).decode("utf-8")
         except FileNotFoundError:
             raise SchemaNotFound(f"docset '{docset_id}' has no schema") from None
 
     def has_schema(self, docset_id: str) -> bool:
         if not docset_id.strip():
             raise InvalidArgument("docset id must not be empty")
-        return self.ws.store.blob_exists(layout.docset_extraction_schema_key(docset_id))
+        return self.ws.blobs.blob_exists(layout.docset_extraction_schema_key(docset_id))
 
     def set_schema(self, docset_id: str, schema: str) -> str:
         """Write (replace) the docset's extraction schema from RNC text.
@@ -188,7 +188,7 @@ class DocSetStore:
         if not isinstance(schema, str):
             raise SchemaInvalid("schema must be RNC text")
         validate_rnc(schema)  # raises SchemaInvalid on anything outside the subset
-        self.ws.store.put_blob(
+        self.ws.blobs.put_blob(
             layout.docset_extraction_schema_key(docset_id),
             schema.encode("utf-8"),
         )
@@ -201,7 +201,7 @@ class DocSetStore:
             raise InvalidArgument("docset id must not be empty")
         self._require_docset(docset_id)
         key = layout.docset_extraction_schema_key(docset_id)
-        if not self.ws.store.blob_exists(key):
+        if not self.ws.blobs.blob_exists(key):
             return False
-        self.ws.store.delete_blob(key)
+        self.ws.blobs.delete_blob(key)
         return True

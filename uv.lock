@@ -12,6 +12,7 @@ members = [
     "dgml-chain",
     "dgml-clustering",
     "dgml-core",
+    "dgml-storage-mongo",
     "dgml-storage-s3",
     "translators-pdf",
 ]
@@ -1152,20 +1153,33 @@ requires-dist = [
 provides-extras = ["aws", "azure", "macos", "clustering", "chain"]
 
 [[package]]
-name = "dgml-storage-s3"
+name = "dgml-storage-mongo"
 version = "0.1.0"
-source = { editable = "packages/dgml-storage-s3" }
+source = { editable = "packages/dgml-storage-mongo" }
 dependencies = [
-    { name = "boto3" },
     { name = "dgml-core" },
     { name = "pymongo" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", specifier = ">=1.34" },
     { name = "dgml-core", editable = "packages/dgml-core" },
     { name = "pymongo", specifier = ">=4.6" },
+]
+
+[[package]]
+name = "dgml-storage-s3"
+version = "0.1.0"
+source = { editable = "packages/dgml-storage-s3" }
+dependencies = [
+    { name = "boto3" },
+    { name = "dgml-core" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "boto3", specifier = ">=1.34" },
+    { name = "dgml-core", editable = "packages/dgml-core" },
 ]
 
 [[package]]

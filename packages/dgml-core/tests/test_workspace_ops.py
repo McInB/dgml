@@ -25,11 +25,11 @@ from dgml_core.workspace_ops import WorkspaceOps
 def _pair(ws: Workspace, docset_id: str, file_id: str) -> None:
     """An assigned (docset, file) pair with both a generated blob and a
     dependent document, so a cascade has all three kinds of key to remove."""
-    ws.store.put_doc(layout.Collection.FILES, file_id, {"id": file_id})
-    ws.store.put_doc(layout.Collection.DOCSETS, docset_id, {"id": docset_id, "name": "X"})
+    ws.docs.put_doc(layout.Collection.FILES, file_id, {"id": file_id})
+    ws.docs.put_doc(layout.Collection.DOCSETS, docset_id, {"id": docset_id, "name": "X"})
     DocSetStore(ws).add_file(docset_id, file_id)
-    ws.store.put_blob(layout.dgml_xml_key(docset_id, file_id, "report"), b"<x/>")
-    ws.store.put_doc(
+    ws.blobs.put_blob(layout.dgml_xml_key(docset_id, file_id, "report"), b"<x/>")
+    ws.docs.put_doc(
         layout.Collection.EXTRACTION_STATS, layout.pair_id(docset_id, file_id), {"matched": 3}
     )
 
@@ -51,41 +51,41 @@ def test_unassign_removes_record_dependents_and_blobs(workspace: Workspace) -> N
 
     WorkspaceOps(workspace).unassign("d1", "f1")
 
-    assert workspace.store.get_doc(layout.Collection.ASSIGNMENTS, pair) is None
-    assert workspace.store.get_doc(layout.Collection.EXTRACTION_STATS, pair) is None
-    assert not workspace.store.blob_exists(xml_key)
+    assert workspace.docs.get_doc(layout.Collection.ASSIGNMENTS, pair) is None
+    assert workspace.docs.get_doc(layout.Collection.EXTRACTION_STATS, pair) is None
+    assert not workspace.blobs.blob_exists(xml_key)
     # the file itself is untouched — a docset is a grouping, not an owner
-    assert workspace.store.get_doc(layout.Collection.FILES, "f1") is not None
+    assert workspace.docs.get_doc(layout.Collection.FILES, "f1") is not None
 
 
 def test_delete_file_unassigns_from_every_docset(workspace: Workspace) -> None:
     _pair(workspace, "d1", "f1")
     _pair(workspace, "d2", "f1")
-    workspace.store.put_blob(layout.file_source_key("f1", "r.pdf"), b"%PDF-1.4\n")
+    workspace.blobs.put_blob(layout.file_source_key("f1", "r.pdf"), b"%PDF-1.4\n")
 
     WorkspaceOps(workspace).delete_file("f1")
 
-    assert workspace.store.get_doc(layout.Collection.FILES, "f1") is None
-    assert workspace.store.find_docs(layout.Collection.ASSIGNMENTS, {"file_id": "f1"}) == []
-    assert workspace.store.list_blobs(layout.file_prefix("f1")) == []
+    assert workspace.docs.get_doc(layout.Collection.FILES, "f1") is None
+    assert workspace.docs.find_docs(layout.Collection.ASSIGNMENTS, {"file_id": "f1"}) == []
+    assert workspace.blobs.list_blobs(layout.file_prefix("f1")) == []
     for did in ("d1", "d2"):
-        assert workspace.store.list_blobs(layout.docset_pair_prefix(did, "f1")) == []
+        assert workspace.blobs.list_blobs(layout.docset_pair_prefix(did, "f1")) == []
         # the docsets themselves survive
-        assert workspace.store.get_doc(layout.Collection.DOCSETS, did) is not None
+        assert workspace.docs.get_doc(layout.Collection.DOCSETS, did) is not None
 
 
 def test_delete_docset_leaves_the_files_alone(workspace: Workspace) -> None:
     _pair(workspace, "d1", "f1")
     _pair(workspace, "d1", "f2")
-    workspace.store.put_blob(layout.file_source_key("f1", "r.pdf"), b"%PDF-1.4\n")
+    workspace.blobs.put_blob(layout.file_source_key("f1", "r.pdf"), b"%PDF-1.4\n")
 
     WorkspaceOps(workspace).delete_docset("d1")
 
-    assert workspace.store.get_doc(layout.Collection.DOCSETS, "d1") is None
-    assert workspace.store.find_docs(layout.Collection.ASSIGNMENTS, {"docset_id": "d1"}) == []
-    assert workspace.store.list_blobs(layout.docset_prefix("d1")) == []
-    assert workspace.store.get_doc(layout.Collection.FILES, "f1") is not None
-    assert workspace.store.blob_exists(layout.file_source_key("f1", "r.pdf"))
+    assert workspace.docs.get_doc(layout.Collection.DOCSETS, "d1") is None
+    assert workspace.docs.find_docs(layout.Collection.ASSIGNMENTS, {"docset_id": "d1"}) == []
+    assert workspace.blobs.list_blobs(layout.docset_prefix("d1")) == []
+    assert workspace.docs.get_doc(layout.Collection.FILES, "f1") is not None
+    assert workspace.blobs.blob_exists(layout.file_source_key("f1", "r.pdf"))
 
 
 # ------------------------------------------------------------------ ordering
@@ -109,13 +109,13 @@ def test_interrupted_cascade_leaves_orphaned_bytes_not_a_dangling_record(
     def boom(prefix: str) -> None:
         raise OSError("interrupted before the blobs were removed")
 
-    monkeypatch.setattr(ops.store, "delete_blobs", boom)
+    monkeypatch.setattr(ops.blobs, "delete_blobs", boom)
     with pytest.raises(OSError):
         ops.unassign("d1", "f1")
 
-    assert workspace.store.get_doc(layout.Collection.ASSIGNMENTS, pair) is None
-    assert workspace.store.get_doc(layout.Collection.EXTRACTION_STATS, pair) is None
-    assert workspace.store.blob_exists(xml_key)  # orphaned, and recoverable
+    assert workspace.docs.get_doc(layout.Collection.ASSIGNMENTS, pair) is None
+    assert workspace.docs.get_doc(layout.Collection.EXTRACTION_STATS, pair) is None
+    assert workspace.blobs.blob_exists(xml_key)  # orphaned, and recoverable
 
 
 def test_interrupted_cascade_is_resumable(
@@ -127,15 +127,15 @@ def test_interrupted_cascade_is_resumable(
     _, xml_key, prefix = _pair_keys("d1", "f1")
     ops = WorkspaceOps(workspace)
 
-    real = ops.store.delete_blobs
-    monkeypatch.setattr(ops.store, "delete_blobs", lambda p: (_ for _ in ()).throw(OSError("boom")))
+    real = ops.blobs.delete_blobs
+    monkeypatch.setattr(ops.blobs, "delete_blobs", lambda p: (_ for _ in ()).throw(OSError("boom")))
     with pytest.raises(OSError):
         ops.unassign("d1", "f1")
 
-    monkeypatch.setattr(ops.store, "delete_blobs", real)
+    monkeypatch.setattr(ops.blobs, "delete_blobs", real)
     ops.unassign("d1", "f1")  # replay
-    assert not workspace.store.blob_exists(xml_key)
-    assert workspace.store.list_blobs(prefix) == []
+    assert not workspace.blobs.blob_exists(xml_key)
+    assert workspace.blobs.list_blobs(prefix) == []
 
 
 def test_cascades_are_idempotent(workspace: Workspace) -> None:
@@ -182,22 +182,27 @@ def test_a_cascade_resolves_the_backend_once(
     once, not per call.
 
     Counted from a *cold* workspace so the assertion holds on its own terms
-    rather than riding on ``Workspace.store``'s cache."""
+    rather than riding on the ``Workspace.blobs`` / ``.docs`` caches."""
     for fid in ("f1", "f2", "f3"):
         _pair(workspace, "d1", fid)
 
     import dgml_core.storage_resolve as storage_resolve
 
-    built = 0
-    real_make = storage_resolve.make_store
+    built = {"blobs": 0, "docs": 0}
+    real_blob = storage_resolve.make_blob_store
+    real_doc = storage_resolve.make_doc_store
 
-    def counting_make(config: object) -> object:
-        nonlocal built
-        built += 1
-        return real_make(config)  # type: ignore[arg-type]
+    def counting_blob(config: object) -> object:
+        built["blobs"] += 1
+        return real_blob(config)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(storage_resolve, "make_store", counting_make)
+    def counting_doc(config: object) -> object:
+        built["docs"] += 1
+        return real_doc(config)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(storage_resolve, "make_blob_store", counting_blob)
+    monkeypatch.setattr(storage_resolve, "make_doc_store", counting_doc)
 
     cold = Workspace(root=workspace.root)  # nothing cached yet
     WorkspaceOps(cold).delete_docset("d1")
-    assert built == 1
+    assert built == {"blobs": 1, "docs": 1}  # each store resolved once, not per call

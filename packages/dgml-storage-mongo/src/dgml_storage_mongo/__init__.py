@@ -10,9 +10,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Sample DGML blob storage backend: blobs in S3-compatible object storage.
-See :mod:`dgml_storage_s3.store`."""
+"""Sample DGML document storage backend: documents in MongoDB.
+See :mod:`dgml_storage_mongo.store`."""
 
-from .store import S3BlobStore
+from .store import MONGO_URI_ENV, MongoDocStore
 
-__all__ = ["S3BlobStore"]
+__all__ = ["MONGO_URI_ENV", "MongoDocStore"]
