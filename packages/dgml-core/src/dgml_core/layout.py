@@ -78,6 +78,7 @@ USAGE_FILE = "usage.jsonl"
 # re-serializing it through the document API would drift.
 GENERATION_SCHEMA_FILE = "schema.json"
 EXTRACTION_SCHEMA_FILE = "extraction-schema.rnc"
+EXTRACTION_GUIDANCE_FILE = "extraction-guidance.md"
 FULL_SCHEMA_FILE = "full-schema.rnc"
 # The optional word-coverage report, written directly under the docset dir only
 # under ``dgml --debug docset generate``.
@@ -170,6 +171,12 @@ def docset_pair_prefix(docset_id: str, file_id: str) -> str:
 def docset_extraction_schema_key(docset_id: str) -> str:
     """The grounded *extraction* schema (RELAX NG Compact)."""
     return f"{docset_prefix(docset_id)}{EXTRACTION_SCHEMA_FILE}"
+
+
+def docset_guidance_key(docset_id: str) -> str:
+    """The docset-level extraction guidance (free-form markdown), injected into
+    the phase-1 extraction prompt for every file in the docset."""
+    return f"{docset_prefix(docset_id)}{EXTRACTION_GUIDANCE_FILE}"
 
 
 def docset_full_schema_key(docset_id: str) -> str:
@@ -273,7 +280,8 @@ _BLOB_RULES: tuple[re.Pattern[str], ...] = (
     re.compile(rf"^{FILES_DIR}/{_SEG}/{PAGE_TEXT_DIR}/{_SEG}$"),
     re.compile(
         rf"^{DOCSETS_DIR}/{_SEG}/"
-        rf"(?:{EXTRACTION_SCHEMA_FILE}|{FULL_SCHEMA_FILE}|{GENERATION_SCHEMA_FILE})$"
+        rf"(?:{EXTRACTION_SCHEMA_FILE}|{EXTRACTION_GUIDANCE_FILE}"
+        rf"|{FULL_SCHEMA_FILE}|{GENERATION_SCHEMA_FILE})$"
     ),
     # The optional --debug word-coverage report, directly under the docset dir.
     re.compile(rf"^{DOCSETS_DIR}/{_SEG}/{re.escape(COVERAGE_REPORT_FILE)}$"),

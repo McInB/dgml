@@ -393,3 +393,52 @@ def test_reassign_is_idempotent(workspace: Workspace) -> None:
     assert len(workspace.docs.find_docs("assignments", {"docset_id": did})) == 1
     # and it must not disturb the pair's generated artifacts
     assert workspace.blobs.blob_exists(f"docsets/{did}/files/{fid}/report.dgml.xml")
+
+
+# ---- extraction guidance ---------------------------------------------------
+
+
+def test_guidance_get_missing(workspace: Workspace) -> None:
+    from dgml_core.errors import GuidanceNotFound
+
+    store = DocSetStore(workspace)
+    ds = store.create(name="Bills")
+    assert store.has_guidance(ds.id) is False
+    with pytest.raises(GuidanceNotFound):
+        store.get_guidance(ds.id)
+
+
+def test_guidance_set_and_roundtrip(workspace: Workspace) -> None:
+    store = DocSetStore(workspace)
+    ds = store.create(name="Bills")
+    text = "# Charge classification\nClassify by behavior, not name.\n"
+    store.set_guidance(ds.id, text)
+    assert store.has_guidance(ds.id) is True
+    assert store.get_guidance(ds.id) == text
+    key = f"docsets/{ds.id}/extraction-guidance.md"
+    assert workspace.blobs.blob_exists(key)
+    assert workspace.blobs.get_blob(key).decode("utf-8") == text
+
+
+def test_guidance_set_replaces_and_clear(workspace: Workspace) -> None:
+    store = DocSetStore(workspace)
+    ds = store.create(name="Bills")
+    store.set_guidance(ds.id, "v1")
+    store.set_guidance(ds.id, "v2")
+    assert store.get_guidance(ds.id) == "v2"
+    assert store.clear_guidance(ds.id) is True
+    assert store.has_guidance(ds.id) is False
+    assert store.clear_guidance(ds.id) is False
+
+
+def test_guidance_rejects_empty_text_and_missing_docset(workspace: Workspace) -> None:
+    from dgml_core.errors import DocSetNotFound, InvalidArgument
+
+    store = DocSetStore(workspace)
+    ds = store.create(name="Bills")
+    with pytest.raises(InvalidArgument):
+        store.set_guidance(ds.id, "   ")
+    with pytest.raises(DocSetNotFound):
+        store.set_guidance("nope00000000", "text")
+    with pytest.raises(DocSetNotFound):
+        store.get_guidance("nope00000000")
