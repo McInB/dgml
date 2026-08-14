@@ -35,7 +35,8 @@ the Apache-2.0 license clean).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .errors import SchemaInvalid
@@ -199,6 +200,135 @@ class Vocabulary:
 
     namespace_uri: str
     roots: list[Tag]
+
+
+# ── Tag-name disambiguation ──────────────────────────────────────────────────
+#
+# RNC has a flat pattern namespace: one ``Name = element docset:Name { … }`` def
+# per tag name, with no scoping by parent. A vocabulary built from an untrusted
+# source — an LLM-submitted field tree, an imported JSON Schema — routinely uses
+# one name for two different things (a document-level ``AmountDue`` and a
+# per-line-item one), which has no representation in RNC at all and would reach
+# :func:`_emit_tag_defs` as a hard error, failing the whole schema over a naming
+# collision.
+#
+# The vocabulary builders below run the tree through :func:`_disambiguate_names`
+# instead: the first claimant keeps the plain name and every genuinely different
+# later occurrence gets a parent-qualified one (``LineItemAmountDue``) — the same
+# rename the error message asks a human to make. Occurrences whose entire
+# definition subtree is identical are real reuse and keep the shared name, so a
+# vocabulary that was already collision-free comes back untouched and the RNC
+# round-trip stays byte-for-byte. The check in :func:`_emit_tag_defs` remains as
+# the backstop that proves this ran.
+
+# Numbered fallback bound, for the pathological case where the name and every
+# ancestor-qualified form is already claimed by a different definition.
+_MAX_NAME_SUFFIX = 99
+
+
+def _identity_key(tag: Tag) -> tuple[Any, ...]:
+    """A hashable identity for *tag*'s whole definition subtree.
+
+    Two tags may share one RNC pattern name exactly when this matches: not just
+    their own def, but every def their content model transitively reaches, since
+    :func:`_emit_tag_defs` walks into the children of a reused name as well.
+    Annotations are part of it — they render into the ``##`` doc comments, so a
+    differing description alone is a differing definition.
+    """
+    return (
+        tag.name,
+        tag.kind,
+        tag.description,
+        tag.example,
+        tag.prompt,
+        tag.invariant,
+        tag.value_type,
+        tuple(tag.enum_values or ()),
+        tag.item_name,
+        _identity_key(tag.item) if tag.item is not None else None,
+        tuple(_identity_key(child) for child in tag.children),
+    )
+
+
+def _name_candidates(desired: str, ancestors: list[str]) -> Iterator[str]:
+    """Names to try for a tag, best first: its own, then qualified by each
+    ancestor (nearest first), then numbered."""
+    seen = {desired}
+    yield desired
+    for ancestor in reversed(ancestors):
+        candidate = f"{ancestor}{desired}"
+        if candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+    for suffix in range(2, _MAX_NAME_SUFFIX + 1):
+        candidate = f"{desired}{suffix}"
+        if candidate not in seen:
+            yield candidate
+
+
+def _claim_name(
+    desired: str,
+    key: tuple[Any, ...],
+    taken: dict[str, tuple[Any, ...]],
+    ancestors: list[str],
+) -> str:
+    for candidate in _name_candidates(desired, ancestors):
+        claimed = taken.get(candidate)
+        if claimed is None:
+            taken[candidate] = key
+            return candidate
+        if claimed == key:
+            return candidate  # the identical definition — intentional reuse
+    raise SchemaInvalid(
+        f"could not find a free tag name for '{desired}': it and every "
+        f"qualified or numbered variant is already bound to a different definition"
+    )
+
+
+def _rename_tag(
+    tag: Tag,
+    taken: dict[str, tuple[Any, ...]],
+    ancestors: list[str],
+    memo: dict[tuple[Any, ...], Tag],
+) -> Tag:
+    key = _identity_key(tag)
+    cached = memo.get(key)
+    if cached is not None:
+        # Same definition seen before, so it resolved to the same name and the
+        # same renamed subtree; reusing it also keeps deep reuse from blowing up.
+        return cached
+    name = _claim_name(tag.name, key, taken, ancestors)
+    inner = [*ancestors, name]
+
+    if tag.kind == "collection":
+        # The singular item gets a def of its own, so it competes for names like
+        # any other tag — including when it was only implied by the collection's
+        # name. Materializing it records that decision in the vocabulary.
+        if tag.item is None and not tag.item_name:
+            base_item = Tag(name=_singularize(name), kind="container", children=tag.children)
+        else:
+            base_item = _collection_item_tag(tag)
+        item = _rename_tag(base_item, taken, inner, memo)
+        # `children` mirrors the item's fields (empty for a collection of bare
+        # typed values, whose item is itself a leaf field).
+        renamed = replace(tag, name=name, item=item, item_name=item.name, children=item.children)
+    else:
+        children = [_rename_tag(child, taken, inner, memo) for child in tag.children]
+        renamed = replace(tag, name=name, children=children)
+
+    memo[key] = renamed
+    return renamed
+
+
+def _disambiguate_names(roots: list[Tag]) -> list[Tag]:
+    """Return *roots* rewritten so each tag name maps onto exactly one definition.
+
+    Walks in document order (roots first, then depth-first), so the outermost
+    occurrence of a contested name keeps it and nested ones are qualified.
+    """
+    taken: dict[str, tuple[Any, ...]] = {}
+    memo: dict[tuple[Any, ...], Tag] = {}
+    return [_rename_tag(root, taken, [], memo) for root in roots]
 
 
 # ── JSON Schema → Vocabulary ─────────────────────────────────────────────────
@@ -513,7 +643,7 @@ def json_schema_to_vocabulary(schema: dict[str, Any], *, namespace_uri: str) -> 
     roots = _properties_to_tags(resolved.get("properties"))
     if not roots:
         raise SchemaInvalid("schema has no 'properties' — nothing to extract")
-    return Vocabulary(namespace_uri=namespace_uri, roots=roots)
+    return Vocabulary(namespace_uri=namespace_uri, roots=_disambiguate_names(roots))
 
 
 # ── Typed field tree → Vocabulary ────────────────────────────────────────────
@@ -750,11 +880,16 @@ def field_tree_to_vocabulary(fields: Any, *, namespace_uri: str) -> Vocabulary:
 
     *fields* is the list of top-level nodes (see the module comment above).
     Raises :class:`SchemaInvalid` for a malformed tree.
+
+    A name the model reused for two different things across levels is repaired
+    by :func:`_disambiguate_names` rather than rejected — see its section
+    comment. Two *siblings* sharing a name stay a hard error: that is an
+    ambiguous model, not a naming-scope mismatch.
     """
     roots = _field_nodes_to_tags(fields, context="<root>")
     if not roots:
         raise SchemaInvalid("field tree is empty — nothing to extract")
-    return Vocabulary(namespace_uri=namespace_uri, roots=roots)
+    return Vocabulary(namespace_uri=namespace_uri, roots=_disambiguate_names(roots))
 
 
 # ── Vocabulary → JSON Schema ─────────────────────────────────────────────────
