@@ -231,6 +231,27 @@ def _pascal_case(raw: str) -> str:
     return pascal
 
 
+def _one_line(value: Any) -> Any:
+    """Fold a doc-comment annotation onto a single line.
+
+    ``example``, ``prompt``, and ``invariant`` each occupy exactly one ``##``
+    line, and :func:`_parse_doc_comments` reads each from one line — every other
+    ``##`` line becomes part of ``description``. A newline inside one of them
+    would emit raw, unprefixed text that no longer parses as RNC at all (an
+    LLM-proposed multi-line postal-address ``example`` is the case seen in
+    practice), and spreading it over several ``##`` lines is not an option
+    either: the continuation lines would come back appended to the description.
+
+    So newlines fold to spaces as the value enters the vocabulary. ``description``
+    is exempt — it is the one annotation :func:`_doc_comment` line-splits and the
+    parser rejoins, so it round-trips multi-line as-is. A value already on one
+    line is returned untouched, keeping the RNC round-trip byte-for-byte.
+    """
+    if not isinstance(value, str) or ("\n" not in value and "\r" not in value):
+        return value
+    return " ".join(value.split())
+
+
 def _node_to_tag(name: str, node: dict[str, Any]) -> Tag:
     # A `title` names the element directly (standard JSON Schema dialects put
     # the target DGML element name there); the property key is the fallback.
@@ -238,9 +259,9 @@ def _node_to_tag(name: str, node: dict[str, Any]) -> Tag:
     raw_name = title if isinstance(title, str) and title.strip() else name
     tag_name = _pascal_case(raw_name) or "Field"
     description = node.get("description")
-    example = node.get("example")
-    prompt = node.get("prompt")
-    raw_invariant = node.get("invariant")
+    example = _one_line(node.get("example"))
+    prompt = _one_line(node.get("prompt"))
+    raw_invariant = _one_line(node.get("invariant"))
     invariant = _validate_invariant(raw_invariant) if isinstance(raw_invariant, str) else None
 
     if _grounded_leaf(node):
@@ -644,8 +665,8 @@ def _field_node_to_tag(node: Any) -> Tag:
     kind = kind.strip().lower()
 
     description = node.get("description")
-    example = node.get("example")
-    prompt = node.get("prompt")
+    example = _one_line(node.get("example"))
+    prompt = _one_line(node.get("prompt"))
 
     if kind == "field":
         enum_values = _normalize_enum_values(node.get("enum"), tag_name=name)
@@ -659,7 +680,7 @@ def _field_node_to_tag(node: Any) -> Tag:
             example=example,
             prompt=prompt,
             invariant=(
-                _validate_invariant(node["invariant"])
+                _validate_invariant(_one_line(node["invariant"]))
                 if isinstance(node.get("invariant"), str)
                 else None
             ),
@@ -818,16 +839,23 @@ def vocabulary_to_json_schema(vocab: Vocabulary) -> dict[str, Any]:
 
 
 def _doc_comment(tag: Tag) -> str:
+    """The ``##`` doc-comment block for *tag*.
+
+    ``description`` spreads over as many ``##`` lines as it has; the other three
+    each get exactly one, so they are folded onto a single line here as well as
+    at Tag-construction time (see :func:`_one_line`) — a directly-constructed
+    :class:`Tag` must not be able to emit RNC that no longer parses.
+    """
     lines: list[str] = []
     if tag.description:
         for line in tag.description.splitlines():
             lines.append(f"## {line}".rstrip())
     if tag.example:
-        lines.append(f"## Example: {tag.example}")
+        lines.append(f"## Example: {_one_line(tag.example)}")
     if tag.prompt:
-        lines.append(f"## Prompt: {tag.prompt}")
+        lines.append(f"## Prompt: {_one_line(tag.prompt)}")
     if tag.invariant:
-        lines.append(f"## Invariant: {tag.invariant}")
+        lines.append(f"## Invariant: {_one_line(tag.invariant)}")
     return "".join(f"{line}\n" for line in lines)
 
 
