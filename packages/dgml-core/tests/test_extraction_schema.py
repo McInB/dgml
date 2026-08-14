@@ -199,6 +199,111 @@ def test_prompt_carried_into_json_schema() -> None:
     assert vendor["prompt"] == "Look for the company name at the top of the invoice"
 
 
+def test_multiline_example_stays_on_one_doc_comment_line() -> None:
+    """A newline in `example` used to emit raw, unprefixed lines that no longer
+    parsed as RNC — the model proposing a multi-line postal address broke schema
+    generation outright."""
+    tree = [
+        {
+            "name": "remittance_payer_address",
+            "kind": "field",
+            "datatype": "text",
+            "description": "The customer's mailing address on the remittance stub.",
+            "example": "TIDEWATER FREIGHT CO\nC/O NORTHGATE TRUST\nPO BOX 4417",
+        }
+    ]
+    rnc = field_tree_to_rnc(tree, workspace="ws", docset_name="d")
+
+    validate_rnc(rnc)  # used to raise SchemaInvalid: unexpected RNC line
+    assert "## Example: TIDEWATER FREIGHT CO C/O NORTHGATE TRUST PO BOX 4417" in rnc
+    # No content line escaped the `##` prefix.
+    assert "\nC/O NORTHGATE TRUST" not in rnc
+    assert vocabulary_to_rnc(parse_rnc(rnc)) == rnc
+
+
+def test_multiline_prompt_and_invariant_are_folded() -> None:
+    """`prompt` and `invariant` share the one-line-each constraint with `example`."""
+    tree = [
+        {
+            "name": "line_items",
+            "kind": "collection",
+            "fields": [{"name": "amount", "kind": "field", "datatype": "decimal"}],
+        },
+        {
+            "name": "line_item_count",
+            "kind": "field",
+            "datatype": "integer",
+            "prompt": "Look near the top.\nThen check the appendix.",
+            # A stray trailing newline would otherwise reach _validate_invariant.
+            "invariant": "count(LineItems)\n",
+        },
+    ]
+    rnc = field_tree_to_rnc(tree, workspace="ws", docset_name="d")
+
+    validate_rnc(rnc)
+    assert "## Prompt: Look near the top. Then check the appendix." in rnc
+    assert "## Invariant: count(LineItems)\n" in rnc
+    count = next(t for t in parse_rnc(rnc).roots if t.name == "LineItemCount")
+    assert count.prompt == "Look near the top. Then check the appendix."
+    assert count.invariant == "count(LineItems)"
+    assert vocabulary_to_rnc(parse_rnc(rnc)) == rnc
+
+
+def test_multiline_description_still_spans_doc_comment_lines() -> None:
+    """`description` is the one annotation the emitter line-splits and the parser
+    rejoins, so it must keep round-tripping multi-line rather than being folded."""
+    tree = [
+        {
+            "name": "clause",
+            "kind": "field",
+            "datatype": "text",
+            "description": "First line.\nSecond line.\nThird line.",
+        }
+    ]
+    rnc = field_tree_to_rnc(tree, workspace="ws", docset_name="d")
+
+    validate_rnc(rnc)
+    assert "## First line.\n## Second line.\n## Third line.\n" in rnc
+    assert parse_rnc(rnc).roots[0].description == "First line.\nSecond line.\nThird line."
+    assert vocabulary_to_rnc(parse_rnc(rnc)) == rnc
+
+
+def test_multiline_example_folded_on_the_json_schema_path_too() -> None:
+    """The CLI's `set-schema` JSON import builds Tags through `_node_to_tag`, so it
+    needs the same fold."""
+    schema = {
+        "type": "object",
+        "definitions": {"grounded_field": {"type": "object"}},
+        "properties": {
+            "payee_address": {
+                "$ref": "#/definitions/grounded_field",
+                "example": "City of Elmbrook\n812 Kestrel Avenue",
+            }
+        },
+    }
+    rnc = json_schema_to_rnc(schema, workspace="ws", docset_name="d")
+
+    validate_rnc(rnc)
+    assert "## Example: City of Elmbrook 812 Kestrel Avenue" in rnc
+
+
+def test_single_line_annotations_are_untouched() -> None:
+    """The fold must be a no-op for values already on one line, so existing
+    schemas render byte-for-byte as before."""
+    tree = [
+        {
+            "name": "vendor_name",
+            "kind": "field",
+            "datatype": "text",
+            "example": "Larkspur Systems,  LLC",  # doubled space preserved
+            "prompt": "Top of the invoice",
+        }
+    ]
+    rnc = field_tree_to_rnc(tree, workspace="ws", docset_name="d")
+    assert "## Example: Larkspur Systems,  LLC" in rnc
+    assert "## Prompt: Top of the invoice" in rnc
+
+
 _CHOICE_RNC = """\
 namespace docset = "http://www.dgml.io/acme/programs#"
 
