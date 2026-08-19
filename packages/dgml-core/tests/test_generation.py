@@ -539,6 +539,62 @@ def test_apply_labels_value_heading_signaled_by_whole_text_entity() -> None:
     assert block.entities == []  # not also wrapped as an inline span
 
 
+def test_apply_labels_field_value_entity_becomes_the_block_concept() -> None:
+    """A key-value field whose value carries the concept.
+
+    The labeling prompt tells the model to tag the value and leave the block
+    unlabeled on a "label: value" line, so it returns an entity quoting the
+    value and no block concept. `render_dgml` wraps a field's value with
+    `block.concept` alone, so the entity has to become that concept or the
+    value renders as an untagged chunk.
+    """
+    block = _b("field", "b1", label="Specimen", value="Fern-042")
+    apply_labels(
+        [block],
+        {"b1": {"entities": [{"quote": "Fern-042", "concept": "SpecimenId"}]}},
+    )
+    assert block.concept == "SpecimenId"
+    assert block.entities == []  # the value is wrapped, not span-filled
+
+
+def test_apply_labels_field_keeps_an_explicit_block_concept() -> None:
+    """An explicit block concept wins; the value entity never overrides it."""
+    block = _b("field", "b1", label="Specimen", value="Fern-042")
+    apply_labels(
+        [block],
+        {
+            "b1": {
+                "concept": "HerbariumRecord",
+                "entities": [{"quote": "Fern-042", "concept": "SpecimenId"}],
+            }
+        },
+    )
+    assert block.concept == "HerbariumRecord"
+
+
+def test_apply_labels_field_sub_value_quote_does_not_wrap_the_value() -> None:
+    """A partial quote names a sub-value, not the field — it must not become
+    the block concept, which would mis-tag the whole value."""
+    block = _b("field", "b1", label="Habitat", value="coastal dune and heath")
+    apply_labels(
+        [block],
+        {"b1": {"entities": [{"quote": "coastal dune", "concept": "HabitatType"}]}},
+    )
+    assert block.concept == ""
+
+
+def test_render_dgml_field_value_entity_tags_the_value() -> None:
+    from dgml_core.generation.to_semantic import render_dgml
+
+    block = _b("field", "b1", label="Specimen", value="Fern-042")
+    apply_labels(
+        [block],
+        {"b1": {"entities": [{"quote": "Fern-042", "concept": "SpecimenId"}]}},
+    )
+    xml = render_dgml([block], header="<dg:chunk>")
+    assert "SpecimenId" in xml and "Fern-042" in xml
+
+
 def test_render_dgml_value_heading_names_header_not_section() -> None:
     from dgml_core.generation.to_semantic import render_dgml
 
