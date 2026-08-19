@@ -66,7 +66,7 @@ def load_labeled_docs_from_cache(cache_dir: Path | str, stems: list[str]) -> dic
             Block(**{**b, "entities": [Span(**sp) for sp in b.get("entities", [])]})
             for b in raw_blocks
         ]
-        for label_file in sorted(cache.glob(f"label_{glob.escape(stem)}_c*_raw.json")):
+        for label_file in sorted(cache.glob(f"label_{glob.escape(stem)}_*_raw.json")):
             payload = _parse_labels_json(label_file.read_text(encoding="utf-8"))
             apply_labels(blocks, payload.get("labels", {}) or {}, doc_name=stem)
         propagate_table_consistency(blocks)

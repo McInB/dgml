@@ -977,6 +977,36 @@ def test_load_labeled_docs_from_cache_roundtrip(tmp_path: Path) -> None:
     assert docs["doc"][0].concept == "PaymentObligation"
 
 
+def test_load_labeled_docs_from_cache_includes_the_section_retry(tmp_path: Path) -> None:
+    """The section-retry pass writes `label_<stem>_section_retry_raw.json`, which
+    a `label_<stem>_c*_raw.json` glob cannot match — re-rendering from cache
+    silently dropped every concept that pass recovered. It must be reloaded, and
+    applied AFTER the per-chunk labels so the retry still wins."""
+    from dgml_core.generation.pipeline import load_labeled_docs_from_cache
+
+    (tmp_path / "doc_blocks.json").write_text(
+        json.dumps(
+            [
+                {"id": "b1", "structure": "p", "text": "Collected near the ridge"},
+                {"id": "b2", "structure": "heading", "text": "Field Observations", "level": 1},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "label_doc_c01_raw.json").write_text(
+        json.dumps({"labels": {"b1": {"concept": "CollectionSite"}}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "label_doc_section_retry_raw.json").write_text(
+        json.dumps({"labels": {"b2": {"concept": "FieldObservation"}}}),
+        encoding="utf-8",
+    )
+    docs = load_labeled_docs_from_cache(tmp_path, ["doc"])
+    by_id = {b.id: b for b in docs["doc"]}
+    assert by_id["b1"].concept == "CollectionSite"  # per-chunk labels still applied
+    assert by_id["b2"].concept == "FieldObservation"  # section retry no longer dropped
+
+
 def test_schema_load_rejects_unknown_keys(tmp_path: Path) -> None:
     """A stale or typo'd field in schema.json is a hard failure, never a silent
     drop — a caller must not think a field was set
