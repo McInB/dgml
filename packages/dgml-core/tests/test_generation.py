@@ -539,6 +539,62 @@ def test_apply_labels_value_heading_signaled_by_whole_text_entity() -> None:
     assert block.entities == []  # not also wrapped as an inline span
 
 
+def test_apply_labels_field_value_entity_becomes_the_block_concept() -> None:
+    """A key-value field whose value carries the concept.
+
+    The labeling prompt tells the model to tag the value and leave the block
+    unlabeled on a "label: value" line, so it returns an entity quoting the
+    value and no block concept. `render_dgml` wraps a field's value with
+    `block.concept` alone, so the entity has to become that concept or the
+    value renders as an untagged chunk.
+    """
+    block = _b("field", "b1", label="Specimen", value="Fern-042")
+    apply_labels(
+        [block],
+        {"b1": {"entities": [{"quote": "Fern-042", "concept": "SpecimenId"}]}},
+    )
+    assert block.concept == "SpecimenId"
+    assert block.entities == []  # the value is wrapped, not span-filled
+
+
+def test_apply_labels_field_keeps_an_explicit_block_concept() -> None:
+    """An explicit block concept wins; the value entity never overrides it."""
+    block = _b("field", "b1", label="Specimen", value="Fern-042")
+    apply_labels(
+        [block],
+        {
+            "b1": {
+                "concept": "HerbariumRecord",
+                "entities": [{"quote": "Fern-042", "concept": "SpecimenId"}],
+            }
+        },
+    )
+    assert block.concept == "HerbariumRecord"
+
+
+def test_apply_labels_field_sub_value_quote_does_not_wrap_the_value() -> None:
+    """A partial quote names a sub-value, not the field — it must not become
+    the block concept, which would mis-tag the whole value."""
+    block = _b("field", "b1", label="Habitat", value="coastal dune and heath")
+    apply_labels(
+        [block],
+        {"b1": {"entities": [{"quote": "coastal dune", "concept": "HabitatType"}]}},
+    )
+    assert block.concept == ""
+
+
+def test_render_dgml_field_value_entity_tags_the_value() -> None:
+    from dgml_core.generation.to_semantic import render_dgml
+
+    block = _b("field", "b1", label="Specimen", value="Fern-042")
+    apply_labels(
+        [block],
+        {"b1": {"entities": [{"quote": "Fern-042", "concept": "SpecimenId"}]}},
+    )
+    xml = render_dgml([block], header="<dg:chunk>")
+    assert "SpecimenId" in xml and "Fern-042" in xml
+
+
 def test_render_dgml_value_heading_names_header_not_section() -> None:
     from dgml_core.generation.to_semantic import render_dgml
 
@@ -919,6 +975,36 @@ def test_load_labeled_docs_from_cache_roundtrip(tmp_path: Path) -> None:
     docs = load_labeled_docs_from_cache(tmp_path, ["doc", "missing"])
     assert set(docs) == {"doc"}  # 'missing' has no _blocks.json → skipped
     assert docs["doc"][0].concept == "PaymentObligation"
+
+
+def test_load_labeled_docs_from_cache_includes_the_section_retry(tmp_path: Path) -> None:
+    """The section-retry pass writes `label_<stem>_section_retry_raw.json`, which
+    a `label_<stem>_c*_raw.json` glob cannot match — re-rendering from cache
+    silently dropped every concept that pass recovered. It must be reloaded, and
+    applied AFTER the per-chunk labels so the retry still wins."""
+    from dgml_core.generation.pipeline import load_labeled_docs_from_cache
+
+    (tmp_path / "doc_blocks.json").write_text(
+        json.dumps(
+            [
+                {"id": "b1", "structure": "p", "text": "Collected near the ridge"},
+                {"id": "b2", "structure": "heading", "text": "Field Observations", "level": 1},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "label_doc_c01_raw.json").write_text(
+        json.dumps({"labels": {"b1": {"concept": "CollectionSite"}}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "label_doc_section_retry_raw.json").write_text(
+        json.dumps({"labels": {"b2": {"concept": "FieldObservation"}}}),
+        encoding="utf-8",
+    )
+    docs = load_labeled_docs_from_cache(tmp_path, ["doc"])
+    by_id = {b.id: b for b in docs["doc"]}
+    assert by_id["b1"].concept == "CollectionSite"  # per-chunk labels still applied
+    assert by_id["b2"].concept == "FieldObservation"  # section retry no longer dropped
 
 
 def test_schema_load_rejects_unknown_keys(tmp_path: Path) -> None:

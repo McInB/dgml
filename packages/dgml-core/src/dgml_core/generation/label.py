@@ -270,6 +270,32 @@ def apply_labels(
                 block.value_concept = value_concept
                 if value_concept == block.concept:
                     block.concept = ""
+        elif block.structure == "field" and not block.concept:
+            # A key-value field whose VALUE carries the concept. The labeling
+            # prompt says: "If a block is only a short label followed by its
+            # value, the value carries the concept and the block stays
+            # unlabeled — tag the value, not the whole line." A compliant
+            # labeler therefore returns an entity quoting the value and NO
+            # block concept. But `render_dgml` wraps a field's value with
+            # `block.concept` alone and never emits field entity spans, so
+            # without this the concept is dropped and the value renders as a
+            # bare chunk. Mirror the heading branch above: an entity quoting
+            # the WHOLE value names that value's kind, so it becomes the
+            # block's concept. Exact match only — a partial quote is a
+            # sub-value, which needs inline spans rather than a leaf wrapper.
+            whole = next(
+                (
+                    e
+                    for e in payload.get("entities", []) or []
+                    if isinstance(e, Mapping)
+                    and str(e.get("quote", "") or "").strip() == block.value.strip()
+                ),
+                None,
+            )
+            if whole is not None and block.value.strip():
+                value_concept = sanitize_concept(str(whole.get("concept", "") or ""))
+                if value_concept:
+                    block.concept = value_concept
         # An entity quote that IS the list marker (a date or number used as the
         # item's label) can never be located in text/value — resolve it for
         # EVERY structure by carrying its concept onto the lim. Exact token
