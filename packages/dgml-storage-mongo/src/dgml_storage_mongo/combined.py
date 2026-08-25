@@ -24,9 +24,10 @@ One database holds both: blobs in GridFS's ``<bucket>.files`` /
 :class:`~dgml_core.layout.Collection` members. The names cannot collide, which
 is what makes sharing a database safe.
 
-The flat form selects one *class* for both roles, not one *instance*:
-``Workspace.blobs`` and ``Workspace.docs`` are independently-resolved cached
-properties, so the provider is constructed once per role.
+The flat form gives you one *instance* as well as one class: both roles resolve
+to the same config, so ``Workspace`` builds the provider once and serves
+``blobs`` and ``docs`` from it — one ``MongoClient`` per workspace, not one per
+role.
 
 What this does **not** buy you: atomic cascades. Both halves living in one
 database makes a transaction spanning a document delete and its blob deletes

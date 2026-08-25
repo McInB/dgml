@@ -93,10 +93,9 @@ class MongoDocStore(DocStore):
 
         Split out of ``__init__`` so the combined stores can bind both roles to
         one client instead of calling each parent's ``__init__`` and opening a
-        second. Note this is *per instance*: ``Workspace.blobs`` and
-        ``Workspace.docs`` resolve independently, so even the flat form
-        constructs the provider once per role and a workspace holds two
-        clients."""
+        second. That is a *class*-level concern: a workspace whose roles resolve
+        to the same config also shares one instance between them, so the flat
+        form holds a single client either way."""
         self._db: Any = db
 
     # ---- Documents (MongoDB) ----
