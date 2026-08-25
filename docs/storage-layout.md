@@ -261,8 +261,9 @@ mongo_database = "dgml"
   documents on local disk.
 - **Flat form** — a `[storage.<name>]` with a single top-level `provider` (and no
   `blobs`/`docs` subtables) uses that one class for **both** roles; it must implement
-  both `BlobStore` and `DocStore` (the bundled `LocalStore` does). A table may not
-  set both a top-level `provider` and role subtables.
+  both `BlobStore` and `DocStore` (the bundled `LocalStore` does, as does the sample
+  `dgml_storage_mongo:MongoGridFSStore`). A table may not set both a top-level `provider`
+  and role subtables.
 - **`default` and back-compat** — the reserved name **`default`** is what a workspace
   uses when `--storage` is omitted; a bare `[storage]` (flat or with `blobs`/`docs`)
   *is* the `default` service, and no `[storage]` at all is the zero-config local
