@@ -131,10 +131,10 @@ class MongoGridFSBlobStore(BlobStore):
         """Attach a GridFS bucket to an open database.
 
         Split out of ``__init__`` so :class:`~dgml_storage_mongo.MongoGridFSStore`
-        can bind both roles to one client instead of opening a second. Per
-        instance only: ``Workspace.blobs`` and ``Workspace.docs`` resolve
-        independently, so even the flat form constructs the provider once per
-        role and a workspace holds two clients."""
+        can bind both roles to one client instead of opening a second. That is a
+        *class*-level concern: a workspace whose roles resolve to the same config
+        also shares one instance between them, so the flat form holds a single
+        client either way."""
         # Lazy, like every SDK import here: ``gridfs`` ships inside pymongo, so
         # it is present whenever pymongo is, but importing at module scope would
         # make this module unimportable without it.

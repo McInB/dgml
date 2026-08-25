@@ -166,9 +166,13 @@ and `DocStore` expose no transaction handle, and `delete_blobs` is documented to
 run last precisely because cross-store atomicity is assumed impossible. Capturing
 it would take an interface change in `dgml-core`, not a provider.
 
-Nor does the flat form give you one *instance*: `Workspace.blobs` and
-`Workspace.docs` are independently-resolved cached properties, so the provider is
-constructed once per role and a workspace holds two clients.
+### What the flat form *does* buy you
+
+One instance. Both roles resolve to the same config, so `Workspace` constructs the
+provider once and serves `blobs` and `docs` from it — a flat-form workspace holds a
+single `MongoClient`, not one per role. This keys off the resolved config rather than
+the syntax, so two per-role subtables naming the same database and options collapse
+the same way.
 
 ## Run the tests
 

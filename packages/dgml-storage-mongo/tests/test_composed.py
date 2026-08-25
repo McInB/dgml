@@ -74,11 +74,11 @@ def test_flat_form_serves_both_roles_from_one_class(ws: Workspace) -> None:
     assert isinstance(ws.docs, DocStore)
     assert isinstance(ws.docs, MongoDocStore)
 
-    # One class, but two *instances*: Workspace.blobs and Workspace.docs are
-    # independently-resolved cached properties, so the flat form constructs the
-    # provider once per role. Pinned because it governs how many MongoClients a
-    # flat-form workspace holds — two, not one.
-    assert ws.blobs is not ws.docs
+    # One class *and* one instance: both roles resolve to the same config, so
+    # Workspace builds the provider once and serves both from it. Pinned because
+    # it governs how many MongoClients a flat-form workspace holds — one, not
+    # two.
+    assert ws.blobs is ws.docs
 
 
 def test_nothing_lands_on_local_disk(ws: Workspace) -> None:
