@@ -119,8 +119,10 @@ class StorageProviderUnresolvable(DgmlError):
 
 
 class StorageBackendMismatch(DgmlError):
-    """The live ``storage`` config differs from the store this workspace was
-    created with. Changing the store is a migration, not a config edit."""
+    """The ``[storage]`` config a workspace resolves differs from the
+    ``storage_fingerprint`` sealed in its ``config.toml`` — its data is on the
+    previously sealed backend. Moving a workspace's store is a migration, not a config
+    edit; ``dgml workspace reseal`` accepts an intentional change."""
 
     code = "STORAGE_BACKEND_MISMATCH"
 

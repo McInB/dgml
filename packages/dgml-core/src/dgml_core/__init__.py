@@ -78,6 +78,7 @@ from .storage_resolve import (
     load_store_configs,
     make_blob_store,
     make_doc_store,
+    resolve_store_configs,
     storage_fingerprint,
 )
 from .storage_service import (
@@ -149,6 +150,7 @@ __all__ = [
     "migrate_workspace",
     "pending_migrations",
     "read_attestation",
+    "resolve_store_configs",
     "stamp_schema_version",
     "storage_fingerprint",
     "verify_attestation_dir",

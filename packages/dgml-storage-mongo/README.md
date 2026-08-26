@@ -63,7 +63,7 @@ cluster is only a different address.
 
 This is not stylistic. `dgml_core.storage_resolve` decides what is a secret by
 **substring match on the option name** (`key`, `secret`, `token`, `password`,
-`credential`); anything else is persisted to the plaintext workspace registry. An
+`credential`); anything else is persisted to the workspace's plaintext `config.toml`. An
 option named `mongo_uri` holding `mongodb://admin:hunter2@host` matches none of
 them, so the password would be written out in the clear.
 

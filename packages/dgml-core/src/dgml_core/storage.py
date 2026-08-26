@@ -43,32 +43,76 @@ class Workspace:
     Resolve a workspace with :meth:`Workspace.resolve`. Use the path
     properties (``docset_dir``, ``file_dir``, …) instead of building paths
     by hand so the on-disk layout stays in one place.
+
+    ``root`` and ``config_override`` are independent axes: ``root`` is where the
+    workspace's data lives (for a local store) and the anchor everything else hangs
+    off; ``config_override`` points :attr:`config_path` at a ``config.toml`` kept
+    somewhere other than inside ``root``.
     """
 
     root: Path
+    config_override: Path | None = None
 
     @classmethod
-    def resolve(cls, override: Path | str | None = None) -> Workspace:
+    def resolve(
+        cls, override: Path | str | None = None, *, config: Path | None = None
+    ) -> Workspace:
         """Resolve a workspace from ``override`` (the ``--workspace`` value), then
         ``$DGML_HOME``, then ``./dgml-workspace``.
 
         ``override`` may be a **path** or a **workspace id**: if it exactly matches
-        a registered id, the workspace opens at that entry's recorded root;
-        otherwise it is treated as a path (unchanged behaviour). Ids are opaque
-        ``ws_…`` slugs, so they never collide with a real path a user would type.
+        an indexed id, the workspace opens at that entry's recorded root; otherwise
+        it is treated as a path (unchanged behaviour). Ids are opaque ``ws_…`` slugs,
+        so they never collide with a real path a user would type.
+
+        ``config`` (the ``--workspace-config`` value) points at a ``config.toml``
+        outside the workspace directory. It is orthogonal to ``override`` — either,
+        both, or neither may be given. When it is omitted and the workspace has no
+        ``<root>/config.toml``, the machine index is consulted for a recorded
+        location; see :meth:`_recover_config`.
         """
         if override is not None:
             from . import registry  # lazy: registry imports storage helpers
 
             entry = registry.get(str(override))
             if entry is not None and entry.root is not None:
-                return cls(root=Path(entry.root).resolve())
+                root = Path(entry.root).resolve()
+                return cls(root=root, config_override=config or cls._recover_config(root))
             root = Path(override).expanduser().resolve()
         elif ENV_VAR in os.environ and os.environ[ENV_VAR].strip():
             root = Path(os.environ[ENV_VAR]).expanduser().resolve()
         else:
             root = (Path.cwd() / DEFAULT_DIR_NAME).resolve()
-        return cls(root=root)
+        return cls(root=root, config_override=config or cls._recover_config(root))
+
+    @staticmethod
+    def _recover_config(root: Path) -> Path | None:
+        """The index's recorded ``config_path`` for ``root``, when it is needed and usable.
+
+        A workspace created with ``--workspace-config`` keeps its config outside the
+        directory, so opening it by id — or by path, without repeating the flag — would
+        otherwise fail with "config is missing" even though the machine knows exactly
+        where that file is.
+
+        Deliberately narrow, in both directions:
+
+        - **Only when the default is absent.** The overwhelmingly common workspace has
+          its config at ``<root>/config.toml``; that case must not pay an index read on
+          every command. This runs on the path that is about to fail anyway.
+        - **Only when the recorded file still exists.** A hint pointing at a deleted or
+          moved file is ignored, so the caller reports the ordinary missing-config error
+          rather than one naming a path the user may no longer recognise. The hint can
+          never redirect a workspace that has a perfectly good config of its own.
+        """
+        if (root / layout.CONFIG_FILE).exists():
+            return None
+        from . import registry
+
+        entry = registry.get_by_root(root)
+        if entry is None or entry.config_path is None:
+            return None
+        recorded = Path(entry.config_path)
+        return recorded if recorded.exists() else None
 
     def local_path(self, key: str) -> Path:
         """The on-disk location a store key would occupy under this root.
@@ -133,10 +177,15 @@ class Workspace:
 
     @property
     def config_path(self) -> Path:
-        """Optional per-workspace ``config.toml`` (resolution layer 3). Overrides
-        keys from the user-level ``~/.config/dgml/config.toml``; absent in the
-        common case where the user config suffices."""
-        return self.root / layout.CONFIG_FILE
+        """The workspace's own ``config.toml`` — ``config_override`` when set, else
+        ``<root>/config.toml``.
+
+        This file carries the workspace's ``[workspace]`` identity block and its
+        ``[storage]`` binding (see :mod:`dgml_core.workspace_config`), and overrides
+        keys from the user-level ``~/.config/dgml/config.toml`` for every other
+        section. It is the bootstrap file — always read from the local filesystem,
+        never through :attr:`docs`, because it names the store."""
+        return self.config_override or self.root / layout.CONFIG_FILE
 
     @property
     def usage_log_path(self) -> Path:
@@ -151,31 +200,32 @@ class Workspace:
         return self.root / layout.WORKSPACE_FILE
 
     @functools.cached_property
-    def _store_configs(self) -> tuple[StorageConfig, StorageConfig]:
+    def store_configs(self) -> tuple[StorageConfig, StorageConfig]:
         """The effective ``(blob_cfg, doc_cfg)`` pair this workspace opens with.
 
-        Cached so registry + config resolution happens **once per workspace**
-        rather than once per role. That work is not cheap and is identical for
-        both roles: ``resolve_store_configs`` re-reads ``workspaces.json`` once
-        per registry entry, and ``load_merged_config`` rebuilds a fresh
-        ``BaseSettings`` subclass and re-reads both ``config.toml`` layers on
-        every call. Resolving the pair together halves it for every workspace,
-        local or remote."""
-        from . import registry
+        Cached so config resolution happens **once per workspace** rather than once
+        per caller. That work is not cheap and is identical for both roles:
+        ``load_merged_config`` rebuilds a fresh ``BaseSettings`` subclass and re-reads
+        both ``config.toml`` layers on every call. The seal check
+        (:func:`~dgml_core.storage_resolve.verify_storage_fingerprint`) shares this
+        cache, so verifying costs nothing a store build would not have paid anyway.
 
-        return registry.resolve_store_configs(self)
+        **Memoized on first access.** Code that writes a workspace's ``[storage]``
+        binding must do so before touching this (or :attr:`blobs` / :attr:`docs`), or
+        it pins the pre-write pair for the life of the object."""
+        from .storage_resolve import resolve_store_configs
+
+        return resolve_store_configs(self)
 
     @functools.cached_property
     def blobs(self) -> BlobStore:
         """The workspace's **blob** backend (page images, PDFs, XML, schemas).
 
-        For a **registered** workspace the non-secret identity comes from its
-        registry entry's snapshot (authoritative and self-contained), with secrets
-        merged from the named ``config.toml`` template; an **unregistered**
-        workspace falls back to the bundled local-disk store (zero config). See
-        :func:`dgml_core.registry.resolve_store_configs`. All blob data flows through
-        this rather than the filesystem directly, so it can live on any pluggable
-        backend.
+        The backend comes from the workspace's own ``config.toml`` — see
+        :func:`dgml_core.storage_resolve.resolve_store_configs` — falling back to the
+        bundled local-disk store when it configures none (zero config). All blob data
+        flows through this rather than the filesystem directly, so it can live on any
+        pluggable backend.
 
         **Cached for the lifetime of this ``Workspace``.** Caching works on this
         frozen dataclass because ``cached_property`` writes straight into
@@ -184,13 +234,12 @@ class Workspace:
         precedence."""
         from .storage_resolve import make_blob_store
 
-        return make_blob_store(self._store_configs[0])
+        return make_blob_store(self.store_configs[0])
 
     @functools.cached_property
     def docs(self) -> DocStore:
         """The workspace's **document** backend (manifests, page text, assignments,
-        usage). See :attr:`blobs` for the registered/unregistered resolution and
-        caching notes.
+        usage). See :attr:`blobs` for the resolution and caching notes.
 
         When both roles resolve to the **same backend** this *is* :attr:`blobs` —
         one instance, constructed once, so a provider serving both roles holds a
@@ -204,7 +253,7 @@ class Workspace:
         from .storage_resolve import make_doc_store
         from .storage_service import DocStore
 
-        blob_cfg, doc_cfg = self._store_configs
+        blob_cfg, doc_cfg = self.store_configs
         if blob_cfg == doc_cfg:
             store = self.blobs
             if isinstance(store, DocStore):

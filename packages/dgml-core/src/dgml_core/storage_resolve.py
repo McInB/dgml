@@ -23,13 +23,18 @@ comes in pairs:
   into a ``(blob_cfg, doc_cfg)`` pair of :class:`StorageConfig`.
 - **Build** — :func:`make_blob_store` / :func:`make_doc_store` resolve a
   ``provider`` dotted path to its interface subclass and construct it.
-- **Identify** — :func:`storage_snapshot` + :func:`snapshot_pair` produce the
-  credential-free identity the registry records; :func:`fingerprint_pair` seals
-  it; :func:`secret_options` is the credential complement merged back at open.
+- **Identify** — :func:`storage_fingerprint` hashes one backend's credential-free
+  identity; :func:`storage_fingerprint_pair` seals the two together.
+- **Decide** — :func:`resolve_store_configs` picks *which* pair a given workspace
+  opens with, and :func:`verify_storage_fingerprint` checks that pair against the
+  seal recorded in the workspace's own ``config.toml``.
 
-Deciding *which* configs a given (possibly registered) workspace opens with lives
-one layer up, in :func:`dgml_core.registry.resolve_store_configs`, because it
-consults the registry — this module has no knowledge of the registry.
+**Storage is the one config section that does not layer.** Every other section
+deep-merges across the five layers in :mod:`dgml_core.config`; a storage service the
+workspace defines in its own ``config.toml`` is taken *whole*, so the workspace is
+self-describing and its seal cannot be tripped by an edit to the user-level config. A
+service the workspace does *not* define falls back to the merged config, which is what
+makes ``[storage.<name>]`` templates shared across workspaces still work.
 """
 
 from __future__ import annotations
@@ -60,9 +65,10 @@ DEFAULT_STORAGE_SERVICE = "default"
 # both roles) or these two sub-tables (a backend each); it may not do both.
 _ROLE_KEYS = ("blobs", "docs")
 
-# Option keys never folded into the store fingerprint / snapshot — rotating a
-# credential must not read as "the store moved", and secrets never reach the
-# plaintext registry.
+# Option keys never folded into the store fingerprint — rotating a credential must
+# not read as "the store moved". A provider carrying an inline credential must name
+# the option so one of these appears in it (see the storage-package READMEs);
+# every in-tree provider takes its credentials from the environment instead.
 _SECRET_HINTS = ("key", "secret", "token", "password", "credential")
 
 # ------------------------------------------------------------ building stores
@@ -126,11 +132,21 @@ def make_doc_store(config: StorageConfig) -> DocStore:
 
 def _config_from(section: Mapping[str, Any], root: Path) -> StorageConfig:
     """Build a :class:`StorageConfig` from one role table (``provider`` + the rest
-    as ``options``). Raises :class:`StorageConfigInvalid` for a bad shape."""
+    as ``options``). Raises :class:`StorageConfigInvalid` for a bad shape.
+
+    Table-valued keys are dropped alongside the role keys: a store option is always a
+    scalar or a list, so a nested table here is a sibling *service* that shared the
+    merged ``[storage]`` namespace, not an option for this provider. Keeping it would
+    fail :meth:`~dgml_core.storage_service._StoreBase._check_no_extra_fields` with a
+    confusing "unknown field" naming another workspace's service."""
     provider = section.get("provider")
     if not isinstance(provider, str) or not provider.strip():
         raise StorageConfigInvalid("'storage.provider' must be a non-empty string")
-    options = {k: v for k, v in section.items() if k != "provider" and k not in _ROLE_KEYS}
+    options = {
+        k: v
+        for k, v in section.items()
+        if k != "provider" and k not in _ROLE_KEYS and not isinstance(v, dict)
+    }
     return StorageConfig(provider=provider, root=root, options=options)
 
 
@@ -195,15 +211,76 @@ def load_store_configs(
     if table is None and service != DEFAULT_STORAGE_SERVICE:
         raise StorageConfigInvalid(f"no [storage.{service}] configured")
     if table is not None:
-        has_provider = isinstance(table.get("provider"), str)
-        has_roles = any(isinstance(table.get(r), dict) for r in _ROLE_KEYS)
-        if has_provider and has_roles:
-            raise StorageConfigInvalid(
-                f"[storage.{service}] has both a top-level 'provider' and blobs/docs "
-                f"sub-tables; use one form (a single provider for both roles, or a "
-                f"backend each)"
-            )
+        _reject_mixed_form(table, service)
     return _role_config(table, "blobs", root), _role_config(table, "docs", root)
+
+
+def _reject_mixed_form(table: Mapping[str, Any], service: str) -> None:
+    """A service table sets *either* one top-level ``provider`` for both roles *or*
+    per-role sub-tables — never both, which would leave which one wins ambiguous."""
+    has_provider = isinstance(table.get("provider"), str)
+    has_roles = any(isinstance(table.get(r), dict) for r in _ROLE_KEYS)
+    if has_provider and has_roles:
+        raise StorageConfigInvalid(
+            f"[storage.{service}] has both a top-level 'provider' and blobs/docs "
+            f"sub-tables; use one form (a single provider for both roles, or a "
+            f"backend each)"
+        )
+
+
+# --------------------------------------------------------- resolving a workspace
+
+
+def resolve_store_configs(workspace: Workspace) -> tuple[StorageConfig, StorageConfig]:
+    """The effective ``(blob_cfg, doc_cfg)`` pair ``workspace`` opens with.
+
+    The workspace's own ``config.toml`` is authoritative. Its ``[workspace]`` block
+    names which service it binds to (``storage_service``, defaulting to ``"default"``),
+    and if it defines that ``[storage.<service>]`` table itself, **that table is used
+    whole** — the user-level config contributes nothing. Only when the workspace does
+    not define the service does resolution fall back to the merged config, which is how
+    a shared ``[storage.<name>]`` template still serves many workspaces.
+
+    Reached through :attr:`dgml_core.storage.Workspace.store_configs`, which caches it.
+    """
+    from . import workspace_config
+
+    service = workspace_config.read_identity(workspace).storage_service or DEFAULT_STORAGE_SERVICE
+    own = workspace_config.read_storage_table(workspace, service)
+    if own is not None:
+        root = workspace.root
+        _reject_mixed_form(own, service)
+        return _role_config(own, "blobs", root), _role_config(own, "docs", root)
+    return load_store_configs(workspace, service)
+
+
+def verify_storage_fingerprint(workspace: Workspace) -> None:
+    """Raise :class:`~dgml_core.errors.StorageBackendMismatch` if the workspace's
+    resolved storage no longer matches the seal recorded in its ``config.toml``.
+
+    A workspace with no recorded fingerprint is **unsealed** and passes untouched —
+    trust-on-first-use, which is what lets a hand-built or freshly-migrated workspace
+    open before it has ever been sealed.
+
+    Store-free: resolution reads TOML only, so a config naming an unreachable backend
+    is rejected here rather than after a failed connection."""
+    from . import workspace_config
+    from .errors import StorageBackendMismatch
+
+    recorded = workspace_config.read_identity(workspace).storage_fingerprint
+    if not recorded:
+        return
+    blob_cfg, doc_cfg = workspace.store_configs
+    if storage_fingerprint_pair(blob_cfg, doc_cfg) == recorded:
+        return
+    raise StorageBackendMismatch(
+        f"the [storage] configuration this workspace resolves no longer matches the "
+        f"storage_fingerprint recorded in {workspace.config_path}. Its data is on the "
+        f"previously sealed backend, so opening it against the new configuration could "
+        f"read or write the wrong store. If the change was intended, run "
+        f"'dgml workspace reseal {workspace.root}' to accept it; otherwise restore the "
+        f"[storage] table."
+    )
 
 
 # ------------------------------------------------------------ identity / seal
@@ -225,59 +302,20 @@ def _identity_hash(provider: str, options: Mapping[str, Any]) -> str:
 
 def storage_fingerprint(config: StorageConfig) -> str:
     """Credential-free content hash of one backend's identity (provider + non-secret
-    options). See :func:`fingerprint_pair` for the two-backend seal a workspace uses."""
+    options). See :func:`storage_fingerprint_pair` for the two-backend seal a workspace
+    records in its ``config.toml``."""
     return _identity_hash(config.provider, config.options)
 
 
-def storage_snapshot(config: StorageConfig) -> dict[str, Any]:
-    """One backend's **non-secret** identity as a flat dict — ``{"provider": …,
-    <opt>: …}``. Secret-hinted options are dropped, so credentials never reach the
-    plaintext registry. :func:`secret_options` is the complement."""
-    snapshot: dict[str, Any] = {"provider": config.provider}
-    snapshot.update(
-        (k, v)
-        for k, v in config.options.items()
-        if not any(hint in k.lower() for hint in _SECRET_HINTS)
-    )
-    return snapshot
+def storage_fingerprint_pair(blob_cfg: StorageConfig, doc_cfg: StorageConfig) -> str:
+    """The seal a workspace records: a credential-free hash over both roles.
 
-
-def secret_options(config: StorageConfig) -> dict[str, Any]:
-    """The **secret-hinted** options of one backend — the complement of
-    :func:`storage_snapshot`. Merged back into a registered workspace's non-secret
-    snapshot at open time; never persisted to the registry."""
-    return {
-        k: v for k, v in config.options.items() if any(hint in k.lower() for hint in _SECRET_HINTS)
-    }
-
-
-def fingerprint_of_snapshot(snapshot: Mapping[str, Any]) -> str:
-    """Recompute one backend's identity hash from a persisted :func:`storage_snapshot`
-    — equal to ``storage_fingerprint`` of the config it was taken from. Returns ``""``
-    when the snapshot has no ``provider``."""
-    provider = snapshot.get("provider")
-    if not isinstance(provider, str):
-        return ""
-    options = {k: v for k, v in snapshot.items() if k != "provider"}
-    return _identity_hash(provider, options)
-
-
-def snapshot_pair(blob_cfg: StorageConfig, doc_cfg: StorageConfig) -> dict[str, Any]:
-    """The non-secret snapshot a workspace's registry entry records:
-    ``{"blobs": storage_snapshot(blob_cfg), "docs": storage_snapshot(doc_cfg)}``."""
-    return {"blobs": storage_snapshot(blob_cfg), "docs": storage_snapshot(doc_cfg)}
-
-
-def fingerprint_pair(pair: Mapping[str, Any]) -> str:
-    """Credential-free hash of a ``{"blobs": …, "docs": …}`` snapshot pair — the
-    integrity seal recomputed on open. Returns ``""`` when the pair is empty/unset,
-    treated as unsealed (trust-on-first-use)."""
-    blobs = pair.get("blobs") if isinstance(pair.get("blobs"), Mapping) else None
-    docs = pair.get("docs") if isinstance(pair.get("docs"), Mapping) else None
-    if not blobs and not docs:
-        return ""
+    ``root`` is deliberately outside the hash — a workspace copied or moved to another
+    path keeps its seal, because where the *config* lives is not where the *data*
+    lives. Secrets are outside it too (see :data:`_SECRET_HINTS`), so rotating a
+    credential never reads as "the store moved"."""
     body = json.dumps(
-        {"blobs": dict(blobs or {}), "docs": dict(docs or {})},
+        {"blobs": storage_fingerprint(blob_cfg), "docs": storage_fingerprint(doc_cfg)},
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")

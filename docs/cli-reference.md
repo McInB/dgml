@@ -37,7 +37,8 @@ or after a command group (`dgml docset --format text list`).
 
 | Flag             | Description |
 |------------------|-------------|
-| `--workspace`    | Override the workspace to open — a filesystem path **or** a `ws_…` id from `dgml workspace list`. A registered id resolves through the per-machine registry to its root; anything else is treated as a path. Default: `$DGML_HOME` then `./dgml-workspace`. |
+| `--workspace`    | Override the workspace to open — a filesystem path **or** a `ws_…` id from `dgml workspace list`. An indexed id resolves through the per-machine index to its root; anything else is treated as a path. Default: `$DGML_HOME` then `./dgml-workspace`. |
+| `--workspace-config` | Path to the workspace's `config.toml` when it is kept outside the workspace directory. Default: `$DGML_CONFIG`, then `<workspace>/config.toml`, then the location recorded in the machine index for this workspace (so a workspace created with this flag opens without repeating it). Orthogonal to `--workspace`: that flag picks the **root**, this one picks the **config**, and either, both, or neither may be given. Not to be confused with `dgml cluster --config`, which selects a clustering preset. |
 | `--format`       | `json` (default) or `text`. |
 | `--verbose`      | Emit informational diagnostics to stderr. Controls hybrid text-mode warnings (digital/OCR conflicts, OCR misses) and the per-page merge summary, plus the `docset generate` pipeline's progress lines. Off by default — stderr stays reserved for error envelopes. |
 | `--debug`        | Keep intermediate debug files in the workspace **and** record LLM cost/token telemetry to `<workspace>/usage.jsonl`. Off by default, so only final files (and the small functional cache the next run reloads) are kept. With `--debug` off: no `usage.jsonl` rows are written for **any** operation (classify, cluster, transcribe, label, links, schema/value extraction, hybrid merge); `docset generate` skips the debug-only `cache/` artifacts (raw LLM dumps, `*.concept.xml`/`*.semantic.xml`, prompt listings) and `coverage_report.json`; and the in-place grounding pass skips the `<stem>.dgml.grounding_stats.json` sidecar. The functional `cache/` files (`*_blocks.json`, `label_*_cNN_raw.json`, `concept_roster.json`) are **always** written — incremental generation reloads them. Pass `--debug` to retain the debug artifacts and log usage. (Coverage summaries still print on stderr under `--verbose` either way.) |
@@ -97,36 +98,58 @@ omitted, the root resolves in the usual order (global `--workspace` → `$DGML_H
 → `./dgml-workspace`); a `PATH` given here overrides that.
 
 Steps:
-1. Indexes the workspace in this machine's registry
-   (`~/.config/dgml/workspaces.json`) so it can be listed by
-   `dgml workspace list` and opened by id (`dgml --workspace <workspace_id>`),
-   recording which **storage service** it lives on (below).
+1. Writes the workspace's own `config.toml`: the `[storage.<service>]` binding it
+   will resolve from, plus a machine-managed `[workspace]` identity block
+   (`workspace_id`, `name`, `organization`, `storage_service`,
+   `storage_fingerprint`). This happens **first** — everything after it is built
+   through the backend this file names.
 2. Creates `docsets/` and `files/` on that storage service.
-3. Writes the workspace identity (`name` + `organization` + a freshly-minted
-   stable `workspace_id`) to `<workspace>/workspace.json`.
+3. Writes the workspace identity (`name` + `organization` + the minted stable
+   `workspace_id`) to `<workspace>/workspace.json`.
+4. Indexes the workspace in this machine's index (`~/.config/dgml/workspaces.json`)
+   so it can be listed by `dgml workspace list` and opened by id
+   (`dgml --workspace <workspace_id>`).
 
-Config is owned by `dgml init` and lives at the user level — `workspace create`
-does **not** create or touch it (nor does it write a per-workspace
-`config.toml`; that file is optional and hand-authored only for
-workspace-specific overrides — see [storage-layout.md](storage-layout.md)). If
-the user-level config is **absent**, the workspace is still created (the command
-never blocks) and a warning is printed to **stderr** telling you to run
-`dgml init` and set your API key.
+Re-running is safe: an existing `[storage.<service>]` is never overwritten.
 
-`--organization` is **required**. It is embedded in this workspace's docset
-namespace URIs (`http://dgml.io/<organization>/<DocSetSlug>`) — pick a stable
-identifier for your org (changing it later shifts the namespaces of newly
-generated XML). `--name` is optional human-readable identity metadata and
-defaults to the workspace directory name.
+The **user-level** config (`~/.config/dgml/config.toml`) is owned by `dgml init` —
+`workspace create` does not create or touch it. If it is **absent**, the workspace is
+still created (the command never blocks) and a warning is printed to **stderr**
+telling you to run `dgml init` and set your API key.
+
+`--organization` is **required for a new workspace** and optional once the workspace's
+`config.toml` records one — so re-running `create`, or adopting an existing workspace on
+another machine, does not make you retype it. Omitting it with nothing to inherit from
+fails with `INVALID_ARGUMENT`.
+
+It is embedded in this workspace's docset namespace URIs
+(`http://dgml.io/<organization>/<DocSetSlug>`) — pick a stable identifier for your org,
+as changing it later shifts the namespaces of newly generated XML. Passing a value that
+differs from the recorded one **re-organizes the workspace** and prints a warning to
+stderr: the change applies to newly generated XML only, so a typo would otherwise split
+the corpus across two namespaces with nothing to flag it later.
+
+`--name` is optional human-readable identity metadata; it likewise falls back to the
+recorded name, then to the workspace directory name.
 
 `--storage NAME` selects the **storage service** the workspace is created on — a
-`[storage.<name>]` template in your `config.toml` (see
-[storage-layout.md](storage-layout.md)). A **non-secret snapshot** of that
-service (provider + non-secret options; never credentials) is recorded in the
-registry entry, which becomes the authoritative record of where the workspace's
-data lives. Omit `--storage` for the bundled local-disk default. A `--storage
-NAME` that names no configured service fails with `STORAGE_CONFIG_INVALID` before
-anything is created.
+`[storage.<name>]` template in your user-level `config.toml` (see
+[storage-layout.md](storage-layout.md)). It is **materialized into the workspace's
+own `config.toml`**, which becomes the authoritative record of where the workspace's
+data lives. Omit `--storage` for the bundled local-disk default. A `--storage NAME`
+that names no configured service fails with `STORAGE_CONFIG_INVALID` before anything
+is created.
+
+`--storage` **composes with** the global `--workspace-config <path>`: that flag says
+*where* the config lives, `--storage` says *which* `[storage.<name>]` table in it to
+bind to. An adopted config is left exactly as authored — no `config.toml` is written
+inside the workspace, and its `[storage]` tables are never rewritten.
+
+If the adopted config declares services but not the one selected, `create` fails with
+`INVALID_ARGUMENT` naming what the file does declare. It does **not** fall back to the
+local default: a config passed explicitly exists to name a backend, and silently
+building the workspace on local disk instead is only discovered once the data appears
+to be missing.
 
 Output (JSON):
 
@@ -138,10 +161,15 @@ Output (JSON):
   "organization": "Acme",
   "storage_service": "default",
   "initialized": true,
+  "workspace_config_path": "…/dgml-workspace/config.toml",
+  "storage_fingerprint": "sha256:…",
   "config_path": "~/.config/dgml/config.toml",
   "config_present": true
 }
 ```
+
+`workspace_config_path` is the workspace's own config (the `--workspace-config` value
+when given); `config_path`/`config_present` refer to the **user-level** config.
 
 `workspace_id` is the stable handle (`ws_` + 16 base32 chars) minted for this
 workspace; pass it to any command as `--workspace <workspace_id>`. It survives a
@@ -151,10 +179,10 @@ is `false`, an extra `next_action` field is present and the stderr warning above
 is emitted — but the workspace is created regardless (exit `0`).
 
 ### `dgml workspace list`
-List the workspaces registered on **this machine** (the registry is per-machine,
-so a workspace opened on two machines appears once on each). Reads only
-`~/.config/dgml/workspaces.json` — no workspace needs to be resolved, and it
-never touches the workspaces themselves.
+List the workspaces indexed on **this machine** (the index is per-machine, so a
+workspace opened on two machines appears once on each). Reads only
+`~/.config/dgml/workspaces.json` — no workspace needs to be resolved, and it never
+touches the workspaces themselves.
 
 Output (JSON), sorted by id:
 
@@ -166,35 +194,34 @@ Output (JSON), sorted by id:
       "name": "Acme Contracts",
       "organization": "Acme",
       "root": "/Users/me/acme-ws",
-      "storage_service": "default",
       "created_at": "2026-08-05T12:00:00Z"
     }
   ]
 }
 ```
 
-`storage_service` is the storage template each workspace was created on (see
-[storage-layout.md](storage-layout.md)).
+The index is a **regenerable cache**: it records where workspaces are, not how they
+store data. Deleting it loses only enumeration — each workspace is re-added, with its
+id intact, the next time it is opened by path. Opening a workspace that has **moved**
+corrects its recorded `root` automatically.
 
-### `dgml workspace register [PATH] [--storage NAME]`
-Index an existing workspace in this machine's registry — the recovery path when a
-workspace was created elsewhere, its directory **moved**, or you want to change or
-repair its storage service. `PATH` is optional and defaults to the
-globally-resolved workspace. The workspace must already be initialized (run
-`dgml workspace create` otherwise → `WORKSPACE_NOT_INITIALIZED`).
+### `dgml workspace reseal [PATH] [--check]`
+Accept a change to a workspace's `[storage]` configuration: recompute its
+`storage_fingerprint` from the currently-resolved backends and record it in the
+workspace's `config.toml`. `PATH` is optional and defaults to the globally-resolved
+workspace; the workspace must already be initialized (else
+`WORKSPACE_NOT_INITIALIZED`).
 
-- If the workspace is already indexed here, its entry is **re-sealed** in place
-  (identity taken from the existing entry, so this works even when the entry's
-  storage snapshot was hand-edited into an unopenable state — the repair for a
-  `STORAGE_BACKEND_MISMATCH`). `--storage NAME` switches the workspace to a
-  different `[storage.<name>]` service and re-snapshots it; omit it to keep the
-  current service.
-- Otherwise (e.g. a moved directory) its `workspace_id` is read from
-  `workspace.json` (minted and written back if absent) and a fresh entry is
-  recorded, re-pointing `root` to `PATH`.
+This is the repair for `STORAGE_BACKEND_MISMATCH`. The usual sequence is: edit
+`[storage]` in the workspace's `config.toml`, then reseal.
 
-Normal use never needs this: `workspace create` registers new workspaces, and the
-first time any command opens a workspace it is auto-registered on that machine.
+⚠️ Resealing tells dgml the new configuration is correct — it does **not** move any
+data. If the workspace already holds files, migrate them to the new backend first, or
+you will be pointing an existing workspace at an empty store.
+
+`--check` compares without writing and exits `1` with the `STORAGE_BACKEND_MISMATCH`
+envelope when the storage has drifted — for CI and agents that want to detect the
+condition without consenting to it.
 
 Output (JSON):
 
@@ -202,12 +229,28 @@ Output (JSON):
 {
   "workspace": "/Users/me/acme-ws",
   "workspace_id": "ws_7f3k9q2m4b8xr5wa",
-  "name": "Acme Contracts",
-  "organization": "Acme",
-  "storage_service": "default",
-  "registered": true
+  "config_path": "/Users/me/acme-ws/config.toml",
+  "storage": {
+    "blobs": { "provider": "dgml_storage_s3:S3BlobStore" },
+    "docs": { "provider": "dgml_storage_mongo:MongoDocStore" }
+  },
+  "storage_fingerprint": "sha256:…",
+  "previous_fingerprint": "sha256:…",
+  "resealed": true
 }
 ```
+
+`previous_fingerprint` is `null` for a workspace that was not yet sealed; `resealed`
+is `false` under `--check`.
+
+### `dgml workspace register` — **removed**
+Indexing is now automatic: any command that opens a workspace adds it to this
+machine's index and corrects its recorded `root` if the directory moved. To change a
+workspace's storage backend, edit `[storage]` in its `config.toml` and run
+`dgml workspace reseal` — `register --storage` is gone.
+
+For one release the subcommand still parses and returns an `INVALID_ARGUMENT`
+envelope naming the replacement, rather than an argparse usage dump.
 
 ### `dgml status`
 Summary: workspace path, count of docsets, count of files.
@@ -261,7 +304,9 @@ Use it to make resume/re-run loops cheap. Without the flag (or when at least
 one file is still unassigned) the command clusters as normal and reports
 `skipped: false`.
 
-`--config PRESET|PATH` selects the clustering configuration for this run.
+`--config PRESET|PATH` selects the clustering configuration for this run. It is
+unrelated to the global `--workspace-config`, which points at the workspace's own
+`config.toml`.
 It is either a **bundled preset name** — `small` (CPU-only tf-idf + Leiden, no
 UMAP; for tiny corpora), `light` (CPU-only tf-idf + Leiden/UMAP; the default),
 `medium` (tf-idf text fused with a 2B vision encoder, large CPU / Apple MPS),
@@ -1884,9 +1929,9 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `PDF_SLICE_FAILED` | soft | A PDF page-slice operation failed during generation. |
 | `TEXT_EXTRACTION_FAILED` | soft | pdfminer.six extracted no digital text; recorded (`text_extraction_error`). |
 | `CORRUPT_METADATA` | hard / soft | A `file.json`/`docset.json` is not valid JSON (also reported by `dgml check`). |
-| `STORAGE_CONFIG_INVALID` | hard | A `[storage]` / `[storage.<name>]` table is malformed, or `--storage NAME` names a service that isn't configured. |
+| `STORAGE_CONFIG_INVALID` | hard | A `[storage]` / `[storage.<name>]` table is malformed, `--storage NAME` names a service that isn't configured, or an initialized workspace has **no `config.toml`** — that file names its storage backend and cannot be reconstructed from anything else. |
 | `STORAGE_PROVIDER_UNRESOLVABLE` | hard | A storage `provider` dotted path (`module:Class`) can't be imported/resolved. |
-| `STORAGE_BACKEND_MISMATCH` | hard | The storage snapshot recorded for a workspace in `~/.config/dgml/workspaces.json` was hand-edited and no longer matches its sealed fingerprint. The registry is machine-managed; re-seal with `dgml workspace register <root> --storage <name>` (or restore the entry). |
+| `STORAGE_BACKEND_MISMATCH` | hard | The `[storage]` configuration a workspace resolves no longer matches the `storage_fingerprint` sealed in its `config.toml` — its data is on the previously sealed backend. Accept the change with `dgml workspace reseal <root>`, or restore the `[storage]` table. |
 | `NOT_IMPLEMENTED` | hard | A requested mode/path is not implemented. |
 | `DGML_ERROR` | hard | Generic base code; specific codes above are preferred. |
 

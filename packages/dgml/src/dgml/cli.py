@@ -39,11 +39,19 @@ from dgml_core.consistency import check_workspace
 from dgml_core.conversion import FAMILY_BY_SUFFIX, load_conversion_config
 from dgml_core.default_config import PROVIDER_MODELS
 from dgml_core.docsets import DocSetStore
-from dgml_core.errors import DgmlError, WorkspaceNotInitialized, short_error_message
+from dgml_core.errors import (
+    DgmlError,
+    InvalidArgument,
+    StorageBackendMismatch,
+    StorageConfigInvalid,
+    WorkspaceNotInitialized,
+    short_error_message,
+)
 from dgml_core.files import AddFileResult, ConflictPolicy, FileStore
 from dgml_core.migrations import (
     MigrationResult,
     migrate_workspace,
+    migrate_workspace_config,
     stamp_schema_version,
 )
 from dgml_core.models import DocSet
@@ -57,7 +65,12 @@ from dgml_core.storage import (
     user_config_path,
     write_user_config,
 )
-from dgml_core.storage_resolve import DEFAULT_STORAGE_SERVICE
+from dgml_core.storage_resolve import (
+    DEFAULT_STORAGE_SERVICE,
+    load_store_configs,
+    storage_fingerprint_pair,
+    verify_storage_fingerprint,
+)
 from dgml_core.text_extraction import TextMode
 
 if TYPE_CHECKING:
@@ -128,6 +141,12 @@ def _emit_error(
 
 
 _WORKSPACE_HELP = "Workspace root (overrides $DGML_HOME and the default ./dgml-workspace)."
+_WORKSPACE_CONFIG_HELP = (
+    "Path to the workspace's config.toml, when it is kept outside the workspace "
+    "directory (overrides $DGML_CONFIG and the default <workspace>/config.toml). "
+    "This file names the workspace's storage backend. Distinct from `cluster "
+    "--config`, which selects a clustering preset."
+)
 _FORMAT_HELP = "Output format. Default 'json' for machine/agent consumption."
 _VERBOSE_HELP = (
     "Emit informational diagnostics to stderr. Controls hybrid text-mode "
@@ -144,18 +163,29 @@ _DEBUG_HELP = (
 
 
 def _add_global_flags(parser: argparse.ArgumentParser, *, suppress: bool) -> None:
-    """Declare the three global flags (`--workspace`/`--format`/`--verbose`) in
-    one place. ``suppress=False`` (top-level parser) gives them their real
-    defaults; ``suppress=True`` (the shared parent threaded into every
+    """Declare the global flags (`--workspace`, `--workspace-config`, `--format`,
+    `--verbose`, `--debug`) in one place. ``suppress=False`` (top-level parser) gives
+    them their real defaults; ``suppress=True`` (the shared parent threaded into every
     subparser) uses ``SUPPRESS`` so an omitted flag after the subcommand leaves
     the namespace untouched, letting the top-level default stand instead of
     clobbering it. Declaring both from one function keeps the two positions'
-    metadata (choices/help) from drifting on a public-contract surface."""
+    metadata (choices/help) from drifting on a public-contract surface.
+
+    ``--workspace-config`` is spelled in full rather than ``--config`` because
+    ``dgml cluster --config`` already exists: a global ``--config`` would collide with
+    it when this parent is attached to the ``cluster`` subparser, and argparse raises
+    at parser-construction time, taking ``dgml --help`` down with it."""
     parser.add_argument(
         "--workspace",
         type=Path,
         default=argparse.SUPPRESS if suppress else None,
         help=_WORKSPACE_HELP,
+    )
+    parser.add_argument(
+        "--workspace-config",
+        type=Path,
+        default=argparse.SUPPRESS if suppress else None,
+        help=_WORKSPACE_CONFIG_HELP,
     )
     parser.add_argument(
         "--format",
@@ -254,8 +284,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "create",
         parents=[common],
         help=(
-            "Create a workspace (docsets/ + files/ + workspace.json). If the user-level "
-            "~/.config/dgml/config.toml is absent it is auto-generated (as `dgml init`)."
+            "Create a workspace (docsets/ + files/ + workspace.json) and its config.toml, "
+            "which names the storage backend. Does not create or touch the user-level "
+            "~/.config/dgml/config.toml — that is `dgml init`."
         ),
     )
     ws_create.add_argument(
@@ -271,11 +302,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ws_create.add_argument(
         "--organization",
-        required=True,
+        default=None,
         help=(
             "Organization name. Embedded in this workspace's docset namespace URIs "
             "(http://dgml.io/<organization>/<DocSetSlug>) — pick a stable identifier for "
-            "your org, as changing it later shifts the namespaces of newly generated XML."
+            "your org, as changing it later shifts the namespaces of newly generated XML. "
+            "Required for a new workspace; optional when the config already records one "
+            "(re-running create, or adopting an existing workspace on another machine), "
+            "in which case passing a different value re-organizes the workspace and warns."
         ),
     )
     ws_create.add_argument(
@@ -291,41 +325,53 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Name of the storage service to create this workspace on — a "
-            "[storage.<name>] table in your config.toml. Its non-secret config is "
-            "snapshotted into the workspace's registry entry. Omit for the bundled "
-            "local-disk default."
+            "[storage.<name>] table in your config.toml. Its config is materialized "
+            "into the new workspace's own config.toml, which is authoritative from "
+            "then on. Omit for the bundled local-disk default. Composes with "
+            "--workspace-config: that flag says where the config is, this one says "
+            "which [storage.<name>] table in it to bind to."
         ),
     )
     workspace_sub.add_parser(
         "list",
         parents=[common],
-        help="List the workspaces registered on this machine (id, name, root).",
-    )
-    ws_register = workspace_sub.add_parser(
-        "register",
-        parents=[common],
         help=(
-            "Index an existing workspace in this machine's registry so it can be opened "
-            "by id. Mints a workspace_id if the workspace lacks one; updates the recorded "
-            "root for a moved workspace."
+            "List the workspaces indexed on this machine (id, name, root). The index is "
+            "a regenerable cache — a workspace missing from it is re-added when next "
+            "opened by path."
         ),
     )
-    ws_register.add_argument(
+    ws_reseal = workspace_sub.add_parser(
+        "reseal",
+        parents=[common],
+        help=(
+            "Accept a change to a workspace's [storage] configuration: recompute its "
+            "storage_fingerprint from the currently-resolved backends and record it. "
+            "Run this after editing [storage] in the workspace's config.toml."
+        ),
+    )
+    ws_reseal.add_argument(
         "path",
         nargs="?",
         type=Path,
         default=None,
         help="Workspace directory. Optional; defaults to the globally-resolved workspace.",
     )
-    ws_register.add_argument(
-        "--storage",
-        default=None,
+    ws_reseal.add_argument(
+        "--check",
+        action="store_true",
         help=(
-            "Re-seal the workspace to this storage service (a [storage.<name>] table in "
-            "config.toml), re-snapshotting its config into the registry. Omit to keep the "
-            "workspace's current service."
+            "Report whether the seal matches without writing. Exits 1 with "
+            "STORAGE_BACKEND_MISMATCH when the storage has drifted."
         ),
     )
+    # Removed in favour of the self-healing index (a moved workspace is re-pointed on
+    # open) and `workspace reseal` (which replaced `register --storage`). Kept declared
+    # for one release so an existing caller gets a JSON error envelope naming the
+    # replacement rather than an argparse usage dump on stderr.
+    ws_register = workspace_sub.add_parser("register", parents=[common], help=argparse.SUPPRESS)
+    ws_register.add_argument("path", nargs="?", type=Path, default=None)
+    ws_register.add_argument("--storage", default=None)
     sub.add_parser("status", parents=[common], help="Show workspace summary.")
 
     chk = sub.add_parser(
@@ -1062,27 +1108,37 @@ def main(argv: list[str] | None = None) -> int:
     fmt: str = args.format
 
     try:
-        ws = Workspace.resolve(args.workspace)
+        ws = Workspace.resolve(args.workspace, config=_config_override(args))
         # `init` manages only the user-level config; `workspace create`
         # is what actually builds the workspace — so both run before the
         # workspace exists.
         if args.command not in ("init", "workspace"):
-            # Integrity-check the workspace's registry entry BEFORE its storage
-            # config is trusted to build the store — a hand-edited workspaces.json
-            # entry raises here (store-free), rather than silently opening a
-            # tampered backend. `workspace register` (exempt above) is how it is
-            # re-sealed, so it is never blocked by this.
-            ws_registry.verify_storage_seal(ws)
+            # Move a pre-upgrade workspace's storage binding out of this machine's
+            # registry and into its own config.toml. Store-free and content-guarded,
+            # so it must run FIRST: everything below reads the store, and until this
+            # has run the store a legacy workspace resolves is the wrong one.
+            migrate_workspace_config(ws)
+            # Then check that binding against the workspace's own seal, still before
+            # any store is built — a drifted [storage] raises here rather than
+            # silently opening an empty backend. `workspace reseal` (exempt above,
+            # under the `workspace` group) is how an intended change is accepted.
+            verify_storage_fingerprint(ws)
             if not ws.is_initialized():
                 raise WorkspaceNotInitialized(
                     f"workspace at {ws.root} is not initialized — run 'dgml workspace create'"
                 )
+            if not ws.config_path.exists():
+                # The config names the backend and cannot be reconstructed from
+                # anything else — an absent one is indistinguishable from "this was a
+                # remote workspace whose config was deleted", which would otherwise
+                # fall through to the local default and report an empty workspace.
+                raise StorageConfigInvalid(_missing_config_message(ws))
             # Upgrade an older workspace in place before anything reads it. This
             # is the one point every command passes through, so there is no
             # separate migrate step to remember. No-op (one document read) when
             # the workspace is already current. Migration mints a workspace_id
-            # (store-agnostic); then index it in this machine's registry so it is
-            # openable by id / listed — additive and idempotent.
+            # (store-agnostic); then index it in this machine's index so it is
+            # openable by id / listed — idempotent, and self-healing for a move.
             _report_migrations(migrate_workspace(ws), ws, args)
             ws_registry.ensure_registered(ws)
         return _dispatch(args, ws, fmt)
@@ -1210,36 +1266,199 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     return 0
 
 
-def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
-    """Create a workspace (``docsets/``, ``files/``, ``workspace.json``).
+def _missing_config_message(ws: Workspace) -> str:
+    """Why this workspace cannot be opened, and what would fix it.
 
-    Config is owned by ``dgml init`` and lives at the user level: this command
-    does **not** create or touch it. When the user-level config is absent, the
-    workspace is still created (never blocked) — a warning is printed to stderr
-    telling the user to run ``dgml init`` and set their API key.
+    When the machine index recorded an external config for this workspace and that
+    file is now gone, name it: the user configured that path deliberately, so it is
+    far more recognisable than the ``<root>/config.toml`` default they never chose.
     """
+    recorded = None
+    if ws.config_override is None:
+        entry = ws_registry.get_by_root(ws.root)
+        recorded = entry.config_path if entry is not None else None
+
+    if recorded is not None:
+        return (
+            f"{ws.config_path} is missing, and the config this workspace was last "
+            f"opened with ({recorded}) is gone too. That file names the workspace's "
+            f"storage backend and cannot be reconstructed — restore it from backup, or "
+            f"point at a copy with --workspace-config <path>."
+        )
+    return (
+        f"{ws.config_path} is missing. It names this workspace's storage backend and "
+        f"cannot be reconstructed — restore it from backup, point at a copy with "
+        f"--workspace-config <path>, or, if this workspace is on default local "
+        f"storage, re-run 'dgml workspace create {ws.root} --organization <org>'."
+    )
+
+
+def _config_override(args: argparse.Namespace) -> Path | None:
+    """The workspace config to open with: ``--workspace-config``, then ``$DGML_CONFIG``,
+    then ``None`` (meaning ``<root>/config.toml``).
+
+    Mirrors how ``--workspace`` falls back to ``$DGML_HOME``, so a workspace whose
+    config lives elsewhere does not need the flag on every single invocation."""
+    flag = getattr(args, "workspace_config", None)
+    if flag is not None:
+        return Path(flag)
+    env = os.environ.get("DGML_CONFIG", "").strip()
+    return Path(env).expanduser() if env else None
+
+
+def _write_workspace_config(ws: Workspace, service: str, adopted: bool) -> None:
+    """Give a new workspace the ``[storage.<service>]`` table it will resolve from.
+
+    With an adopted config (``--workspace-config``) the file is the user's: its
+    ``[storage]`` is left exactly as authored. Otherwise the named service is
+    materialized out of the user-level config into the workspace's own file, so the
+    workspace is self-describing from the moment it exists.
+
+    Never clobbers a ``[storage.<service>]`` the file already defines — ``workspace
+    create`` is documented as safe to re-run.
+    """
+    from dgml_core import workspace_config as wsconfig
+
+    if adopted or wsconfig.read_storage_table(ws, service) is not None:
+        return
+    blob_cfg, doc_cfg = load_store_configs(ws, service)
+    table: dict[str, Any] = {
+        "blobs": {"provider": blob_cfg.provider, **dict(blob_cfg.options)},
+        "docs": {"provider": doc_cfg.provider, **dict(doc_cfg.options)},
+    }
+    wsconfig.write_storage_table(ws, service, table)
+
+
+def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
+    """Workspace lifecycle: create, list, reseal.
+
+    ``create`` writes the workspace directory *and* its ``config.toml``. The
+    user-level config stays owned by ``dgml init``: this command does not create or
+    touch it, and when it is absent the workspace is still created (never blocked)
+    with a warning on stderr.
+    """
+    from dgml_core import workspace_config as wsconfig
+
     sub = args.workspace_command
     if sub == "create":
         # A positional path overrides the globally-resolved root, so
         # `dgml workspace create ./ws …` reads without doubling --workspace.
         if args.path is not None:
-            ws = Workspace.resolve(args.path)
+            ws = Workspace(
+                root=Path(args.path).expanduser().resolve(), config_override=ws.config_override
+            )
 
-        name = args.name or ws.root.name
+        # The two flags are orthogonal: --workspace-config says *where* the config
+        # lives, --storage says *which* [storage.<name>] table in it to bind to.
+        adopted = ws.config_override is not None
+        if adopted and not ws.config_path.exists():
+            raise InvalidArgument(
+                f"--workspace-config {ws.config_path} does not exist. Author it first "
+                f"(it must declare the [storage] table this workspace will use), or omit "
+                f"the flag to have dgml write <workspace>/config.toml for you."
+            )
+
+        # Identity already recorded in the config wins over any local accident. Read it
+        # once: `create` is idempotent, so on a re-run (or on a second machine adopting
+        # a shared config) these are the values that must survive.
+        recorded = wsconfig.read_identity(ws)
+
+        # Prefer an explicit --name, then the name the config already records, and only
+        # then the directory name. Without the middle term, re-running create against a
+        # shared config renames the workspace after whatever the local directory happens
+        # to be called — overwriting the display name in the remote store too.
+        name = args.name or recorded.name or ws.root.name
+
+        # --organization is required for a *new* workspace and optional once the config
+        # records one, so adopting an existing workspace does not make you retype the
+        # value that defines its namespace URIs — retyping it is exactly how a typo
+        # would re-organize the whole org's workspace.
+        organization = args.organization or recorded.organization
+        if organization is None:
+            raise InvalidArgument(
+                "--organization is required to create a workspace. It is embedded in "
+                "this workspace's docset namespace URIs "
+                "(http://dgml.io/<organization>/<DocSetSlug>), so pick a stable "
+                "identifier for your org. It becomes optional once the workspace's "
+                "config.toml records one."
+            )
+        if (
+            args.organization is not None
+            and recorded.organization is not None
+            and args.organization != recorded.organization
+        ):
+            # Loud, and not behind --verbose: this rewrites the organization for every
+            # consumer of the workspace, and only affects *newly* generated XML, so the
+            # corpus ends up split across two namespaces with nothing to flag it later.
+            sys.stderr.write(
+                f"Warning: --organization {args.organization!r} differs from the "
+                f"{recorded.organization!r} recorded in {ws.config_path}.\n\n"
+                f"The workspace is now organization {args.organization!r}. Docset "
+                f"namespace URIs generated from here on will use it, while XML already "
+                f"generated keeps the old namespace.\n\n"
+                f"If this was a typo, re-run with --organization "
+                f"{recorded.organization!r}.\n"
+            )
         service = args.storage or DEFAULT_STORAGE_SERVICE
-        # Register FIRST — this mints the id and seals the entry store-free, so it
-        # validates the named storage service (a bad --storage raises here before
-        # anything is created) and the entry exists for ws.store below to resolve
-        # the chosen backend.
-        workspace_id = ws_registry.register_workspace(
-            ws, name=name, organization=args.organization, service=service
+        # Validate the named service before anything is created, so a bad --storage
+        # fails without leaving a half-built workspace behind. This is also the point
+        # `register_workspace` used to occupy.
+        load_store_configs(ws, service)
+        if adopted:
+            # An adopted config exists to name a backend. If it declares services but
+            # not the one selected, binding would fall through to the bundled local
+            # store — silently building the workspace somewhere the user did not ask
+            # for, which is only discovered once their data appears to be missing.
+            declared = wsconfig.declared_services(ws)
+            if wsconfig.read_storage_table(ws, service) is None and declared:
+                raise InvalidArgument(
+                    f"{ws.config_path} declares no [storage.{service}]. It does declare "
+                    f"{', '.join(f'[storage.{d}]' for d in declared)} — select one with "
+                    f"--storage <name>, or the workspace would be created on the bundled "
+                    f"local-disk store instead of the backend this config names."
+                )
+
+        # Write the whole binding — the [storage.<service>] table *and* the
+        # `storage_service` pointer — before anything resolves a store. Resolution
+        # reads that pointer to decide which table to use, so computing the seal (or
+        # touching ws.blobs/ws.docs) any earlier resolves against a config that does
+        # not yet name the service: the workspace would be built on the bundled local
+        # store and sealed to it, then fail STORAGE_BACKEND_MISMATCH on the very next
+        # command once the pointer became readable.
+        ws.root.mkdir(parents=True, exist_ok=True)
+        _write_workspace_config(ws, service, adopted)
+        # Reuse the id the config already carries; mint only for a genuinely new
+        # workspace. Minting unconditionally broke the documented "idempotent and safe
+        # to re-run" promise in two ways: re-running on the same machine forked the id
+        # and left two index rows for one directory, and running it on a second machine
+        # against a shared config changed the org's workspace identity — including the
+        # `workspace` record in the remote doc store.
+        workspace_id = recorded.workspace_id or ws_registry.mint_workspace_id()
+        wsconfig.write_identity(
+            ws,
+            workspace_id=workspace_id,
+            name=name,
+            organization=organization,
+            storage_service=service,
         )
+
+        # Re-open now that the config is complete: `store_configs` is a
+        # cached_property, so a fresh object is what guarantees the seal and the
+        # stores below come from the finished binding rather than a memoized guess.
+        ws = Workspace(root=ws.root, config_override=ws.config_override)
+        wsconfig.write_identity(ws, storage_fingerprint=storage_fingerprint_pair(*ws.store_configs))
+
         # Now build the workspace through the selected backend.
         ws.init()
-        ws.write_meta(name=name, organization=args.organization, workspace_id=workspace_id)
+        ws.write_meta(name=name, organization=organization, workspace_id=workspace_id)
         # Stamp the current layout revision so a brand-new workspace is never
         # mistaken for an old one and re-scanned by the migration on first use.
         stamp_schema_version(ws)
+        # Index it last: the index is a cache, so it is recorded once the workspace
+        # it points at actually exists.
+        ws_registry.index_workspace(
+            ws, workspace_id=workspace_id, name=name, organization=organization
+        )
 
         upath = user_config_path()
         config_present = upath.exists()
@@ -1247,9 +1466,11 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             "workspace": str(ws.root),
             "workspace_id": workspace_id,
             "name": name,
-            "organization": args.organization,
+            "organization": organization,
             "storage_service": service,
             "initialized": True,
+            "workspace_config_path": str(ws.config_path),
+            "storage_fingerprint": wsconfig.read_identity(ws).storage_fingerprint,
             "config_path": str(upath),
             "config_present": config_present,
         }
@@ -1274,7 +1495,6 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                         "name": e.name,
                         "organization": e.organization,
                         "root": e.root,
-                        "storage_service": e.storage_service,
                         "created_at": e.created_at,
                     }
                     for e in ws_registry.list_entries()
@@ -1284,32 +1504,58 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         )
         return 0
 
-    if sub == "register":
+    if sub == "reseal":
         if args.path is not None:
-            ws = Workspace.resolve(args.path)
+            ws = Workspace(
+                root=Path(args.path).expanduser().resolve(), config_override=ws.config_override
+            )
         if not ws.is_initialized():
             raise WorkspaceNotInitialized(
                 f"workspace at {ws.root} is not initialized — run 'dgml workspace create'"
             )
-        # Reuses the workspace's own id if it has one (a moved dir keeps its id),
-        # else mints and writes one back. Overwrites (re-seals) the entry — the
-        # adopt-new-config / repair-a-hand-edited-entry fix — unlike the additive
-        # auto-registration on open. --storage switches the storage service; omitted
-        # keeps the entry's current one.
-        wid = ws_registry.reregister_workspace(ws, service=args.storage)
-        entry = ws_registry.get(wid)
+        previous = wsconfig.read_identity(ws).storage_fingerprint
+        blob_cfg, doc_cfg = ws.store_configs
+        current = storage_fingerprint_pair(blob_cfg, doc_cfg)
+        if args.check:
+            if previous and previous != current:
+                raise StorageBackendMismatch(
+                    f"the [storage] configuration this workspace resolves no longer "
+                    f"matches the storage_fingerprint recorded in {ws.config_path}. "
+                    f"Run 'dgml workspace reseal {ws.root}' to accept the change."
+                )
+        else:
+            wsconfig.write_identity(ws, storage_fingerprint=current)
         _emit(
             {
                 "workspace": str(ws.root),
-                "workspace_id": wid,
-                "name": ws.display_name,
-                "organization": ws.organization,
-                "storage_service": entry.storage_service if entry else DEFAULT_STORAGE_SERVICE,
-                "registered": True,
+                "workspace_id": wsconfig.read_identity(ws).workspace_id,
+                "config_path": str(ws.config_path),
+                "storage": {
+                    "blobs": {"provider": blob_cfg.provider},
+                    "docs": {"provider": doc_cfg.provider},
+                },
+                "storage_fingerprint": current,
+                "previous_fingerprint": previous,
+                "resealed": not args.check,
             },
             fmt,
         )
         return 0
+
+    if sub == "register":
+        # Removed. Declared only so an existing caller gets an error envelope naming
+        # the replacement instead of an argparse usage dump.
+        if args.storage is not None:
+            raise InvalidArgument(
+                "`dgml workspace register --storage` has been removed. A workspace's "
+                "storage now lives in its own config.toml: edit the [storage] table "
+                "there, then run `dgml workspace reseal <path>` to accept the change."
+            )
+        raise InvalidArgument(
+            "`dgml workspace register` has been removed. Indexing is automatic — "
+            "opening a workspace by path adds it to this machine's index and corrects "
+            "its recorded root if it moved. Use `dgml workspace list` to confirm."
+        )
 
     raise AssertionError(f"unhandled workspace subcommand: {sub}")  # unreachable (required=True)
 

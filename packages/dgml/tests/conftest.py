@@ -130,8 +130,24 @@ def _write_text_pdf(path: Path, pages_text: list[str]) -> None:
 
 @pytest.fixture
 def workspace(tmp_path: Path) -> Workspace:
+    """An initialized workspace shaped like one ``dgml workspace create`` produced.
+
+    The identity block matters: the CLI treats a missing ``config.toml`` on an
+    initialized workspace as a hard error, because an absent config is
+    indistinguishable from "this was a remote workspace whose config was deleted".
+    A fixture without one would exercise a state the CLI never creates."""
+    from dgml_core import workspace_config
+
     ws = Workspace(root=tmp_path / "ws")
     ws.init()
+    workspace_config.write_identity(
+        ws,
+        workspace_id="ws_fixturexxxxxxxxx",
+        name=ws.root.name,
+        organization=ws.root.name,
+        storage_service="default",
+    )
+    ws.write_meta(name=ws.root.name, organization=ws.root.name, workspace_id="ws_fixturexxxxxxxxx")
     return ws
 
 

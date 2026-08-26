@@ -86,7 +86,7 @@ This gives you `dgml-spec/samples/<scenario>/files/`, where each scenario's raw 
 ### 1.3 Initialize your Workspace
 All DGML documents, metadata, and schemas reside in a single directory called the **Workspace**. By default, DGML looks at the `DGML_HOME` environment variable, or falls back to `./dgml-workspace`.
 
-Let's initialize a clean workspace. `--organization` is required — it is
+Let's initialize a clean workspace. `--organization` is required the first time — it is
 embedded in this workspace's docset namespace URIs
 (`http://dgml.io/<organization>/<DocSetSlug>`), so pick a stable identifier for
 your org. `--name` is an optional human-readable label (defaults to the
@@ -97,16 +97,21 @@ export DGML_HOME=./my-dgml-workspace
 uv run dgml workspace create --organization "Acme" --name "Getting Started"
 ```
 *Note: `workspace create` is idempotent and safe to re-run. It creates the
-workspace (`docsets/` + `files/`) and records its identity in `workspace.json`,
-including a stable `workspace_id` (`ws_…`, echoed in the JSON output). That id is
-a durable handle for the workspace: `dgml workspace list` shows every workspace
-registered on this machine, and `dgml --workspace <workspace_id>` opens one by id
-instead of by path (this guide uses `$DGML_HOME` throughout, so you won't need it
-here). `workspace create` does **not** create or touch your user-level config —
-that's `dgml init`'s job (run once per machine; see §1.4). If you haven't run
-`dgml init` yet, `workspace create` still succeeds but prints a warning to
-configure credentials. To override models for one workspace, drop a
-`<workspace>/config.toml`; it deep-merges over the user config.*
+workspace (`docsets/` + `files/`), records its identity in `workspace.json`,
+including a stable `workspace_id` (`ws_…`, echoed in the JSON output), and writes
+`<workspace>/config.toml`. That id is a durable handle for the workspace:
+`dgml workspace list` shows every workspace indexed on this machine, and
+`dgml --workspace <workspace_id>` opens one by id instead of by path (this guide uses
+`$DGML_HOME` throughout, so you won't need it here). `workspace create` does **not**
+create or touch your user-level config — that's `dgml init`'s job (run once per
+machine; see §1.4). If you haven't run `dgml init` yet, `workspace create` still
+succeeds but prints a warning to configure credentials.*
+
+> **Keep `<workspace>/config.toml` with the workspace — don't delete it.** It names
+> the storage backend the workspace's data lives on, and nothing else records that.
+> A workspace whose config is missing fails with `STORAGE_CONFIG_INVALID` rather than
+> quietly opening an empty one. To override models for this workspace, **edit** that
+> file: every section except `[storage]` deep-merges over your user config.*
 
 ### 1.4 Configure Models and API Keys
 Ingesting files needs no configuration, but every LLM-backed command you will

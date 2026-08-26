@@ -23,19 +23,32 @@ From inside this repo, use `uv run dgml …` (the venv is managed by `uv sync`).
 The workspace root is picked in this order:
 
 1. `--workspace <path-or-id>` flag — a filesystem path **or** a `ws_…` workspace id
-   from `dgml workspace list` (a registered id opens at its recorded root; anything
+   from `dgml workspace list` (an indexed id opens at its recorded root; anything
    else is a path)
 2. `$DGML_HOME`
 3. `./dgml-workspace` (default, relative to cwd)
 
+The workspace's `config.toml` is resolved separately, and is **required** — it names
+the storage backend:
+
+1. `--workspace-config <path>` (not to be confused with `dgml cluster --config`)
+2. `$DGML_CONFIG`
+3. `<workspace>/config.toml` (default)
+4. the path recorded in the machine index — so a workspace created with
+   `--workspace-config` opens by id or path without repeating the flag
+
 Setup — the minimum is a **single** command:
 
 1. `dgml init [--provider <anthropic|google|mixed>]` — **run once per machine.** Writes the user-level `~/.config/dgml/config.toml` with a `[models]` block. Omit `--provider` to auto-detect from the API-key env vars that are set (`ANTHROPIC_API_KEY` / `GEMINI_API_KEY`); pass `--force` to overwrite an existing file (backs it up first). There are **no** default models — an unconfigured model is a hard error, never a silent paid call.
-2. `dgml workspace create [path] --organization <org>` — creates the workspace (`docsets/` + `files/`), records its identity in `workspace.json`, and mints a stable `workspace_id` (echoed in the payload). It does **not** touch the user config; if the config is missing it still creates the workspace and warns on stderr to run `dgml init`. The optional positional `path` is where to create it (`dgml workspace create ./ws …`); omit it to use the resolved root (global `--workspace` → `$DGML_HOME` → `./dgml-workspace`). `--organization` is **required** and is embedded in this workspace's docset namespace URIs (`http://dgml.io/<org>/<DocSetSlug>`); pass an optional `--name` for a human-readable label. Use `--storage <name>` to put the workspace on a named storage service defined as `[storage.<name>]` in `config.toml` (omit for the bundled local-disk default; a non-secret snapshot of the service is recorded in the registry).
+2. `dgml workspace create [path] --organization <org>` — creates the workspace (`docsets/` + `files/`), writes `<workspace>/config.toml` (its storage binding plus a machine-managed `[workspace]` identity block), records its identity in `workspace.json`, and mints a stable `workspace_id` (echoed in the payload). It does **not** touch the user config; if the config is missing it still creates the workspace and warns on stderr to run `dgml init`. Safe to re-run — an existing `[storage.<name>]` is never overwritten. The optional positional `path` is where to create it (`dgml workspace create ./ws …`); omit it to use the resolved root (global `--workspace` → `$DGML_HOME` → `./dgml-workspace`). `--organization` is **required for a new workspace** and is embedded in its docset namespace URIs (`http://dgml.io/<org>/<DocSetSlug>`); it becomes **optional** once the config records one, so re-running create or adopting an existing workspace elsewhere does not make you retype it (passing a different value re-organizes the workspace and warns on stderr). `--name` is an optional human-readable label, falling back the same way. Use `--storage <name>` to materialize a named service defined as `[storage.<name>]` in the user config into this workspace's own config (omit for the bundled local-disk default); `--workspace-config <path>` adopts a config you already authored, left exactly as written. The two **compose**: `--workspace-config` says where the config is, `--storage` says which `[storage.<name>]` table in it to bind to — a config declaring `[storage.acme]` needs `--storage acme`, or create fails with `INVALID_ARGUMENT` rather than silently using local disk.
 
-Managing multiple workspaces: `dgml workspace list` prints every workspace registered on this machine (`{workspace_id, name, organization, root, storage_service, created_at}`), and any `workspace_id` can be passed as `--workspace <id>` to open it without knowing its path — e.g. `id=$(dgml workspace create ./ws --organization Acme | jq -r .workspace_id)` then `dgml --workspace "$id" file list`. New workspaces register automatically, as does the first open of any existing one; `dgml workspace register [path] [--storage <name>]` is the explicit fix for a **moved** directory (re-points its recorded root, keeping the id), for switching a workspace's storage service, or for repairing a `STORAGE_BACKEND_MISMATCH` (a hand-edited registry entry).
+**`<workspace>/config.toml` is required and must travel with the workspace** — it is the only record of which storage backend holds the data. A workspace whose config is missing fails with `STORAGE_CONFIG_INVALID`; do not delete it, and copy it along when moving a workspace.
 
-Configure once per machine: every workspace inherits `~/.config/dgml/config.toml`. Models are set via the `[models]` tiers (`light`/`standard`/`advanced`/`expert`); per-task sections override a tier. A workspace can override per key via its own `<workspace>/config.toml`, and env vars (`DGML_MODELS__ADVANCED=…`) override on top. Any command other than `init` / `workspace create` on an uninitialized workspace fails with `WORKSPACE_NOT_INITIALIZED`.
+Managing multiple workspaces: `dgml workspace list` prints every workspace indexed on this machine (`{workspace_id, name, organization, root, created_at}`), and any `workspace_id` can be passed as `--workspace <id>` to open it without knowing its path — e.g. `id=$(dgml workspace create ./ws --organization Acme | jq -r .workspace_id)` then `dgml --workspace "$id" file list`. The index is a regenerable cache: workspaces are added automatically on create and on first open, a **moved** directory has its recorded root corrected automatically, and deleting `~/.config/dgml/workspaces.json` only loses enumeration. (`dgml workspace register` has been removed — it existed for exactly those repairs.)
+
+Changing a workspace's storage: edit `[storage]` in its `config.toml`, then run `dgml workspace reseal [path]` to accept the change (`--check` reports drift and exits 1 without writing). Until you do, commands fail with `STORAGE_BACKEND_MISMATCH` — the guard against silently opening a different backend than the one holding your data. Resealing records the new configuration; it does **not** move data.
+
+Configure once per machine: every workspace inherits `~/.config/dgml/config.toml`. Models are set via the `[models]` tiers (`light`/`standard`/`advanced`/`expert`); per-task sections override a tier. A workspace can override per key via its own `<workspace>/config.toml`, and env vars (`DGML_MODELS__ADVANCED=…`) override on top. **Exception: `[storage]` does not merge** — a service the workspace defines is used whole. Any command other than `init` / `workspace create` on an uninitialized workspace fails with `WORKSPACE_NOT_INITIALIZED`.
 
 ## Output contract — parse it with `jq`
 
@@ -57,7 +70,7 @@ Use `--format text` only when a human asked for readable output directly; do not
 ### Add a single PDF and assign it to a DocSet
 
 ```bash
-uv run dgml workspace create --organization Acme              # once: create workspace (seeds config too)
+uv run dgml workspace create --organization Acme              # once: workspace + its config.toml
 ds=$(uv run dgml docset create --name "Q2 contracts" | jq -r .id)
 fid=$(uv run dgml file add /path/to/contract.pdf --on-conflict skip | jq -r .file.id)
 uv run dgml docset add-file "$fid" --docset "$ds"
@@ -85,7 +98,7 @@ classifications match against those questions, not against
 topical similarity.
 
 ```bash
-uv run dgml workspace create --organization Acme   # once: create workspace (seeds config too)
+uv run dgml workspace create --organization Acme   # once: workspace + its config.toml
 payload=$(uv run dgml file add /path/to/doc.pdf --auto-classify)
 ds=$(jq -r .classification.docset_id <<<"$payload")
 qs=$(jq -r '.classification.docset_key_questions | join(" | ")' <<<"$payload")

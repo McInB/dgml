@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from .storage import Workspace
 
@@ -73,6 +74,153 @@ class MigrationResult:
 
     def summary(self) -> str:
         return f"{self.migration.name}: {self.changed} item(s) migrated"
+
+
+def _snapshot_to_table(storage: dict[str, Any]) -> dict[str, Any] | None:
+    """A legacy registry ``storage`` snapshot as a ``[storage.<service>]`` table body.
+
+    The snapshot is ``{"blobs": {provider, …}, "docs": {…}}``, or — for entries written
+    before the blob/doc split — one flat ``{provider, …}`` serving both roles. A role
+    whose snapshot names no provider is **omitted**, so it falls back to the bundled
+    local store exactly as the old resolver's own missing-provider branch did.
+    Returns ``None`` when neither role is usable."""
+    if isinstance(storage.get("provider"), str):
+        storage = {"blobs": storage, "docs": storage}
+    table: dict[str, Any] = {}
+    for role in ("blobs", "docs"):
+        role_snapshot = storage.get(role)
+        if isinstance(role_snapshot, dict) and isinstance(role_snapshot.get("provider"), str):
+            table[role] = dict(role_snapshot)
+    return table or None
+
+
+def _legacy_str(entry: dict[str, Any], key: str) -> str | None:
+    """One string field of a legacy index row, or ``None`` if absent or the wrong type."""
+    value = entry.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def migrate_workspace_config(ws: Workspace) -> int:
+    """Move a legacy per-machine storage binding into the workspace's own ``config.toml``.
+
+    **Store-free, and deliberately not a** :data:`_MIGRATIONS` **entry.** Migration
+    dispatch reads ``workspace.json`` *through the store*, and the store is the very
+    thing this repairs — so it cannot be version-dispatched without a chicken-and-egg.
+    It is guarded on content instead: a workspace whose config already carries a
+    ``storage_fingerprint`` returns immediately. That also makes it correct for a
+    workspace a development build already stamped at the current version, which a
+    registered migration would silently skip.
+
+    The binding is seeded from the **registry snapshot**, never from the merged config.
+    A workspace created with ``--storage svcA`` whose ``[storage.svcA]`` template was
+    later edited is pinned by the old resolver to the snapshot; seeding from the
+    template instead would silently relocate it to a different backend and orphan its
+    data.
+
+    A workspace with no legacy row is already resolving from its ``config.toml``, so
+    there is nothing to move — but it is still sealed, so the drift guard covers
+    workspaces that predate it rather than leaving them permanently unguarded.
+
+    Idempotent, and safe to interrupt: both writes replace whole tables, so a crash
+    between them leaves a workspace that is re-migrated byte-identically. Returns 1
+    when it wrote, 0 otherwise."""
+    from . import registry, workspace_config
+    from .errors import WorkspaceMigrationFailed
+    from .storage_resolve import (
+        DEFAULT_STORAGE_SERVICE,
+        resolve_store_configs,
+        storage_fingerprint_pair,
+    )
+
+    if workspace_config.read_identity(ws).storage_fingerprint:
+        return 0
+
+    legacy = registry.raw_entry_by_root(ws.root) or {}
+    raw_storage = legacy.get("storage")
+    table = _snapshot_to_table(raw_storage) if isinstance(raw_storage, dict) else None
+    service = legacy.get("storage_service")
+    if not isinstance(service, str) or not service:
+        service = DEFAULT_STORAGE_SERVICE
+
+    if table is None and not ws.config_path.exists():
+        # Nothing to migrate *and* nothing to migrate into. Creating a config here
+        # would be a guess — and the wrong one for the case that matters: a workspace
+        # whose config was deleted would be silently re-sealed onto the local default
+        # while its data sits on the remote backend the deleted file named. Leave it
+        # absent so the caller reports it as missing and recoverable.
+        return 0
+
+    try:
+        if table is not None:
+            workspace_config.write_storage_table(
+                ws,
+                service,
+                table,
+                banner=(
+                    "# Migrated by dgml from this machine's workspace index — it records the\n"
+                    "# backend this workspace's data is already on. If you had edited this\n"
+                    "# table before upgrading, that edit was never in effect (the old index\n"
+                    "# pinned the workspace to the snapshot above) and is not preserved here.\n"
+                    "# To move the data, change this table and run `dgml workspace reseal`.\n"
+                ),
+            )
+        # Resolve directly rather than through ``ws.store_configs``: the table was just
+        # written, and the cached property must not memoize a pre-write pair.
+        fingerprint = storage_fingerprint_pair(*resolve_store_configs(ws))
+        workspace_config.write_identity(
+            ws,
+            workspace_id=_legacy_str(legacy, "workspace_id"),
+            name=_legacy_str(legacy, "name"),
+            organization=_legacy_str(legacy, "organization"),
+            storage_service=service,
+            storage_fingerprint=fingerprint,
+        )
+    except OSError as exc:
+        raise WorkspaceMigrationFailed(
+            f"could not write {ws.config_path} while moving this workspace's storage "
+            f"binding out of the machine registry: {exc}"
+        ) from exc
+
+    # Rewrite the index row in the current shape so the legacy ``storage`` /
+    # ``storage_service`` / ``storage_fingerprint`` keys do not linger. They are inert
+    # (``RegistryEntry.from_dict`` ignores unknown keys) but leaving a second, now
+    # powerless copy of the binding on disk invites someone to trust it later.
+    # ``ensure_registered`` cannot do this — it returns early when the root matches.
+    wid = legacy.get("workspace_id")
+    if isinstance(wid, str) and wid:
+        registry.index_workspace(
+            ws,
+            workspace_id=wid,
+            name=str(legacy.get("name") or ws.root.name),
+            organization=str(legacy.get("organization") or ""),
+        )
+    return 1
+
+
+def _mirror_identity_into_config(ws: Workspace) -> int:
+    """Copy ``workspace_id``/``organization`` from ``workspace.json`` into the
+    ``[workspace]`` block, so both can be read without opening the store.
+
+    Writes only what is absent — :func:`migrate_workspace_config` already supplies them
+    for a workspace that had a registry row, and this covers the rest (a freshly
+    backfilled id, or a workspace that was never indexed).
+
+    The two copies are deliberately **never compared**. ``config.toml`` is the
+    store-free bootstrap copy and ``workspace.json`` the one that travels with the
+    data; treating a difference as an error would turn a restored backup or a
+    hand-copied config into a hard failure with no good repair."""
+    from . import workspace_config
+
+    identity = workspace_config.read_identity(ws)
+    if identity.workspace_id and identity.name and identity.organization:
+        return 0
+    workspace_config.write_identity(
+        ws,
+        workspace_id=identity.workspace_id or ws.workspace_id,
+        name=identity.name or ws.display_name,
+        organization=identity.organization or ws.organization,
+    )
+    return 1
 
 
 def _backfill_workspace_id(ws: Workspace) -> int:
@@ -137,16 +285,26 @@ def _migrate_to_v1(ws: Workspace) -> int:
     two independent, individually-idempotent parts:
 
     - :func:`_backfill_workspace_id` — store-agnostic; runs on every backend.
+    - :func:`_mirror_identity_into_config` — store-free write of that id (and the
+      organization) into ``config.toml``; ordered after the backfill so a
+      freshly-minted id is mirrored in the same pass.
     - :func:`_upgrade_assignments_to_documents` — LocalStore-only (self-guarded).
 
-    Both are **one** migration deliberately: two separate ``Migration`` entries at
-    the same version would break crash-resume (the version is stamped after each,
-    so a crash between them would make the next run skip the second). Keep the
-    store-agnostic backfill OUT of the LocalStore-guarded upgrade — call the two as
-    siblings so the backfill still runs on a remote store. When the storage layer is
-    released, further changes get their own version 2, not more code here.
+    These are **one** migration deliberately: separate ``Migration`` entries at the
+    same version would break crash-resume (the version is stamped after each, so a
+    crash between them would make the next run skip the rest). Keep the store-agnostic
+    parts OUT of the LocalStore-guarded upgrade — call them as siblings so they still
+    run on a remote store. When the storage layer is released, further changes get
+    their own version 2, not more code here.
+
+    Note the storage binding itself is *not* migrated here — see
+    :func:`migrate_workspace_config`, which must run store-free and ahead of dispatch.
     """
-    return _backfill_workspace_id(ws) + _upgrade_assignments_to_documents(ws)
+    return (
+        _backfill_workspace_id(ws)
+        + _mirror_identity_into_config(ws)
+        + _upgrade_assignments_to_documents(ws)
+    )
 
 
 _MIGRATIONS: tuple[Migration, ...] = (
