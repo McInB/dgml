@@ -21,6 +21,8 @@ from typing import Any
 import pytest
 from dgml_core.pages import GS_BINARIES
 from dgml_core.storage import Workspace
+from dgml_core.workspaces_resolve import default_workspaces_store
+from dgml_core.workspaces_store import WORKSPACES_ENV_VAR
 
 
 def _toml_scalar(value: Any) -> str:
@@ -273,10 +275,16 @@ def _stub_add_links(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate_user_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the user-level config (``~/.config/dgml``) at an empty tmp dir so the
-    merged-config loader never reads the developer's real config. Tests that
-    exercise ``dgml init`` write into this isolated location."""
+    """Point the user-level config (``~/.config/dgml``) and the machine's store of
+    workspaces (``~/dgml-workspaces``) at empty tmp dirs.
+
+    Tests that exercise ``dgml init`` write into the isolated config location. The
+    workspaces half is what keeps ``dgml workspace create`` — which now lands in that
+    store by default — out of the developer's home directory. ``cache_clear()`` is
+    required because the resolved store is memoized per process."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-home"))
+    monkeypatch.setenv(WORKSPACES_ENV_VAR, str(tmp_path / "dgml-workspaces"))
+    default_workspaces_store.cache_clear()
 
 
 @pytest.fixture(autouse=True)

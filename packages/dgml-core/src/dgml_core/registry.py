@@ -38,33 +38,27 @@ that has moved corrects its recorded ``root`` in place.
 
 from __future__ import annotations
 
-import base64
-import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .storage import Workspace, read_json, user_config_path, write_json_atomic
 
+# Id minting lives in its own module (see :mod:`dgml_core.workspace_id`) because the
+# workspaces store and the migrations both need it without needing each other. The
+# redundant-alias spelling is an explicit re-export, for the callers that still reach
+# for these names here (and so ``mypy --strict`` accepts it).
+from .workspace_id import ID_PREFIX as ID_PREFIX
+from .workspace_id import is_workspace_id as is_workspace_id
+from .workspace_id import new_workspace_id as new_workspace_id
+
 REGISTRY_FILE = "workspaces.json"
-_ID_PREFIX = "ws_"
 
 
 def registry_path() -> Path:
     """The registry file, next to the user ``config.toml`` (honors
     ``XDG_CONFIG_HOME``/``APPDATA``)."""
     return user_config_path().parent / REGISTRY_FILE
-
-
-def new_workspace_id() -> str:
-    """A fresh opaque workspace id: ``ws_`` + 16 lowercase base32 chars (80 bits).
-
-    Non-semantic (survives a directory rename) and hyphen/separator-free — the
-    ``ws_`` prefix lets ``Workspace.resolve`` tell an id from a path without a
-    dedicated flag. Not collision-checked — use :func:`mint_workspace_id` when
-    assigning an id to a workspace."""
-    slug = base64.b32encode(secrets.token_bytes(10)).decode("ascii").lower().rstrip("=")
-    return f"{_ID_PREFIX}{slug}"
 
 
 def mint_workspace_id() -> str:

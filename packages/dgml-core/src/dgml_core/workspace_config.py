@@ -92,6 +92,7 @@ class WorkspaceIdentity:
     organization: str | None = None
     storage_service: str | None = None
     storage_fingerprint: str | None = None
+    created_at: str | None = None
 
 
 # ------------------------------------------------------------------- reading
@@ -124,18 +125,41 @@ def _str_or_none(table: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def read_identity(ws: Workspace) -> WorkspaceIdentity:
-    """The workspace's ``[workspace]`` identity block, read store-free and unlayered."""
-    table = _load(ws).get(IDENTITY_TABLE)
+def _identity_from_table(table: Any, *, workspace_id: str | None = None) -> WorkspaceIdentity:
+    """Narrow a parsed ``[workspace]`` table into a :class:`WorkspaceIdentity`.
+
+    ``workspace_id`` overrides the one in the table, for a caller that already knows it
+    from the address it looked the workspace up by — the store's key is authoritative
+    over a hand-edited block that disagrees with it."""
     if not isinstance(table, dict):
-        return WorkspaceIdentity()
+        return WorkspaceIdentity(workspace_id=workspace_id)
     return WorkspaceIdentity(
-        workspace_id=_str_or_none(table, "workspace_id"),
+        workspace_id=workspace_id or _str_or_none(table, "workspace_id"),
         name=_str_or_none(table, "name"),
         organization=_str_or_none(table, "organization"),
         storage_service=_str_or_none(table, "storage_service"),
         storage_fingerprint=_str_or_none(table, "storage_fingerprint"),
+        created_at=_str_or_none(table, "created_at"),
     )
+
+
+def identity_from_text(text: str, *, workspace_id: str | None = None) -> WorkspaceIdentity:
+    """The ``[workspace]`` block of a config given as **text** rather than a file.
+
+    What a :class:`~dgml_core.workspaces_store.WorkspacesStore` renders a listing row
+    from: it holds config text, never a path. Unparseable TOML raises
+    :class:`CorruptMetadata` naming the workspace, since there is no filename to name."""
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        label = f" for {workspace_id}" if workspace_id else ""
+        raise CorruptMetadata(f"invalid TOML in the config{label}: {exc}") from exc
+    return _identity_from_table(parsed.get(IDENTITY_TABLE), workspace_id=workspace_id)
+
+
+def read_identity(ws: Workspace) -> WorkspaceIdentity:
+    """The workspace's ``[workspace]`` identity block, read store-free and unlayered."""
+    return _identity_from_table(_load(ws).get(IDENTITY_TABLE))
 
 
 def declared_services(ws: Workspace) -> list[str]:

@@ -40,15 +40,15 @@ makes ``[storage.<name>]`` templates shared across workspaces still work.
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from .config import load_merged_config
-from .errors import StorageConfigInvalid, StorageProviderUnresolvable
+from .errors import StorageConfigInvalid
 from .models_config import ConfigSection
+from .provider import import_provider_class
 from .storage import Workspace
 from .storage_service import BlobStore, DocStore, StorageConfig
 
@@ -78,38 +78,12 @@ def _import_store_class(provider: str, base: Any) -> Any:
     """Import the dotted ``"module.path:ClassName"`` ``provider`` and check it is a
     subclass of ``base`` (:class:`BlobStore` or :class:`DocStore`).
 
-    Raises :class:`StorageProviderUnresolvable` if the string is malformed, the
-    module/attribute can't be imported, or the target is not a ``base`` subclass —
-    the last catches "a doc provider used where a blob provider is required". Returns
-    the class (``Any``: it is a concrete subclass only known at runtime)."""
-    if ":" not in provider:
-        raise StorageProviderUnresolvable(
-            f"storage provider must be a dotted path 'module.path:ClassName' "
-            f"(got {provider!r}); the bundled default is {DEFAULT_STORAGE_PROVIDER!r}"
-        )
-    module_path, _, class_name = provider.partition(":")
-    if not module_path or not class_name:
-        raise StorageProviderUnresolvable(
-            f"storage provider {provider!r} must have the form 'module.path:ClassName'"
-        )
-    try:
-        module = importlib.import_module(module_path)
-    except ImportError as exc:
-        raise StorageProviderUnresolvable(
-            f"could not import storage module {module_path!r} for provider {provider!r}: "
-            f"{exc}. Is the package installed in this environment?"
-        ) from exc
-    try:
-        obj = getattr(module, class_name)
-    except AttributeError as exc:
-        raise StorageProviderUnresolvable(
-            f"module {module_path!r} has no attribute {class_name!r} (provider {provider!r})"
-        ) from exc
-    if not (isinstance(obj, type) and issubclass(obj, base)):
-        raise StorageProviderUnresolvable(
-            f"provider {provider!r} resolved to {obj!r}, which is not a {base.__name__} subclass"
-        )
-    return obj
+    A thin binding of :func:`dgml_core.provider.import_provider_class` to this
+    section's vocabulary and bundled default; the mechanism is shared with the
+    ``[workspaces]`` resolver."""
+    return import_provider_class(
+        provider, base, kind="storage", default_hint=DEFAULT_STORAGE_PROVIDER
+    )
 
 
 def make_blob_store(config: StorageConfig) -> BlobStore:

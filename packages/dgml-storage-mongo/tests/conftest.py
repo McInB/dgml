@@ -33,6 +33,8 @@ from typing import Any
 import pytest
 from dgml_core.storage import Workspace
 from dgml_core.storage_service import StorageConfig
+from dgml_core.workspaces_resolve import default_workspaces_store
+from dgml_core.workspaces_store import WORKSPACES_ENV_VAR
 from dgml_storage_mongo import MongoDocStore, MongoGridFSBlobStore
 
 MONGO_URI_ENV = "DGML_TEST_MONGO_URI"
@@ -46,9 +48,13 @@ BOTH_GRIDFS_PROVIDER = "dgml_storage_mongo:MongoGridFSStore"
 def _isolate_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
-    """Sandbox the user-level config + per-machine registry into a temp dir."""
+    """Sandbox the user-level config and the machine's store of workspaces into temp
+    dirs, so neither the developer's real config nor their ``~/dgml-workspaces`` is
+    touched. The memoized store is cleared for the same reason as in the other suites."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))
+    monkeypatch.setenv(WORKSPACES_ENV_VAR, str(tmp_path_factory.mktemp("dgml-workspaces")))
     monkeypatch.delenv("DGML_HOME", raising=False)
+    default_workspaces_store.cache_clear()
 
 
 @pytest.fixture(autouse=True)

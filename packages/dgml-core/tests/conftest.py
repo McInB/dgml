@@ -22,6 +22,8 @@ import pytest
 from dgml_core import DEFAULT_STORAGE_PROVIDER, BlobStore, LocalStore, StorageConfig
 from dgml_core.pages import GS_BINARIES
 from dgml_core.storage import Workspace
+from dgml_core.workspaces_resolve import default_workspaces_store
+from dgml_core.workspaces_store import WORKSPACES_ENV_VAR
 
 PAGE_WIDTH_PTS = 612
 PAGE_HEIGHT_PTS = 792
@@ -274,7 +276,17 @@ def aws_config(workspace: Workspace) -> Workspace:
 
 @pytest.fixture(autouse=True)
 def _isolate_user_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the user-level config (``~/.config/dgml``) at an empty tmp dir so the
-    merged-config loader never reads the developer's real config; only each
-    test's ``<workspace>/config.toml`` is seen."""
+    """Point the user-level config (``~/.config/dgml``) and the machine's store of
+    workspaces (``~/dgml-workspaces``) at empty tmp dirs.
+
+    The config half keeps the merged-config loader off the developer's real config, so
+    only each test's own ``config.toml`` is seen. The workspaces half matters more: its
+    default is a **real** directory in ``$HOME`` that holds workspace data, so without
+    this a single test that resolves the default store would create workspaces in it.
+
+    ``cache_clear()`` is required because :func:`default_workspaces_store` is memoized
+    for the process — the first test to call it would otherwise pin its own tmp dir for
+    every test after."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-home"))
+    monkeypatch.setenv(WORKSPACES_ENV_VAR, str(tmp_path / "dgml-workspaces"))
+    default_workspaces_store.cache_clear()
