@@ -114,16 +114,14 @@ class Workspace:
         recorded = Path(entry.config_path)
         return recorded if recorded.exists() else None
 
-    def local_path(self, key: str) -> Path:
-        """The on-disk location a store key would occupy under this root.
-
-        The single filesystem escape hatch: pair it with a
-        :mod:`dgml_core.layout` key builder so a real path and the key naming the
-        same data cannot drift apart. Domain code addresses data by **key**
-        through ``store`` and does not need this; it exists for the few things
-        that genuinely require a path (reading the user's source file, test
-        fixtures that build a tree directly). Meaningful only for a local store."""
-        return self.root / key.rstrip("/")
+    # There is deliberately no key→path or path→key helper here any more.
+    # ``local_path`` and ``blob_key`` were the "filesystem escape hatch", and by the
+    # time every caller went through ``blobs``/``docs`` they had no production callers
+    # at all — only tests reaching into ``LocalStore``'s tree. Keeping them would have
+    # made ``root`` look load-bearing when it is not, and each is one edit away from
+    # being wrong for a workspace whose data is not on this machine. A caller with a
+    # genuine need for a real path uses ``blobs.materialize`` / ``blobs.working_dir``,
+    # which work on every backend. See issue #129.
 
     @property
     def docsets_dir(self) -> Path:
@@ -140,22 +138,12 @@ class Workspace:
         safe to delete."""
         return self.root / layout.CACHE_DIR / layout.EMBEDDINGS_DIR
 
-    def blob_key(self, path: Path) -> str:
-        """The store key naming ``path``, the inverse of :meth:`local_path`.
-
-        Pure path arithmetic (relative to this root, as POSIX) — it holds no
-        knowledge of the layout itself, so it stays correct as
-        :mod:`dgml_core.layout` evolves. For the filesystem-bound cases that
-        have a real path in hand and need the key for it."""
-        return path.resolve().relative_to(self.root).as_posix()
-
     # Naming workspace artifacts is :mod:`dgml_core.layout`'s job, not this
     # class's: a key is root-relative, so it does not need a workspace to exist.
     # Callers build one with a ``layout`` builder and hand it straight to
-    # ``store`` (``list_blobs`` / ``get_blob`` / …); the filesystem-bound few
-    # compose it with ``local_path``. Prefer the ``layout.*_prefix`` spelling for
-    # anything prefix-matched — the trailing slash is what keeps ``files/ab``
-    # from also selecting ``files/abc``.
+    # ``store`` (``list_blobs`` / ``get_blob`` / …). Prefer the ``layout.*_prefix``
+    # spelling for anything prefix-matched — the trailing slash is what keeps
+    # ``files/ab`` from also selecting ``files/abc``.
 
     def read_page_text(self, file_id: str, page: int) -> dict[str, Any] | None:
         """The per-page word-box JSON for ``page`` of ``file_id`` (a blob),
@@ -187,17 +175,11 @@ class Workspace:
         never through :attr:`docs`, because it names the store."""
         return self.config_override or self.root / layout.CONFIG_FILE
 
-    @property
-    def usage_log_path(self) -> Path:
-        return self.root / layout.USAGE_FILE
-
-    @property
-    def meta_path(self) -> Path:
-        """The workspace identity file (``workspace.json``): its ``name`` and
-        ``organization``. Written by ``dgml workspace create``. The
-        organization is what docset namespace URIs embed
-        (``http://dgml.io/<organization>/<DocSetSlug>``)."""
-        return self.root / layout.WORKSPACE_FILE
+    # ``usage_log_path`` and ``meta_path`` are gone too. The usage log is appended
+    # through ``docs.append_doc(Collection.USAGE, …)`` and ``workspace.json`` is read
+    # and written through ``docs`` (see :meth:`read_meta` / :meth:`write_meta`), so
+    # both were paths to files that only exist when the backend happens to be local
+    # disk. Neither had a production caller.
 
     @functools.cached_property
     def store_configs(self) -> tuple[StorageConfig, StorageConfig]:

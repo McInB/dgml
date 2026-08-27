@@ -274,6 +274,23 @@ def aws_config(workspace: Workspace) -> Workspace:
     return workspace
 
 
+def local_tree_path(workspace: Workspace, key: str) -> Path:
+    """The on-disk path a store key occupies in a ``LocalStore``-backed workspace.
+
+    For the handful of tests that must produce content **no store API can write** — a
+    malformed manifest, a JSONL file truncated mid-append — and so have to reach into
+    the tree directly.
+
+    Deliberately a test helper rather than a ``Workspace`` method. ``Workspace`` used to
+    carry ``local_path``/``blob_key``/``meta_path``/``usage_log_path`` for this, which
+    made its ``root`` look load-bearing when no production code needed any of them: real
+    callers address data by key through ``blobs``/``docs``, and one that genuinely needs
+    a filesystem path uses ``blobs.materialize`` or ``blobs.working_dir``, which work on
+    every backend. Naming it here keeps the local-disk assumption where it belongs — in
+    the tests that are asserting on local disk on purpose."""
+    return workspace.root / key.rstrip("/")
+
+
 @pytest.fixture(autouse=True)
 def _isolate_user_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Point the user-level config (``~/.config/dgml``) and the machine's store of
