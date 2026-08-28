@@ -22,7 +22,7 @@ open elements, so a window boundary cannot leave anything dangling.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -410,3 +410,32 @@ def build_tree(blocks: list[Block], parent_map: Mapping[str, str] | None = None)
         container().children.append(Node(kind="p", block=block))
 
     return root
+
+
+def block_concept_labels(blocks: Iterable[Block]) -> list[str]:
+    """Multiset of concept names the labeling pass assigned across *blocks*.
+
+    Block/value/lim concepts, per-column cell concepts, and inline entity spans;
+    ``group_concept`` once per table (see below). Fed to
+    ``coverage.compute_label_propagation`` to check propagation into the DGML.
+    """
+    out: list[str] = []
+    prev_group = ""
+    prev_was_row = False
+    for b in blocks:
+        for c in (b.concept, b.value_concept, b.lim_concept):
+            if c:
+                out.append(c)
+        out.extend(c for c in b.cell_concepts if c)
+        for span in (*b.entities, *b.label_entities):
+            if span.concept:
+                out.append(span.concept)
+        for cell in b.cell_entities:
+            out.extend(span.concept for span in cell if span.concept)
+        # Every row carries group_concept but it renders once per table — count
+        # it once per contiguous run of rows, not per row.
+        is_row = b.structure == "row"
+        if b.group_concept and not (prev_was_row and b.group_concept == prev_group):
+            out.append(b.group_concept)
+        prev_group, prev_was_row = b.group_concept, is_row
+    return out

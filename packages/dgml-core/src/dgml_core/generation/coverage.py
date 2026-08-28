@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,41 @@ def _xml_words(xml_text: str) -> list[str]:
     except Exception:
         text = re.sub(r"<[^>]+>", " ", xml_text)
     return _tokenize(text)
+
+
+# DGML scaffolding namespaces; every other namespaced element is a concept tag.
+_INFRA_NS = frozenset(
+    {
+        "http://dgml.io/ns/dg#",
+        "http://www.w3.org/1999/xhtml",
+        "http://www.w3.org/2001/XMLSchema-instance",
+        "http://www.w3.org/XML/1998/namespace",
+    }
+)
+
+
+def _xml_concept_counts(xml_text: str) -> Counter[str]:
+    """Multiset of concept-tag localnames (namespaced but not ``_INFRA_NS``);
+    empty if the XML can't be parsed."""
+    try:
+        from lxml import etree
+
+        cleaned = _BARE_AMP_RE.sub("&amp;", xml_text)
+        try:
+            root = etree.fromstring(cleaned.encode())
+        except etree.XMLSyntaxError:
+            recover_parser = etree.XMLParser(recover=True, encoding="utf-8")
+            root = etree.fromstring(cleaned.encode(), parser=recover_parser)
+    except Exception:
+        return Counter()
+    counts: Counter[str] = Counter()
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue  # comments / processing instructions
+        qname = etree.QName(el)
+        if qname.namespace and qname.namespace not in _INFRA_NS:  # a concept tag
+            counts[qname.localname] += 1
+    return counts
 
 
 # ---------------------------------------------------------------------------
@@ -287,4 +323,38 @@ def coverage_summary_line(result: dict[str, Any]) -> str:
         f"unique {result['unique_lexicon_pct']}% | "
         f"ROUGE-1 {result['rouge1_pct']}% | "
         f"ROUGE-2 {result['rouge2_pct']}%"
+    )
+
+
+def compute_label_propagation(
+    assigned_labels: Iterable[str], xml_text: str, *, source_name: str
+) -> dict[str, Any]:
+    """How many assigned concept labels survive into the rendered DGML.
+
+    *assigned_labels* is the multiset from ``blocks.block_concept_labels``; a
+    label is exported when a concept tag of the same name appears in *xml_text*.
+    ``labels_missing`` is the per-concept shortfall — a debug signal, not an
+    invariant.
+    """
+    assigned: Counter[str] = Counter(c for c in assigned_labels if c)
+    in_xml = _xml_concept_counts(xml_text)
+    exported = sum(min(n, in_xml.get(concept, 0)) for concept, n in assigned.items())
+    missing = {
+        concept: n - in_xml.get(concept, 0)
+        for concept, n in assigned.items()
+        if n > in_xml.get(concept, 0)
+    }
+    return {
+        "source": source_name,
+        "labels_total": sum(assigned.values()),
+        "labels_exported": exported,
+        "labels_missing": dict(sorted(missing.items(), key=lambda kv: -kv[1])),
+    }
+
+
+def label_propagation_summary_line(result: dict[str, Any]) -> str:
+    """One-line debug summary, e.g. ``doc: 180 labels exported over 200 total``."""
+    return (
+        f"{result['source']}: "
+        f"{result['labels_exported']} labels exported over {result['labels_total']} total"
     )
