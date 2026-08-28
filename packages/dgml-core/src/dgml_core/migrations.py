@@ -100,7 +100,7 @@ def _legacy_str(entry: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def migrate_workspace_config(ws: Workspace) -> int:
+def migrate_workspace_config(ws: Workspace, *, assume_local_when_unbound: bool = False) -> int:
     """Move a legacy per-machine storage binding into the workspace's own ``config.toml``.
 
     **Store-free, and deliberately not a** :data:`_MIGRATIONS` **entry.** Migration
@@ -121,12 +121,23 @@ def migrate_workspace_config(ws: Workspace) -> int:
     there is nothing to move — but it is still sealed, so the drift guard covers
     workspaces that predate it rather than leaving them permanently unguarded.
 
+    ``assume_local_when_unbound`` covers the workspace with **no** recorded binding
+    anywhere — old enough that the index never carried one, or one whose ``config.toml``
+    was deleted. Those two cases are indistinguishable, and in the second the binding is
+    unrecoverable regardless, so refusing preserves nothing. It still defaults to
+    ``False``: on the per-command path, inventing a local binding would seal the
+    workspace to local disk and write the next file there, starting a second corpus while
+    reporting success. ``dgml workspace import`` passes ``True``, because a caller
+    explicitly adopting a directory needs an outcome they can act on — and it reports the
+    assumption rather than making it quietly.
+
     Idempotent, and safe to interrupt: both writes replace whole tables, so a crash
     between them leaves a workspace that is re-migrated byte-identically. Returns 1
     when it wrote, 0 otherwise."""
     from . import registry, workspace_config
     from .errors import WorkspaceMigrationFailed
     from .storage_resolve import (
+        DEFAULT_STORAGE_PROVIDER,
         DEFAULT_STORAGE_SERVICE,
         resolve_store_configs,
         storage_fingerprint_pair,
@@ -142,27 +153,50 @@ def migrate_workspace_config(ws: Workspace) -> int:
     if not isinstance(service, str) or not service:
         service = DEFAULT_STORAGE_SERVICE
 
+    assumed_local = False
     if table is None and not ws.config_present:
-        # Nothing to migrate *and* nothing to migrate into. Creating a config here
-        # would be a guess — and the wrong one for the case that matters: a workspace
-        # whose config was deleted would be silently re-sealed onto the local default
-        # while its data sits on the remote backend the deleted file named. Leave it
-        # absent so the caller reports it as missing and recoverable.
-        return 0
+        # Nothing recorded anywhere: a workspace old enough that the index never carried
+        # a binding, or one whose config.toml was deleted. The two are indistinguishable
+        # from here, and in the second case the binding is unrecoverable either way —
+        # nothing on this machine remembers which backend that file named.
+        if not assume_local_when_unbound:
+            # The per-command path takes the cautious branch. Inventing a binding on an
+            # ordinary `file add` would seal the workspace to local disk and write the
+            # file there, so a workspace whose config was deleted would start a second,
+            # split corpus while reporting success. Leaving it absent makes the caller
+            # report a missing config, which is the truth.
+            return 0
+        # `workspace import` takes the other branch, because the caller is explicitly
+        # adopting this directory and a refusal would leave them nothing to act on. Local
+        # disk is the only binding that could have existed for a workspace predating the
+        # storage layer, and the assumption is reported rather than made quietly.
+        table = {
+            "blobs": {"provider": DEFAULT_STORAGE_PROVIDER},
+            "docs": {"provider": DEFAULT_STORAGE_PROVIDER},
+        }
+        assumed_local = True
 
     try:
         if table is not None:
+            assumed_banner = (
+                "# Written by dgml on import. This workspace recorded no storage binding\n"
+                "# anywhere — it predates the binding being recorded, or its config.toml\n"
+                "# was lost — so local disk was assumed, the only backend it could have\n"
+                "# used at the time. If its data is actually on a remote backend, change\n"
+                "# this table and run `dgml workspace reseal`.\n"
+            )
+            migrated_banner = (
+                "# Migrated by dgml from this machine's workspace index — it records the\n"
+                "# backend this workspace's data is already on. If you had edited this\n"
+                "# table before upgrading, that edit was never in effect (the old index\n"
+                "# pinned the workspace to the snapshot above) and is not preserved here.\n"
+                "# To move the data, change this table and run `dgml workspace reseal`.\n"
+            )
             workspace_config.write_storage_table(
                 ws,
                 service,
                 table,
-                banner=(
-                    "# Migrated by dgml from this machine's workspace index — it records the\n"
-                    "# backend this workspace's data is already on. If you had edited this\n"
-                    "# table before upgrading, that edit was never in effect (the old index\n"
-                    "# pinned the workspace to the snapshot above) and is not preserved here.\n"
-                    "# To move the data, change this table and run `dgml workspace reseal`.\n"
-                ),
+                banner=assumed_banner if assumed_local else migrated_banner,
             )
         # Resolve directly rather than through ``ws.store_configs``: the table was just
         # written, and the cached property must not memoize a pre-write pair.

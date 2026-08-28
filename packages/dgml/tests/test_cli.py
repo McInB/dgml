@@ -5195,15 +5195,19 @@ def test_import_reports_a_bad_row_and_keeps_going(
 def test_import_refuses_a_directory_with_no_config(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The config names the storage backend, so there is nothing to import without it —
-    and guessing one would silently adopt the workspace onto local disk."""
+    """A directory with the right shape is not a workspace. Import can reconstruct a
+    missing config — assuming local disk when nothing recorded a binding — but it cannot
+    invent an *identity*: with no `workspace.json` and no legacy row there is nothing to
+    import this as, and minting an id would adopt an arbitrary directory as a workspace."""
     bare = tmp_path / "bare"
     (bare / "docsets").mkdir(parents=True)
     (bare / "files").mkdir()
 
     assert main(["workspace", "import", str(bare)]) == 2
     reason = _read_stdout(capsys)["failed"][0]["reason"]
-    assert "config" in reason
+    assert "no workspace identity" in reason
+    assert "workspace.json" in reason
+    assert "dgml workspace create" in reason  # names the way forward
 
 
 def test_a_workspaces_table_in_a_workspace_config_warns(
@@ -5464,3 +5468,131 @@ def test_status_reports_where_the_config_is(
     assert status["config_location"] == status["workspace_config_path"]
     # It is genuinely the config, not merely a path that exists.
     assert "[workspace]" in Path(status["workspace_config_path"]).read_text(encoding="utf-8")
+
+
+# ----------------------------------------------- importing a workspace with no config
+
+
+def _legacy_workspace(
+    root: Path, *, with_storage_snapshot: bool, workspace_id: str | None = None
+) -> str:
+    """A workspace as an older dgml left it: initialized, no `config.toml`, its binding
+    (or not) recorded only in the per-machine index. Returns the id it was given.
+
+    The id is **minted**, not written as a literal: a hand-typed id is easy to get subtly
+    wrong (16 characters from [a-z2-7] exactly), and one character off silently produces a
+    workspace nothing can address — which is the very failure the malformed-id test below
+    covers. Pass ``workspace_id`` only to construct that bad case deliberately."""
+    from dgml_core import registry
+    from dgml_core.storage import write_json_atomic
+    from dgml_core.workspace_id import new_workspace_id
+
+    workspace_id = workspace_id or new_workspace_id()
+
+    ws = Workspace(root=root)
+    ws.init()
+    ws.write_meta(name="Legacy", organization="Acme", workspace_id=workspace_id)
+    ws.config_path.unlink(missing_ok=True)
+
+    row: dict[str, Any] = {
+        "name": "Legacy",
+        "organization": "Acme",
+        "root": str(root),
+        "created_at": "2026-01-01T00:00:00Z",
+        "schema_version": 1,
+    }
+    if with_storage_snapshot:
+        row["storage"] = {
+            "blobs": {"provider": _LOCAL},
+            "docs": {"provider": _LOCAL},
+        }
+        row["storage_service"] = "default"
+    path = registry.registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(path, {workspace_id: row})
+    return workspace_id
+
+
+def test_import_reconstructs_a_config_from_the_legacy_snapshot(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The era just before `config.toml` was required kept the binding in the index, so
+    import can put back exactly the backend the workspace is already on."""
+    root = tmp_path / "legacy"
+    wid = _legacy_workspace(root, with_storage_snapshot=True)
+
+    assert main(["workspace", "import"]) == 0
+    (imported,) = _read_stdout(capsys)["imported"]
+    assert imported["workspace_id"] == wid
+    assert imported["assumed_local_storage"] is False
+    assert "Migrated by dgml" in (root / "config.toml").read_text(encoding="utf-8")
+
+
+def test_import_assumes_local_when_nothing_recorded_a_binding(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No config and no snapshot: either the workspace predates the binding being
+    recorded, or its config was deleted — indistinguishable, and in the second case the
+    binding is unrecoverable anyway, so refusing preserves nothing. Local disk was the
+    only backend such a workspace could have used.
+
+    The assumption is reported, in the payload and on stderr, because only the caller can
+    confirm where the data actually is."""
+    root = tmp_path / "ancient"
+    wid = _legacy_workspace(root, with_storage_snapshot=False)
+
+    assert main(["workspace", "import"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    (imported,) = payload["imported"]
+    assert imported["assumed_local_storage"] is True
+    assert "local disk was assumed" in captured.err
+    assert "reseal" in captured.err
+    config = (root / "config.toml").read_text(encoding="utf-8")
+    assert "local disk was assumed" in config  # the banner says so in the file too
+    assert _LOCAL in config
+
+    # And it is genuinely usable afterwards, by id, from anywhere.
+    assert main(["--workspace", wid, "status"]) == 0
+    assert _read_stdout(capsys)["organization"] == "Acme"
+
+
+def test_a_plain_command_never_invents_a_binding(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`import` may assume local disk; the per-command path must not. Inventing one on an
+    ordinary `file add` would seal the workspace to local disk and write the file there,
+    so a workspace whose config was deleted would quietly start a second corpus while
+    reporting success."""
+    root = tmp_path / "ancient"
+    _legacy_workspace(root, with_storage_snapshot=False)
+
+    assert main(_ws_args(root) + ["status"]) == 1
+    assert _read_stderr(capsys)["error"]["code"] == "STORAGE_CONFIG_INVALID"
+    assert not (root / "config.toml").exists()
+
+
+def test_import_refuses_a_malformed_workspace_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An id that is not `ws_` + 16 base32 chars addresses nothing: the local backend
+    filters its folders by that same test, so importing would write a config into a
+    directory `workspace list` never looks at and `--workspace <id>` never resolves.
+    Reporting "imported" for that would be a silent no-op dressed as success.
+
+    dgml's generator only ever emits well-formed ids, so this is hand-edited — hence a
+    refusal that names both places to correct, and leaves the legacy index in place."""
+    root = tmp_path / "handedited"
+    _legacy_workspace(root, workspace_id="ws_tooshort", with_storage_snapshot=True)  # 9 chars
+
+    assert main(["workspace", "import"]) == 2
+    payload = _read_stdout(capsys)
+    (failed,) = payload["failed"]
+    assert "not well-formed" in failed["reason"]
+    assert "workspace.json" in failed["reason"]
+    # The index survives, so the caller can inspect and fix it.
+    assert payload["source_removed"] is False
+    from dgml_core import registry
+
+    assert registry.registry_path().is_file()
+    assert payload["imported"] == []

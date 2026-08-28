@@ -79,7 +79,7 @@ from dgml_core.storage_resolve import (
     verify_storage_fingerprint,
 )
 from dgml_core.text_extraction import TextMode
-from dgml_core.workspace_id import mint_workspace_id
+from dgml_core.workspace_id import is_workspace_id, mint_workspace_id
 from dgml_core.workspaces_resolve import default_workspaces_store
 from dgml_core.workspaces_store import WorkspacesStore
 
@@ -1544,31 +1544,67 @@ def _import_one(
         return {**row, "status": "failed", "reason": "directory does not exist"}
 
     source = Workspace(root=root)
+    had_config = source.config_present
     if not dry_run:
         # Run the storage migration first: a pre-upgrade workspace kept its binding in
         # the legacy index row, so without this the config we are about to import would
-        # not name a backend at all.
-        migrate_workspace_config(source)
+        # not name a backend at all. `assume_local_when_unbound` covers the workspace that
+        # recorded a binding nowhere — see the flag's docstring for why import may assume
+        # and the per-command path may not.
+        migrate_workspace_config(source, assume_local_when_unbound=True)
         source = Workspace(root=root)
+    # Mirrors the migration's own condition (see `assume_local_when_unbound`): a binding
+    # was assumed only when *neither* a config nor a legacy snapshot recorded one. Having
+    # no config is not enough — the snapshot case reconstructs the real backend.
+    had_snapshot = isinstance((legacy_row or {}).get("storage"), dict)
+    row["assumed_local_storage"] = not had_config and not had_snapshot and not dry_run
 
     text = source.config_text
     if text is None:
         return {
             **row,
             "status": "failed",
-            "reason": (
-                "no config.toml, and the legacy index holds no storage snapshot to "
-                "reconstruct one from — the config names the storage backend and cannot "
-                "be guessed"
-            ),
+            "reason": "no config.toml, and no workspace layout to infer a local one from",
         }
 
     identity = wsconfig.read_identity(source)
     legacy_id = (legacy_row or {}).get("workspace_id")
     workspace_id = identity.workspace_id or (legacy_id if isinstance(legacy_id, str) else None)
     if not workspace_id:
-        return {**row, "status": "failed", "reason": "no workspace_id to import it under"}
+        # No identity anywhere: no `[workspace] workspace_id`, no `workspace.json`, and no
+        # legacy index row. That is not a workspace dgml ever created — a directory with
+        # `docsets/` and `files/` in it is not enough — so there is nothing to import it
+        # *as*, and minting an id here would adopt an arbitrary directory as a workspace.
+        return {
+            **row,
+            "status": "failed",
+            "reason": (
+                f"no workspace identity found — neither a [workspace] block, nor "
+                f"{root / layout.WORKSPACE_FILE}, nor a row in the legacy index records a "
+                f"workspace_id. If this directory is not a workspace dgml created, make "
+                f"one with 'dgml workspace create {root} --organization <org>'."
+            ),
+        }
     row["workspace_id"] = workspace_id
+
+    if not is_workspace_id(workspace_id):
+        # Refuse rather than adopt it. A malformed id addresses nothing: the local backend
+        # filters its folders by this same test, so the workspace would be written into a
+        # directory `workspace_list` never looks at and `--workspace <id>` never resolves —
+        # "imported" would mean "invisible". dgml's own generator only ever produces
+        # well-formed ids, so this is a hand-edited or corrupted value, and the caller is
+        # the one who can say what it should be.
+        return {
+            **row,
+            "status": "failed",
+            "reason": (
+                f"workspace_id {workspace_id!r} is not well-formed — it must be 'ws_' "
+                f"followed by exactly 16 characters from [a-z2-7], or nothing can address "
+                f"or list this workspace. Correct it in {source.config_location} (the "
+                f"[workspace] block) and in {root / layout.WORKSPACE_FILE}, then re-run. "
+                f"The legacy index is left in place, so nothing is lost meanwhile."
+            ),
+        }
 
     if store.exists(workspace_id):
         if on_conflict == "skip":
@@ -1632,7 +1668,13 @@ def _workspace_import(args: argparse.Namespace, fmt: str) -> int:
     source_label: str | None = None
 
     if args.path:
-        roots = [(p.expanduser().resolve(), None) for p in args.path]
+        # Look the legacy row up for a named path as well, not just for a sweep: for a
+        # pre-upgrade workspace that row is the only record of its id and its binding, and
+        # without it importing by path would fail on a workspace the sweep could take.
+        roots = [
+            (resolved, registry.raw_entry_by_root(resolved))
+            for resolved in (p.expanduser().resolve() for p in args.path)
+        ]
     else:
         source_label = str(registry.registry_path())
         for entry in registry.list_entries():
@@ -1660,6 +1702,18 @@ def _workspace_import(args: argparse.Namespace, fmt: str) -> int:
         "failed": [r for r in rows if r["status"] == "failed"],
         "dry_run": args.dry_run,
     }
+    assumed = [r for r in rows if r.get("assumed_local_storage") and r["status"] == "imported"]
+    if assumed:
+        # Loud, and not behind --verbose: this is an assumption about which backend holds
+        # the workspace's data, and only the caller can confirm it.
+        listed = "\n".join(f"  {r['root']}" for r in assumed)
+        sys.stderr.write(
+            f"Note: {len(assumed)} workspace(s) recorded no storage binding, so local disk "
+            f"was assumed:\n{listed}\n\n"
+            f"That is the only backend they could have used at the time. If any of them "
+            f"actually kept its data on a remote backend, edit [storage] in its config and "
+            f"run 'dgml workspace reseal <id>'.\n"
+        )
     if source_label is not None:
         payload["source"] = source_label
         # The legacy file is deliberately left in place, so import is re-runnable and a

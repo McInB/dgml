@@ -252,9 +252,26 @@ not moved is the same workspace on the same backend. `--move` relocates the dire
 under the store of workspaces instead, and is opt-in because relocating a corpus of page images is not
 something to do on the caller's behalf.
 
-For a workspace whose `config.toml` is missing, the legacy row's inline `storage`
-snapshot is lifted into one first; a directory with neither is refused rather than
-adopted onto local disk by guesswork.
+**A missing `config.toml` is reconstructed.** If the legacy row carries an inline
+`storage` snapshot, that backend is written back — it is a record of where the data
+already is. If nothing recorded a binding at all (a workspace older than the index
+carrying one, or one whose config was deleted) local disk is assumed, because that is the
+only backend such a workspace could have used, and because in the deleted-config case the
+real binding is unrecoverable anyway — refusing would preserve nothing. The assumption is
+reported as `assumed_local_storage` in the row, on stderr, and in a banner comment in the
+config itself; if the data was in fact remote, edit `[storage]` and run `workspace
+reseal`.
+
+Two things are still refused, because neither can be reconstructed:
+
+- **No workspace identity** — no `[workspace] workspace_id`, no `workspace.json`, and no
+  legacy row. A directory that merely has `docsets/` and `files/` in it is not a
+  workspace; minting an id would adopt an arbitrary directory as one.
+- **A malformed `workspace_id`** — anything other than `ws_` plus exactly 16 characters
+  from `[a-z2-7]`. Such an id addresses nothing: the local backend filters its folders by
+  that same test, so the workspace would be written where `workspace list` never looks and
+  `--workspace <id>` never resolves. dgml's generator only emits well-formed ids, so this
+  is a hand-edited value; the failure names both places to correct it.
 
 `--on-conflict` decides what happens when the store already holds that id: `skip`
 (default), `fail`, or `replace` the stored config. The legacy index is left in place, so
