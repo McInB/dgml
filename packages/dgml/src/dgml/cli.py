@@ -2974,7 +2974,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     )
     from dgml_core.generation import coverage as cov_mod
     from dgml_core.generation import links as links_mod
-    from dgml_core.generation.blocks import Block
+    from dgml_core.generation.blocks import Block, block_concept_labels
     from dgml_core.generation.links import apply_plan, plan_links
     from dgml_core.generation.pipeline import load_labeled_docs_from_cache
     from dgml_core.generation.rnc import write_docset_rnc
@@ -3315,8 +3315,17 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 # render and grounding just produced.
                 linked, applied = apply_plan(source, plan)
                 ws.blobs.put_blob(xml_key, linked.encode("utf-8"))
+                # `applied` is what the XML actually carries, so the reported
+                # count matches the document. What the plan asked for and did
+                # not get is diagnosed separately — chiefly links discarded
+                # because dg:itemprop/dg:href are attributes on the subject, so
+                # a second link on one subject overwrites the first.
                 links_added = len(applied)
-                _diag(f"[semlinks] {name}: {links_added} link(s){hit}")
+                losses = links_mod.plan_losses(source, plan)
+                folded = f", {losses.merged} merged" if losses.merged else ""
+                lost = f", {losses.displaced} displaced" if losses.displaced else ""
+                nested = f", {losses.nested} nested dropped" if losses.nested else ""
+                _diag(f"[semlinks] {name}: {links_added} link(s){folded}{lost}{nested}{hit}")
             except Exception as exc:  # a link-pass failure must not lose the DGML
                 link_errors[name] = short_error_message(exc)
                 _diag(f"[semlinks] {name}: skipped ({exc})")
@@ -3340,6 +3349,23 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         if compute_cov and pt_dir is not None:
             result = cov_mod.compute_coverage(xml, name, page_text_dir=pt_dir)
             _diag(cov_mod.coverage_summary_line(result))
+            # --debug: how many assigned labels reached the DGML (e.g. "180
+            # labels exported over 200 total"). Reloads labeled blocks from
+            # cache; best-effort, recorded under `label_propagation`.
+            if args.debug:
+                try:
+                    stem = Path(name).stem
+                    labeled = load_labeled_docs_from_cache(cache_dir, [stem]).get(stem)
+                    if labeled is not None:
+                        prop = cov_mod.compute_label_propagation(
+                            block_concept_labels(labeled), xml, source_name=name
+                        )
+                        result["label_propagation"] = {
+                            k: v for k, v in prop.items() if k != "source"
+                        }
+                        _diag(cov_mod.label_propagation_summary_line(prop))
+                except Exception as exc:  # debug-only diagnostic — never fatal
+                    _diag(f"[labels] {name}: propagation check skipped ({exc})")
             cov_by_name[name] = result
         # Each present only when that step failed, like grounding_error, which
         # appears only when grounded is False.
