@@ -10,30 +10,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The per-machine workspace registry.
+"""The **legacy** per-machine workspace index — read only, for importing.
 
-A workspace has a stable ``workspace_id`` (minted at ``dgml workspace create``,
-carried in ``workspace.json``). This module maintains a small JSON index —
-``~/.config/dgml/workspaces.json`` (sibling of the user ``config.toml``) — mapping
-each ``workspace_id`` to where that workspace lives, so it can be opened by id
-(``dgml --workspace <id>``) and listed (``dgml workspace list``).
+``~/.config/dgml/workspaces.json`` used to be how a machine knew which workspaces it
+had: a JSON object mapping each ``workspace_id`` to where that workspace was last
+seen. It is no longer written, and nothing resolves through it.
 
-The index is **per-machine** state, deliberately separate from the per-workspace
-``workspace.json`` (which travels with the directory): the same workspace opened on
-two machines has one id but two entries with different roots. It is machine-managed
-(JSON, like every other metadata file — ``workspace.json``, ``docset.json``), not
-hand-edited like ``config.toml``.
+What replaced it is :mod:`dgml_core.workspaces_store` — a pluggable store that holds
+the list of workspaces *and* each workspace's ``config.toml``. The difference that
+matters is authority: this file's rows were a second copy of facts that lived
+elsewhere, so they could disagree with the workspace they described and had to be
+rewritten on every open to stay current. A listing row now comes out of the
+workspace's own config, so there is nothing to keep in sync.
 
-**This file is a regenerable cache and nothing more.** It records where workspaces
-were last seen so they can be listed and opened by id; it says nothing about *how* a
-workspace stores its data. That binding lives in the workspace's own ``config.toml``
-(:mod:`dgml_core.workspace_config`), which is authoritative and travels with the
-workspace. Deleting this file loses only the ability to enumerate — every entry comes
-back as each workspace is next opened by path (:func:`ensure_registered`), with its
-``workspace_id`` intact.
-
-Because the entry carries no authority, it is also self-healing: opening a workspace
-that has moved corrects its recorded ``root`` in place.
+This module survives so ``dgml workspace import`` can read what an older dgml left
+behind, and so :func:`dgml_core.migrations.migrate_workspace_config` can still lift a
+pre-upgrade row's inline ``storage`` snapshot into the workspace's own config. Both
+are read-only. Nothing here writes the file, and once every workspace a machine cares
+about has been imported it can be deleted.
 """
 
 from __future__ import annotations
@@ -42,14 +36,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .storage import Workspace, read_json, user_config_path, write_json_atomic
+from .storage import read_json, user_config_path
 
-# Id minting lives in its own module (see :mod:`dgml_core.workspace_id`) because the
-# workspaces store and the migrations both need it without needing each other. The
-# redundant-alias spelling is an explicit re-export, for the callers that still reach
-# for these names here (and so ``mypy --strict`` accepts it).
-from .workspace_id import ID_PREFIX as ID_PREFIX
-from .workspace_id import is_workspace_id as is_workspace_id
+# Re-exported (redundant-alias spelling, so ``mypy --strict`` accepts it) for the
+# legacy tests that still reach for it here. Id minting itself lives in
+# :mod:`dgml_core.workspace_id`.
 from .workspace_id import new_workspace_id as new_workspace_id
 
 REGISTRY_FILE = "workspaces.json"
@@ -59,20 +50,6 @@ def registry_path() -> Path:
     """The registry file, next to the user ``config.toml`` (honors
     ``XDG_CONFIG_HOME``/``APPDATA``)."""
     return user_config_path().parent / REGISTRY_FILE
-
-
-def mint_workspace_id() -> str:
-    """A fresh workspace id, re-rolled if this machine's index already holds it.
-
-    80 bits from :func:`secrets` won't collide in practice; the re-roll is
-    belt-and-suspenders against two workspaces sharing an id and shadowing each other
-    at ``--workspace <id>``. **Best-effort only** — the index is a regenerable cache,
-    so it may not list every workspace on the machine, and never lists one from
-    another machine."""
-    wid = new_workspace_id()
-    while get(wid) is not None:
-        wid = new_workspace_id()
-    return wid
 
 
 @dataclass(frozen=True)
@@ -158,153 +135,26 @@ def read_registry() -> dict[str, RegistryEntry]:
     return {wid: RegistryEntry.from_dict(wid, entry) for wid, entry in _read_raw().items()}
 
 
-def register(entry: RegistryEntry) -> None:
-    """Insert or replace ``entry`` (idempotent upsert by id), atomically.
-
-    Whole-file read-modify-write; each write is atomic (write-temp-rename). Writes
-    happen only at ``workspace create``, at first-open indexing, and when a moved
-    workspace's root is corrected, so the (non-cross-process-atomic) RMW is
-    acceptable — an interleaved lost update self-heals on the next open, since this
-    is an idempotent upsert and the row it writes is a cache."""
-    data = _read_raw()
-    data[entry.workspace_id] = entry.to_dict()
-    write_json_atomic(registry_path(), data)
-
-
-def get(workspace_id: str) -> RegistryEntry | None:
-    entry = _read_raw().get(workspace_id)
-    return RegistryEntry.from_dict(workspace_id, entry) if isinstance(entry, dict) else None
-
-
-def get_by_root(root: Path) -> RegistryEntry | None:
-    """The entry whose local ``root`` is ``root`` (path addressing / open-by-path).
-
-    Deterministic on the off chance two ids share a root: lowest id wins. Reads the
-    index once rather than once per candidate — it is consulted on the config-recovery
-    path, where a workspace with many siblings would otherwise pay a file read each."""
-    target = root.resolve()
-    raw = _read_raw()
-    for wid in sorted(raw):
-        data = raw.get(wid)
-        if not isinstance(data, dict):
-            continue
-        entry = RegistryEntry.from_dict(wid, data)
-        if entry.root is not None and Path(entry.root).resolve() == target:
-            return entry
-    return None
-
-
 def list_entries() -> list[RegistryEntry]:
-    """All entries, sorted by id (stable output for ``dgml workspace list``)."""
+    """All rows, sorted by id (stable output for ``dgml workspace import``)."""
     reg = read_registry()
     return [reg[wid] for wid in sorted(reg)]
-
-
-def remove(workspace_id: str) -> bool:
-    """Drop ``workspace_id`` from the registry. Returns whether it was present."""
-    data = _read_raw()
-    if workspace_id not in data:
-        return False
-    del data[workspace_id]
-    write_json_atomic(registry_path(), data)
-    return True
 
 
 def raw_entry_by_root(root: Path) -> dict[str, Any] | None:
     """The **unparsed** row whose ``root`` is ``root``, or ``None``.
 
-    Exists for the one caller that needs fields :class:`RegistryEntry` deliberately
-    drops: :func:`dgml_core.migrations.migrate_workspace_config` reads a pre-upgrade
-    row's ``storage`` snapshot out of it. Everything else should use :func:`get_by_root`.
-    """
+    Exists for the callers that need fields :class:`RegistryEntry` deliberately drops:
+    :func:`dgml_core.migrations.migrate_workspace_config` reads a pre-upgrade row's
+    ``storage`` snapshot out of it, and ``dgml workspace import`` reads the same row to
+    decide what it is importing."""
+    raw = _read_raw()
     target = root.resolve()
-    for wid in sorted(_read_raw()):
-        data = _read_raw().get(wid)
+    for wid in sorted(raw):
+        data = raw.get(wid)
         if not isinstance(data, dict):
             continue
         entry_root = data.get("root")
         if isinstance(entry_root, str) and Path(entry_root).resolve() == target:
             return {**data, "workspace_id": wid}
     return None
-
-
-# ------------------------------------------------------- indexing a workspace
-
-
-def external_config_path(ws: Workspace) -> str | None:
-    """``ws``'s config path when it lives outside the workspace, else ``None``.
-
-    The default ``<root>/config.toml`` is derivable from ``root``, so recording it
-    would be noise — and would have to be kept in step with ``root`` on every move."""
-    return str(ws.config_path) if ws.config_override is not None else None
-
-
-def index_workspace(ws: Workspace, *, workspace_id: str, name: str, organization: str) -> None:
-    """Upsert ``ws``'s row, stamping ``created_at`` and the current schema version —
-    the one place a row is written.
-
-    Store-free: everything it records is either passed in or read from ``ws.root``, so
-    it is safe to call before a workspace's store has ever been built."""
-    from .errors import now_iso
-    from .migrations import WORKSPACE_SCHEMA_VERSION
-
-    register(
-        RegistryEntry(
-            workspace_id=workspace_id,
-            name=name,
-            organization=organization,
-            root=str(ws.root),
-            created_at=now_iso(),
-            schema_version=WORKSPACE_SCHEMA_VERSION,
-            config_path=external_config_path(ws),
-        )
-    )
-
-
-def ensure_registered(ws: Workspace) -> None:
-    """Index ``ws`` if it is missing, or correct its recorded location if it changed.
-
-    Called on every command, so the common path must not write: an entry whose ``root``
-    and ``config_path`` both already match is left alone, and a workspace with no id yet
-    (one is minted by the backfill migration on first open) is skipped entirely.
-
-    Correcting the location in place is safe *because the row carries no authority*.
-    Under the old registry an overwrite would have re-snapshotted the workspace's
-    storage, so a stale root could only be fixed by an explicit command; now the row is
-    a cache and where a workspace opens from is decided by its own ``config.toml``.
-
-    The ``config_path`` hint follows the same rule as ``root``: the location a workspace
-    was last opened at is the best guess for where to find it next. Recording it from an
-    ordinary open is harmless even when the config was a one-off, because it is only
-    ever consulted when the default is missing, and a config naming a different backend
-    is caught by the seal rather than opened silently.
-
-    Identity is read from that same ``config.toml`` when present, falling back to
-    ``workspace.json`` — which matters for a remote-backed workspace, where the
-    fallback is a network round trip on every command, and fails outright when the
-    backend is unreachable."""
-    from . import workspace_config
-
-    identity = workspace_config.read_identity(ws)
-    wid = identity.workspace_id or ws.workspace_id
-    if wid is None:
-        return
-    existing = get(wid)
-    if existing is not None and existing.root is not None:
-        unchanged = Path(existing.root) == ws.root and existing.config_path == (
-            external_config_path(ws)
-        )
-        if unchanged:
-            return
-        # Moved (or opened from a different config): keep the recorded identity, just
-        # re-point it.
-        index_workspace(
-            ws, workspace_id=wid, name=existing.name, organization=existing.organization
-        )
-        return
-    index_workspace(
-        ws,
-        workspace_id=wid,
-        name=identity.name or ws.display_name,
-        organization=identity.organization or ws.organization,
-    )

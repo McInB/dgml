@@ -30,6 +30,7 @@ from dgml_core.migrations import (
 )
 from dgml_core.run_clustering import DocPrediction
 from dgml_core.storage import Workspace
+from dgml_core.workspaces_resolve import default_workspaces_store
 
 from .conftest import (
     _write_blank_pdf,
@@ -235,59 +236,106 @@ def test_workspace_create_positional_path(
     assert not (tmp_path / "ignored" / "docsets").exists()
 
 
-def test_workspace_create_registers_and_opens_by_id(
+def test_create_without_a_path_is_listed_and_opens_by_id(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`create` indexes the workspace in the per-machine registry, and the minted
-    id can then be used anywhere a path can — `--workspace <id>` opens it."""
-    from dgml_core import registry
+    """Naming no path puts the workspace in this machine's store of workspaces, and the
+    minted id can then be used anywhere a path can."""
+    rc = main(["workspace", "create", "--organization", "Acme", "--name", "A"])
+    assert rc == 0
+    created = _read_stdout(capsys)
+    workspace_id = created["workspace_id"]
+    assert created["listed"] is True
+    # The default store keeps configs as ordinary files, so the payload names the file —
+    # it is hand-editable, and reporting it as absent would deny the caller something
+    # real. A backend that does *not* keep configs as files (Mongo) reports null here
+    # instead of inventing a path someone might try to restore.
+    store = default_workspaces_store()
+    config_file = store.config_file(workspace_id)
+    assert config_file is not None
+    assert created["workspace_config_path"] == str(config_file)
+    assert created["config_location"] == str(config_file)
 
+    assert store.exists(workspace_id)
+    assert Path(created["workspace"]) == store.workspace_root(workspace_id)
+
+    rc = main(["--workspace", workspace_id, "status"])
+    assert rc == 0
+    assert Path(_read_stdout(capsys)["workspace"]) == store.workspace_root(workspace_id)
+
+
+def test_create_with_a_path_is_detached_and_not_listed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Naming a path keeps today's behaviour exactly: the config is a file in that
+    directory, and the workspace is addressed by path rather than listed."""
     ws = tmp_path / "ws"
     rc = main(["workspace", "create", str(ws), "--organization", "Acme"])
     assert rc == 0
-    workspace_id = _read_stdout(capsys)["workspace_id"]
+    created = _read_stdout(capsys)
+    assert created["listed"] is False
+    assert created["workspace_config_path"] == str(ws.resolve() / "config.toml")
+    assert not default_workspaces_store().exists(created["workspace_id"])
 
-    # The registry now points that id at this root.
-    entry = registry.get(workspace_id)
-    assert entry is not None
-    assert entry.root == str(ws.resolve())
+    # It opens by path, as before.
+    assert main(_ws_args(ws) + ["status"]) == 0
 
-    # Open by id: a command run with --workspace <id> resolves to the same root.
-    rc = main(["--workspace", workspace_id, "status"])
-    assert rc == 0
-    assert Path(_read_stdout(capsys)["workspace"]) == ws.resolve()
+
+def test_an_unknown_id_is_an_error_not_a_new_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The id test is on shape, so an id-shaped argument the store does not hold is a
+    clear error. Under the old index-membership test it fell through to path
+    resolution and created a `ws_…` directory in the working directory."""
+    monkeypatch.chdir(tmp_path)
+    rc = main(["--workspace", "ws_abcdefghijklmnop", "status"])
+    assert rc != 0
+    assert _read_stderr(capsys)["error"]["code"] == "WORKSPACE_NOT_FOUND"
+    assert not (tmp_path / "ws_abcdefghijklmnop").exists()
 
 
 def test_workspace_list(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """`workspace list` reports every workspace registered on this machine."""
-    a = tmp_path / "a"
-    b = tmp_path / "b"
-    main(["workspace", "create", str(a), "--organization", "Acme", "--name", "A"])
+    """`workspace list` reports every workspace the store holds, without opening any of
+    their storage backends."""
+    main(["workspace", "create", "--organization", "Acme", "--name", "A"])
     id_a = _read_stdout(capsys)["workspace_id"]
-    main(["workspace", "create", str(b), "--organization", "Beta", "--name", "B"])
+    main(["workspace", "create", "--organization", "Beta", "--name", "B"])
     id_b = _read_stdout(capsys)["workspace_id"]
 
     rc = main(["workspace", "list"])
     assert rc == 0
-    rows = _read_stdout(capsys)["workspaces"]
-    by_id = {r["workspace_id"]: r for r in rows}
-    assert set(by_id) >= {id_a, id_b}
+    payload = _read_stdout(capsys)
+    by_id = {r["workspace_id"]: r for r in payload["workspaces"]}
+    assert set(by_id) == {id_a, id_b}
     assert by_id[id_a]["name"] == "A"
-    assert by_id[id_a]["root"] == str(a.resolve())
     assert by_id[id_b]["organization"] == "Beta"
+    assert by_id[id_a]["storage_service"] == "default"
+    assert by_id[id_a]["created_at"]
+    assert by_id[id_a]["root"] == str(default_workspaces_store().workspace_root(id_a))
+    assert payload["workspaces_store"]
 
 
-def test_open_backfills_id_and_auto_registers(
+def test_workspace_list_does_not_show_a_workspace_addressed_by_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A legacy workspace with no workspace_id gets one minted into workspace.json,
-    mirrored into its config.toml, and indexed on first open — no manual step, and
-    idempotent on a second open."""
-    from dgml_core import registry, workspace_config
+    """A detached workspace is not in the store, so it is not listed. That is the
+    honest answer — the store is where being listed is recorded, and there is no
+    per-machine index scanning directories any more."""
+    main(["workspace", "create", str(tmp_path / "ws"), "--organization", "Acme"])
+    detached_id = _read_stdout(capsys)["workspace_id"]
+    main(["workspace", "list"])
+    rows = _read_stdout(capsys)["workspaces"]
+    assert detached_id not in {r["workspace_id"] for r in rows}
 
-    # Simulate a pre-id workspace: initialized, meta without a workspace_id,
-    # stamped at an older schema version so the backfill migration runs. It has a
-    # config.toml (every workspace does) but no identity block yet.
+
+def test_open_backfills_a_missing_id(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A legacy workspace with no workspace_id gets one minted into workspace.json and
+    mirrored into its config on first open — no manual step, idempotent on a second."""
+    from dgml_core import workspace_config
+
+    # Simulate a pre-id workspace: initialized, meta without a workspace_id, stamped at
+    # an older schema version so the backfill migration runs. It has a config.toml
+    # (every workspace does) but no identity block yet.
     ws = Workspace(root=tmp_path / "legacy")
     ws.init()
     ws.config_path.write_text('[storage]\nprovider = "dgml_core.storage_local:LocalStore"\n')
@@ -295,67 +343,57 @@ def test_open_backfills_id_and_auto_registers(
     stamp_schema_version(ws, 0)
     assert ws.workspace_id is None
 
-    rc = main(_ws_args(ws.root) + ["status"])
-    assert rc == 0
+    assert main(_ws_args(ws.root) + ["status"]) == 0
 
     wid = ws.workspace_id
     assert wid is not None and wid.startswith("ws_")
-    entry = registry.get(wid)
-    assert entry is not None and entry.root == str(ws.root.resolve())
 
-    # The id is mirrored into config.toml so it is readable without the store.
-    assert workspace_config.read_identity(ws).workspace_id == wid
+    # The id is mirrored into config.toml so it is readable without the store. Read it
+    # through a fresh Workspace: config text is memoized per object, and this one was
+    # constructed before the command that wrote it (see Workspace._config_state).
+    assert workspace_config.read_identity(Workspace(root=ws.root)).workspace_id == wid
 
-    # Second open: id unchanged, no duplicate registration.
-    rc = main(_ws_args(ws.root) + ["status"])
-    assert rc == 0
+    # Second open: id unchanged.
+    assert main(_ws_args(ws.root) + ["status"]) == 0
     assert ws.workspace_id == wid
-    assert [e.workspace_id for e in registry.list_entries()].count(wid) == 1
 
 
-def test_clone_auto_registers_existing_id(
+def test_a_cloned_directory_keeps_its_id_and_opens_by_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A workspace directory that already carries a workspace_id (as if cloned from
-    another machine) is indexed under that same id on first open here — the id
-    travels with the workspace, the index is per-machine."""
-    from dgml_core import registry
-
+    """A workspace directory carrying a workspace_id (as if cloned from another
+    machine) opens by path and keeps that id. It is not silently added to this
+    machine's store: the id travels with the directory, and what a machine *lists* is
+    now a deliberate choice rather than a side effect of opening something."""
     ws = Workspace(root=tmp_path / "cloned")
     ws.init()
     ws.config_path.write_text('[storage]\nprovider = "dgml_core.storage_local:LocalStore"\n')
     wid = "ws_clonedaaaaaaaaaa"
     ws.write_meta(name="Cloned", organization="Acme", workspace_id=wid)
-    stamp_schema_version(ws)  # already current: no migration, only ensure_registered
-    assert registry.get(wid) is None  # not in this machine's registry yet
+    stamp_schema_version(ws)
 
-    rc = main(_ws_args(ws.root) + ["status"])
-    assert rc == 0
-    entry = registry.get(wid)
-    assert entry is not None and entry.root == str(ws.root.resolve())
+    assert main(_ws_args(ws.root) + ["status"]) == 0
+    assert ws.workspace_id == wid
+    assert not default_workspaces_store().exists(wid)
 
 
-def test_moved_workspace_root_is_corrected_on_open(
+def test_a_copied_workspace_directory_still_opens(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A moved workspace re-points its own index row on the next command, keeping its
-    id. This is why `workspace register` no longer exists: correcting the row is safe
-    now that it is a cache and cannot change which backend the workspace opens."""
-    from dgml_core import registry
-
+    """Copying a workspace directory elsewhere and opening it there works, with no row
+    anywhere needing to be corrected. Nothing records where a detached workspace is, so
+    there is nothing to go stale — which is why `workspace register` is gone."""
     src = tmp_path / "src"
     main(["workspace", "create", str(src), "--organization", "Acme"])
     wid = _read_stdout(capsys)["workspace_id"]
 
-    # Simulate a move: the whole directory travels, config.toml included — that file
-    # carries the storage binding, so a copy without it is not a workspace.
+    # The whole directory travels, config.toml included — that file carries the storage
+    # binding, so a copy without it is not a workspace.
     dest = tmp_path / "dest"
     shutil.copytree(src, dest)
 
     assert main(_ws_args(dest) + ["status"]) == 0
-    capsys.readouterr()
-    moved = registry.get(wid)
-    assert moved is not None and moved.root == str(dest.resolve())
+    assert Workspace(root=dest).workspace_id == wid
 
 
 # A named storage service pointing at the bundled local store — a real, working
@@ -476,7 +514,7 @@ def test_workspace_reseal_reports_both_fingerprints(
     assert payload["previous_fingerprint"] == before
     assert payload["storage_fingerprint"] != before
     assert payload["storage"]["blobs"]["provider"] == "some.other:Store"
-    assert payload["config_path"] == str(Workspace(root=ws).config_path)
+    assert payload["config_location"] == str(Workspace(root=ws).config_path)
 
 
 def test_workspace_reseal_check_reports_drift_without_writing(
@@ -528,22 +566,51 @@ def test_workspace_register_is_gone(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert "reseal" in _read_stderr(capsys)["error"]["message"]
 
 
-def test_workspace_list_omits_storage_service(
+def test_workspace_list_rows_are_derived_from_each_config(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    _write_ws_config(ws, {"storage": {"svcA": {"provider": _LOCAL}}})
-    main(["workspace", "create", str(ws), "--organization", "Acme", "--storage", "svcA"])
+    """Every field in a listing row is parsed out of that workspace's own config, so a
+    row can never disagree with the workspace it describes. That is the difference from
+    the old per-machine index, whose columns were a second copy nobody should trust —
+    `storage_service` can be reported here precisely *because* it is not stored here."""
+    seed = tmp_path / "seed.toml"
+    seed.write_text(f'[storage.svcA]\nprovider = "{_LOCAL}"\n', encoding="utf-8")
+    main(
+        [
+            "workspace",
+            "create",
+            "--organization",
+            "Acme",
+            "--storage",
+            "svcA",
+            "--from-config",
+            str(seed),
+        ]
+    )
     wid = _read_stdout(capsys)["workspace_id"]
 
     rc = main(["workspace", "list"])
     assert rc == 0
     rows = {r["workspace_id"]: r for r in _read_stdout(capsys)["workspaces"]}
-    # The index no longer records the binding — that lives in the workspace's own
-    # config.toml, and a second copy here would be one nobody should trust.
-    assert "storage_service" not in rows[wid]
-    assert set(rows[wid]) == {"workspace_id", "name", "organization", "root", "created_at"}
+    assert set(rows[wid]) == {
+        "workspace_id",
+        "name",
+        "organization",
+        "storage_service",
+        "root",
+        "created_at",
+    }
+    assert rows[wid]["storage_service"] == "svcA"
+
+    # Prove it is derived rather than stored: edit the config the store holds, and the
+    # listing follows without anything re-indexing it.
+    store = default_workspaces_store()
+    found = store.read_config(wid)
+    assert found is not None
+    store.write_config(wid, found[0].replace('name = "', 'name = "Renamed '))
+    main(["workspace", "list"])
+    rows = {r["workspace_id"]: r for r in _read_stdout(capsys)["workspaces"]}
+    assert rows[wid]["name"].startswith("Renamed ")
 
 
 def test_workspace_create_requires_organization_for_a_new_workspace(
@@ -4662,48 +4729,41 @@ def test_workspace_create_does_not_clobber_an_existing_binding(
     assert table is not None and table["blobs"]["prefix"] == "keep"
 
 
-def test_workspace_create_adopts_an_external_config(
+def test_create_from_config_copies_the_seed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """--workspace-config adopts an already-authored config: dgml appends its identity
-    block but writes no config.toml inside the workspace."""
+    """`--from-config` is a template, not an adopted file: its contents are copied into
+    the config the workspace owns, verbatim, and the source is then forgotten."""
     from dgml_core import workspace_config
 
-    external = tmp_path / "cfg" / "acme.toml"
-    external.parent.mkdir(parents=True)
-    external.write_text(f'[storage.default.blobs]\nprovider = "{_LOCAL}"\n')
+    seed = tmp_path / "cfg" / "acme.toml"
+    seed.parent.mkdir(parents=True)
+    seed.write_text(
+        f'# authored by hand\n[storage.default.blobs]\nprovider = "{_LOCAL}"\n',
+        encoding="utf-8",
+    )
 
     ws = tmp_path / "ws"
     rc = main(
-        [
-            "workspace",
-            "create",
-            str(ws),
-            "--organization",
-            "Acme",
-            "--workspace-config",
-            str(external),
-        ]
+        ["workspace", "create", str(ws), "--organization", "Acme", "--from-config", str(seed)]
     )
     assert rc == 0
     payload = _read_stdout(capsys)
-    assert payload["workspace_config_path"] == str(external)
-    assert not (ws / "config.toml").exists()
-    assert (
-        workspace_config.read_identity(Workspace(root=ws, config_override=external)).organization
-        == "Acme"
-    )
 
-    # The index records where that config lives, so the workspace opens by path *and*
-    # by id without repeating the flag.
+    # The workspace owns its config now — it is not pointing at the seed.
+    own = ws / "config.toml"
+    assert payload["workspace_config_path"] == str(own)
+    assert own.is_file()
+    assert "# authored by hand" in own.read_text(encoding="utf-8")
+    assert workspace_config.read_identity(Workspace(root=ws)).organization == "Acme"
+
+    # The seed is not tracked: deleting it changes nothing, where an *adopted* config
+    # would have taken the workspace with it.
+    seed.unlink()
     assert main(_ws_args(ws) + ["status"]) == 0
-    capsys.readouterr()
-    assert main(["--workspace", payload["workspace_id"], "status"]) == 0
 
 
-def test_workspace_create_external_config_must_exist(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_create_from_config_must_exist(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(
         [
             "workspace",
@@ -4711,7 +4771,7 @@ def test_workspace_create_external_config_must_exist(
             str(tmp_path / "ws"),
             "--organization",
             "Acme",
-            "--workspace-config",
+            "--from-config",
             str(tmp_path / "missing.toml"),
         ]
     )
@@ -4719,88 +4779,60 @@ def test_workspace_create_external_config_must_exist(
     assert _read_stderr(capsys)["error"]["code"] == "INVALID_ARGUMENT"
 
 
-def test_workspace_config_flag_parses_in_both_positions(
+def test_create_from_config_refuses_a_workspaces_table(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Global flags parse before *and* after the subcommand; --workspace-config is
-    declared alongside --workspace so it inherits that."""
-    external = tmp_path / "cfg" / "acme.toml"
-    external.parent.mkdir(parents=True)
-    external.write_text(f'[storage.default.blobs]\nprovider = "{_LOCAL}"\n')
-    ws = tmp_path / "ws"
-    main(
+    """`[workspaces]` selects the machine's store of workspaces and is read only from
+    the user config, so it would be silently inert in a seed. A config that looks like it
+    redirects where workspaces are listed but does not is worse than an error."""
+    seed = tmp_path / "seed.toml"
+    seed.write_text('[workspaces]\nprovider = "x:Y"\n', encoding="utf-8")
+    rc = main(
         [
             "workspace",
             "create",
-            str(ws),
+            str(tmp_path / "ws"),
             "--organization",
             "Acme",
-            "--workspace-config",
-            str(external),
+            "--from-config",
+            str(seed),
         ]
     )
-    capsys.readouterr()
+    assert rc == 1
+    error = _read_stderr(capsys)["error"]
+    assert error["code"] == "INVALID_ARGUMENT"
+    assert "[workspaces]" in error["message"]
 
-    assert main(["--workspace", str(ws), "--workspace-config", str(external), "status"]) == 0
-    capsys.readouterr()
-    assert main(["status", "--workspace", str(ws), "--workspace-config", str(external)]) == 0
 
-
-def test_dgml_config_env_var_is_the_fallback(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--workspace-config", "/tmp/x.toml", "status"],
+        ["status", "--workspace-config", "/tmp/x.toml"],
+    ],
+)
+def test_workspace_config_flag_is_retired(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Without it, a workspace whose config lives elsewhere needs the flag on every
-    invocation — hostile to scripts and agents, which is why $DGML_HOME exists too.
-
-    Tested against a workspace the index cannot help with: its config was moved after
-    creation and the index dropped, so $DGML_CONFIG is the only thing that can find it.
-    """
-    from dgml_core import registry
-
-    ws = tmp_path / "ws"
-    main(["workspace", "create", str(ws), "--organization", "Acme"])
-    capsys.readouterr()
-
-    external = tmp_path / "cfg" / "acme.toml"
-    external.parent.mkdir(parents=True)
-    external.write_text((ws / "config.toml").read_text())
-    (ws / "config.toml").unlink()
-    registry.registry_path().unlink()
-
-    assert main(_ws_args(ws) + ["status"]) == 1
-    assert _read_stderr(capsys)["error"]["code"] == "STORAGE_CONFIG_INVALID"
-
-    monkeypatch.setenv("DGML_CONFIG", str(external))
-    assert main(_ws_args(ws) + ["status"]) == 0
+    """Still declared, in both positions, so an existing caller gets the JSON error
+    envelope naming the replacement rather than an argparse usage dump."""
+    assert main(argv) == 1
+    error = _read_stderr(capsys)["error"]
+    assert error["code"] == "INVALID_ARGUMENT"
+    assert "--from-config" in error["message"]
 
 
-def test_dgml_config_env_var_beats_the_index_hint(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+def test_dgml_config_env_var_is_retired(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The hint is a last resort: an explicit env var (like an explicit flag) wins, so
-    a stale recorded path can never override what the caller asked for."""
-    hinted = tmp_path / "cfg" / "hinted.toml"
-    hinted.parent.mkdir(parents=True)
-    hinted.write_text(f'[storage.default.blobs]\nprovider = "{_LOCAL}"\n')
-    ws = tmp_path / "ws"
-    main(
-        [
-            "workspace",
-            "create",
-            str(ws),
-            "--organization",
-            "Acme",
-            "--workspace-config",
-            str(hinted),
-        ]
-    )
-    capsys.readouterr()
-
-    broken = tmp_path / "cfg" / "broken.toml"
-    broken.write_text("[storage\nnot valid = ")
-    monkeypatch.setenv("DGML_CONFIG", str(broken))
-    assert main(_ws_args(ws) + ["status"]) == 1
-    assert _read_stderr(capsys)["error"]["code"] == "CORRUPT_METADATA"
+    """It only ever worked as an address because the machine index remembered the
+    location and handed it back; with nothing recording that, the variable would have to
+    be set forever or the workspace would appear to have no config at all."""
+    monkeypatch.setenv("DGML_CONFIG", "/tmp/x.toml")
+    assert main(["status"]) == 1
+    error = _read_stderr(capsys)["error"]
+    assert error["code"] == "INVALID_ARGUMENT"
+    assert "--from-config" in error["message"]
 
 
 def test_cluster_config_flag_still_means_the_clustering_preset() -> None:
@@ -4818,40 +4850,50 @@ def test_cluster_config_flag_still_means_the_clustering_preset() -> None:
     assert isinstance(parser, argparse.ArgumentParser)
 
 
-def test_external_config_survives_deletion_with_a_clear_error(
+def test_a_deleted_workspace_config_names_the_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """When the recorded config is gone the error names *it*, not the
-    `<root>/config.toml` default the user never chose."""
-    external = tmp_path / "cfg" / "acme.toml"
-    external.parent.mkdir(parents=True)
-    external.write_text(f'[storage.default.blobs]\nprovider = "{_LOCAL}"\n')
+    """The config names the workspace's storage backend and cannot be reconstructed, so
+    losing it is a hard, specific error rather than a silent fall-through to local disk."""
     ws = tmp_path / "ws"
-    main(
-        [
-            "workspace",
-            "create",
-            str(ws),
-            "--organization",
-            "Acme",
-            "--workspace-config",
-            str(external),
-        ]
-    )
+    main(["workspace", "create", str(ws), "--organization", "Acme"])
     capsys.readouterr()
 
-    external.unlink()
+    (ws / "config.toml").unlink()
     assert main(_ws_args(ws) + ["status"]) == 1
     message = _read_stderr(capsys)["error"]["message"]
-    assert str(external) in message
+    assert str(ws / "config.toml") in message
     assert "STORAGE_CONFIG_INVALID" not in message  # the code is a sibling field
 
 
-def test_adopted_config_binds_to_the_named_service(
+def test_an_unlisted_id_names_the_store_it_was_looked_for_in(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`--workspace-config` and `--storage` are orthogonal: the first says *where* the
-    config is, the second says *which* `[storage.<name>]` table in it to bind to.
+    """A workspace dropped from the store is reported against the store, not against a
+    path that was never a file. Note this is caught during *resolution* — an id-shaped
+    argument the store does not hold cannot become a workspace — which is why the
+    equivalent branch of the missing-config message is defensive rather than a path a
+    user reaches."""
+    main(["workspace", "create", "--organization", "Acme"])
+    wid = _read_stdout(capsys)["workspace_id"]
+
+    # Unlisting leaves the workspace's docsets/ and files/ in place — `delete` drops a
+    # listing entry, not a corpus.
+    store = default_workspaces_store()
+    assert store.delete(wid) is True
+
+    assert main(["--workspace", wid, "status"]) == 1
+    error = _read_stderr(capsys)["error"]
+    assert error["code"] == "WORKSPACE_NOT_FOUND"
+    assert store.label() in error["message"]
+    assert wid in error["message"]
+
+
+def test_from_config_binds_to_the_named_service(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--from-config` and `--storage` are orthogonal: the first supplies a config to
+    start from, the second says which `[storage.<name>]` table in it to bind to.
 
     Regression: they were briefly mutually exclusive, so a config declaring only
     `[storage.acme]` bound to the undeclared `default` service and fell through to the
@@ -4860,9 +4902,9 @@ def test_adopted_config_binds_to_the_named_service(
     from dgml_core import workspace_config
     from dgml_core.storage_resolve import resolve_store_configs
 
-    external = tmp_path / "cfg" / "acme.toml"
-    external.parent.mkdir(parents=True)
-    external.write_text(f'[storage.acme.blobs]\nprovider = "{_LOCAL}"\nprefix = "acme"\n')
+    seed = tmp_path / "cfg" / "acme.toml"
+    seed.parent.mkdir(parents=True)
+    seed.write_text(f'[storage.acme.blobs]\nprovider = "{_LOCAL}"\nprefix = "acme"\n')
 
     ws = tmp_path / "ws"
     rc = main(
@@ -4872,8 +4914,8 @@ def test_adopted_config_binds_to_the_named_service(
             str(ws),
             "--organization",
             "Acme",
-            "--workspace-config",
-            str(external),
+            "--from-config",
+            str(seed),
             "--storage",
             "acme",
         ]
@@ -4881,7 +4923,7 @@ def test_adopted_config_binds_to_the_named_service(
     assert rc == 0
     assert _read_stdout(capsys)["storage_service"] == "acme"
 
-    workspace = Workspace(root=ws, config_override=external)
+    workspace = Workspace(root=ws)
     assert workspace_config.read_identity(workspace).storage_service == "acme"
     blob_cfg, _ = resolve_store_configs(workspace)
     assert blob_cfg.options["prefix"] == "acme"
@@ -4897,8 +4939,8 @@ def test_create_seals_the_service_it_actually_bound_to(
     very next command failed STORAGE_BACKEND_MISMATCH on a workspace that had just
     been created successfully.
     """
-    external = tmp_path / "acme.toml"
-    external.write_text(f'[storage.acme.blobs]\nprovider = "{_LOCAL}"\nprefix = "acme"\n')
+    seed = tmp_path / "acme.toml"
+    seed.write_text(f'[storage.acme.blobs]\nprovider = "{_LOCAL}"\nprefix = "acme"\n')
 
     ws = tmp_path / "ws"
     main(
@@ -4908,8 +4950,8 @@ def test_create_seals_the_service_it_actually_bound_to(
             str(ws),
             "--organization",
             "Acme",
-            "--workspace-config",
-            str(external),
+            "--from-config",
+            str(seed),
             "--storage",
             "acme",
         ]
@@ -4917,17 +4959,28 @@ def test_create_seals_the_service_it_actually_bound_to(
     capsys.readouterr()
 
     # The workspace must be usable immediately, with no reseal.
-    assert main(["--workspace", str(ws), "--workspace-config", str(external), "status"]) == 0
+    assert main(_ws_args(ws) + ["status"]) == 0
 
 
-def test_adopted_config_without_the_selected_service_errors(
+def test_create_seals_a_listed_workspace_it_can_open_immediately(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same ordering requirement for a workspace whose config lives in the store:
+    the binding has to be written there before the seal is computed, or the very next
+    command reports drift on a workspace that was just created."""
+    main(["workspace", "create", "--organization", "Acme"])
+    wid = _read_stdout(capsys)["workspace_id"]
+    assert main(["--workspace", wid, "status"]) == 0
+
+
+def test_from_config_without_the_selected_service_errors(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Omitting --storage for a config that names only `acme` must fail loudly rather
     than silently creating the workspace on local disk. The message names what the
     config does declare, since that is the flag value the caller needs."""
-    external = tmp_path / "acme.toml"
-    external.write_text(f'[storage.acme.blobs]\nprovider = "{_LOCAL}"\n')
+    seed = tmp_path / "acme.toml"
+    seed.write_text(f'[storage.acme.blobs]\nprovider = "{_LOCAL}"\n')
 
     rc = main(
         [
@@ -4936,8 +4989,8 @@ def test_adopted_config_without_the_selected_service_errors(
             str(tmp_path / "ws"),
             "--organization",
             "Acme",
-            "--workspace-config",
-            str(external),
+            "--from-config",
+            str(seed),
         ]
     )
     assert rc == 1
@@ -4958,8 +5011,6 @@ def test_create_is_idempotent_and_preserves_identity(
     config it changed the whole organization's workspace identity, including the
     `workspace` record in the remote doc store.
     """
-    from dgml_core import registry
-
     ws = tmp_path / "ws"
     main(["workspace", "create", str(ws), "--organization", "Acme", "--name", "Acme Contracts"])
     first = _read_stdout(capsys)
@@ -4970,52 +5021,304 @@ def test_create_is_idempotent_and_preserves_identity(
     assert second["workspace_id"] == first["workspace_id"]
     # --name omitted on the re-run must not rename the workspace after its directory.
     assert second["name"] == "Acme Contracts"
-    assert len(registry.list_entries()) == 1
 
 
-def test_create_reconnects_to_a_shared_config(
+def test_create_reuses_a_listed_workspaces_identity(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The multi-developer flow: a second machine is handed the org's saved config and
-    runs the same `create`. It must adopt the recorded identity rather than fork it."""
-    shared = tmp_path / "shared" / "acme.toml"
-    shared.parent.mkdir(parents=True)
-    shared.write_text(f'[storage.acme.blobs]\nprovider = "{_LOCAL}"\n')
+    """The multi-machine flow, which is what this whole mechanism is for: pointed at the
+    same store of workspaces, a second machine addresses the workspace by id and gets the
+    recorded identity rather than forking it.
 
-    first_root = tmp_path / "dev1"
-    main(
-        [
-            "workspace",
-            "create",
-            str(first_root),
-            "--organization",
-            "Acme",
-            "--name",
-            "Acme Contracts",
-            "--workspace-config",
-            str(shared),
-            "--storage",
-            "acme",
-        ]
-    )
+    This replaces the old "hand the next developer your config.toml file" flow. That
+    worked by *adopting* a shared file, which meant the identity of the org's workspace
+    lived in whatever copy of that file each machine happened to have."""
+    main(["workspace", "create", "--organization", "Acme", "--name", "Acme Contracts"])
     original = _read_stdout(capsys)
+    wid = original["workspace_id"]
 
-    # A different machine, a different local directory, the same saved config.
-    main(
-        [
-            "workspace",
-            "create",
-            str(tmp_path / "dev2"),
-            "--organization",
-            "Acme",
-            "--workspace-config",
-            str(shared),
-            "--storage",
-            "acme",
-        ]
-    )
+    # As a second machine would: same store, addressed by id, no --name and no config
+    # file passed between machines.
+    main(["--workspace", wid, "workspace", "create", "--organization", "Acme"])
     reconnected = _read_stdout(capsys)
 
-    assert reconnected["workspace_id"] == original["workspace_id"]
+    assert reconnected["workspace_id"] == wid
     assert reconnected["name"] == "Acme Contracts"
-    assert reconnected["storage_service"] == "acme"
+    assert reconnected["listed"] is True
+
+
+# --------------------------------------------------------- import / delete
+
+
+def _legacy_index(rows: dict[str, dict[str, object]]) -> Path:
+    """A legacy ``workspaces.json``, as an older dgml would have left it."""
+    from dgml_core import registry
+
+    path = registry.registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rows), encoding="utf-8")
+    return path
+
+
+def test_import_sweeps_the_legacy_index_without_moving_data(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The migration path off the per-machine index, and the reason it is a command
+    rather than automatic: adopting a machine's old workspaces is the owner's decision."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    main(["workspace", "create", str(a), "--organization", "Acme", "--name", "A"])
+    id_a = _read_stdout(capsys)["workspace_id"]
+    main(["workspace", "create", str(b), "--organization", "Beta", "--name", "B"])
+    id_b = _read_stdout(capsys)["workspace_id"]
+    _legacy_index({id_a: {"name": "A", "root": str(a)}, id_b: {"name": "B", "root": str(b)}})
+
+    assert main(["workspace", "import"]) == 0
+    payload = _read_stdout(capsys)
+    assert {r["workspace_id"] for r in payload["imported"]} == {id_a, id_b}
+    assert payload["failed"] == []
+    # The legacy file stays, so a half-finished sweep can simply be repeated.
+    assert payload["source_removed"] is False
+
+    # Both are listed now, and neither corpus moved.
+    main(["workspace", "list"])
+    assert {r["workspace_id"] for r in _read_stdout(capsys)["workspaces"]} == {id_a, id_b}
+    assert (a / "config.toml").is_file()
+    assert (b / "docsets").is_dir()
+
+    # ...and each opens by id, from the directory it was already in.
+    assert main(["--workspace", id_a, "status"]) == 0
+    assert Path(_read_stdout(capsys)["workspace"]) == a.resolve()
+
+
+def test_import_records_where_the_data_already_is_without_resealing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`workspace_path` pins the existing directory, and because it is excluded from the
+    storage fingerprint the workspace is usable immediately — no reseal, and no
+    STORAGE_BACKEND_MISMATCH on the very next command."""
+    from dgml_core import workspace_config
+
+    ws = tmp_path / "ws"
+    main(["workspace", "create", str(ws), "--organization", "Acme"])
+    created = _read_stdout(capsys)
+    wid, sealed = created["workspace_id"], created["storage_fingerprint"]
+
+    assert main(["workspace", "import", str(ws)]) == 0
+    row = _read_stdout(capsys)["imported"][0]
+    assert row["workspace_path_recorded"] is True
+    assert row["moved"] is False
+
+    imported = Workspace.resolve(wid)
+    assert imported.root == ws.resolve()
+    table = workspace_config.read_storage_table(imported, "default")
+    assert table is not None and table["workspace_path"] == str(ws.resolve())
+    # The seal is untouched: a workspace that has not moved is the same workspace on
+    # the same backend.
+    assert workspace_config.read_identity(imported).storage_fingerprint == sealed
+    assert main(["--workspace", wid, "status"]) == 0
+
+
+def test_import_move_relocates_into_the_store(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Opt-in, because relocating a corpus of page images is not something to do on the
+    caller's behalf."""
+    ws = tmp_path / "ws"
+    main(["workspace", "create", str(ws), "--organization", "Acme"])
+    wid = _read_stdout(capsys)["workspace_id"]
+
+    assert main(["workspace", "import", "--move", str(ws)]) == 0
+    assert _read_stdout(capsys)["imported"][0]["moved"] is True
+    assert not ws.exists()
+    assert Workspace.resolve(wid).root == default_workspaces_store().workspace_root(wid)
+    assert main(["--workspace", wid, "status"]) == 0
+
+
+def test_import_is_idempotent(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    ws = tmp_path / "ws"
+    main(["workspace", "create", str(ws), "--organization", "Acme"])
+    wid = _read_stdout(capsys)["workspace_id"]
+    main(["workspace", "import", str(ws)])
+    capsys.readouterr()
+
+    assert main(["workspace", "import", str(ws)]) == 0
+    payload = _read_stdout(capsys)
+    assert payload["imported"] == []
+    assert payload["skipped"][0]["workspace_id"] == wid
+
+
+def test_import_on_conflict_fail_stops(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    ws = tmp_path / "ws"
+    main(["workspace", "create", str(ws), "--organization", "Acme"])
+    capsys.readouterr()
+    main(["workspace", "import", str(ws)])
+    capsys.readouterr()
+
+    assert main(["workspace", "import", "--on-conflict", "fail", str(ws)]) == 1
+    assert _read_stderr(capsys)["error"]["code"] == "CONFLICT"
+
+
+def test_import_dry_run_writes_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    ws = tmp_path / "ws"
+    main(["workspace", "create", str(ws), "--organization", "Acme"])
+    wid = _read_stdout(capsys)["workspace_id"]
+
+    assert main(["workspace", "import", "--dry-run", str(ws)]) == 0
+    payload = _read_stdout(capsys)
+    assert payload["dry_run"] is True
+    assert payload["imported"][0]["status"] == "would-import"
+    assert not default_workspaces_store().exists(wid)
+
+
+def test_import_reports_a_bad_row_and_keeps_going(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One dead directory in an old index must not strand every other workspace in it."""
+    ws = tmp_path / "ws"
+    main(["workspace", "create", str(ws), "--organization", "Acme"])
+    wid = _read_stdout(capsys)["workspace_id"]
+    _legacy_index(
+        {
+            "ws_goneaaaaaaaaaaaa": {"name": "Gone", "root": str(tmp_path / "vanished")},
+            wid: {"name": "Live", "root": str(ws)},
+        }
+    )
+
+    assert main(["workspace", "import"]) == 2  # partial success
+    payload = _read_stdout(capsys)
+    assert [r["workspace_id"] for r in payload["imported"]] == [wid]
+    assert payload["failed"][0]["root"] == str(tmp_path / "vanished")
+    assert "does not exist" in payload["failed"][0]["reason"]
+
+
+def test_import_refuses_a_directory_with_no_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The config names the storage backend, so there is nothing to import without it —
+    and guessing one would silently adopt the workspace onto local disk."""
+    bare = tmp_path / "bare"
+    (bare / "docsets").mkdir(parents=True)
+    (bare / "files").mkdir()
+
+    assert main(["workspace", "import", str(bare)]) == 2
+    reason = _read_stdout(capsys)["failed"][0]["reason"]
+    assert "config" in reason
+
+
+def test_a_workspaces_table_in_a_workspace_config_warns(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`[workspaces]` selects the machine's store of workspaces and is read only from the
+    user config, so in a workspace's own config it does nothing. Warn rather than stay
+    silent: it *looks* like it redirects where workspaces are listed, and a user who put
+    it in the wrong file has no other way to find out it is inert."""
+    ws = tmp_path / "ws"
+    main(["workspace", "create", str(ws), "--organization", "Acme"])
+    capsys.readouterr()
+    with (ws / "config.toml").open("a", encoding="utf-8") as fh:
+        fh.write('\n[workspaces]\nprovider = "dgml_storage_mongo:MongoWorkspacesStore"\n')
+
+    assert main(_ws_args(ws) + ["status"]) == 0
+    captured = capsys.readouterr()
+    assert "[workspaces]" in captured.err
+    assert "ignored" in captured.err
+    # The advisory must not corrupt the JSON contract on stdout.
+    assert json.loads(captured.out)["organization"] == "Acme"
+
+
+def test_the_workspaces_table_warning_is_once_per_process(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Several commands read the config more than once; repeating the paragraph each
+    time is noise rather than emphasis."""
+    import dgml.cli as cli
+
+    ws = tmp_path / "ws"
+    main(["workspace", "create", str(ws), "--organization", "Acme"])
+    with (ws / "config.toml").open("a", encoding="utf-8") as fh:
+        fh.write('\n[workspaces]\nprovider = "x:Y"\n')
+
+    cli._WARNED_WORKSPACES_TABLE = False
+    main(_ws_args(ws) + ["status"])
+    first = capsys.readouterr().err
+    main(_ws_args(ws) + ["status"])
+    second = capsys.readouterr().err
+    assert "[workspaces]" in first
+    assert "[workspaces]" not in second
+
+
+def test_re_running_create_keeps_the_recorded_storage_service(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`create` is documented as safe to re-run, so it must not silently rebind where
+    the workspace's data goes.
+
+    Regression, found by driving the documented workflow against real backends: a
+    workspace created with `--storage acme` (S3 blobs + Mongo docs) and then re-created
+    without `--storage` was rebound to the local-disk `default` service **and re-sealed**,
+    so the next `file add` wrote to local disk while the existing corpus sat in S3. No
+    error, no drift warning — the re-seal made it look intentional.
+    """
+    from dgml_core import workspace_config
+
+    seed = tmp_path / "seed.toml"
+    seed.write_text(f'[storage.acme.blobs]\nprovider = "{_LOCAL}"\nprefix = "acme"\n')
+    ws = tmp_path / "ws"
+    main(
+        [
+            "workspace",
+            "create",
+            str(ws),
+            "--organization",
+            "Acme",
+            "--storage",
+            "acme",
+            "--from-config",
+            str(seed),
+        ]
+    )
+    sealed = _read_stdout(capsys)["storage_fingerprint"]
+
+    # The re-run the docs promise is safe: no --storage.
+    main(["workspace", "create", str(ws), "--organization", "Acme"])
+    second = _read_stdout(capsys)
+
+    assert second["storage_service"] == "acme"
+    assert second["storage_fingerprint"] == sealed
+    identity = workspace_config.read_identity(Workspace(root=ws))
+    assert identity.storage_service == "acme"
+
+
+def test_changing_the_storage_service_warns_loudly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Rebinding is allowed — it is how a workspace moves backend — but it changes where
+    data goes, and dgml does not move what is already written. That has to be said on
+    stderr, not left for the user to discover as missing files."""
+    seed = tmp_path / "seed.toml"
+    seed.write_text(f'[storage.acme.blobs]\nprovider = "{_LOCAL}"\n')
+    ws = tmp_path / "ws"
+    main(
+        [
+            "workspace",
+            "create",
+            str(ws),
+            "--organization",
+            "Acme",
+            "--storage",
+            "acme",
+            "--from-config",
+            str(seed),
+        ]
+    )
+    capsys.readouterr()
+
+    assert (
+        main(["workspace", "create", str(ws), "--organization", "Acme", "--storage", "default"])
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert "--storage 'default'" in captured.err
+    assert "'acme'" in captured.err
+    assert "does not move data" in captured.err
+    assert json.loads(captured.out)["storage_service"] == "default"

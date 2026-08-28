@@ -88,9 +88,23 @@ class LocalDirWorkspacesStore(WorkspacesStore):
         return self._root
 
     def workspace_root(self, workspace_id: str) -> Path:
-        """This workspace's folder — authoritative here, not the base class's guess:
-        for this backend the folder *is* where the workspace lives."""
-        return self._root / workspace_id
+        """Where this workspace's files actually are on this machine.
+
+        Its folder here, unless its config declares a ``workspace_path`` — which is what
+        ``dgml workspace import`` records for a workspace adopted from a directory
+        elsewhere, so that importing one never moves a corpus.
+
+        Answered here rather than by every caller because this backend already has the
+        config in hand: one file read, the same cost as :meth:`exists`. That keeps
+        ``workspace list`` a single pass and means a listing row reports where the data
+        *is*, not where it would have gone."""
+        from .workspace_config import local_workspace_path
+
+        default = self._root / workspace_id
+        found = self.read_config(workspace_id)
+        if found is None:
+            return default
+        return local_workspace_path(found[0]) or default
 
     def _config_path(self, workspace_id: str) -> Path:
         # Deliberately not routed through `workspace_root`: this backend's own reads and
@@ -101,6 +115,11 @@ class LocalDirWorkspacesStore(WorkspacesStore):
 
     def label(self) -> str:
         return str(self._root)
+
+    def config_file(self, workspace_id: str) -> Path | None:
+        """This backend keeps every config as an ordinary file, so it names it — that is
+        the whole point of a directory a user can look inside and edit."""
+        return self._config_path(workspace_id)
 
     # ---- the list of workspaces ----
 
@@ -119,12 +138,13 @@ class LocalDirWorkspacesStore(WorkspacesStore):
 
     def write_config(
         self, workspace_id: str, text: str, *, expected_revision: int | None = None
-    ) -> None:
+    ) -> int | None:
         # `expected_revision` is accepted and ignored: this backend issues none, so a
         # caller can pass back whatever `read_config` gave it without special-casing.
         path = self._config_path(workspace_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         write_text_atomic(path, text)
+        return None
 
     def list_configs(self) -> dict[str, str]:
         configs: dict[str, str] = {}

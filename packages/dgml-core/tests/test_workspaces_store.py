@@ -407,3 +407,70 @@ def test_a_workspaces_provider_is_not_a_storage_provider() -> None:
 def test_provider_failure_names_the_section_it_came_from() -> None:
     with pytest.raises(StorageProviderUnresolvable, match="workspaces provider"):
         import_provider_class("no-colon-here", WorkspacesStore, kind="workspaces")
+
+
+def test_workspace_root_honors_a_declared_workspace_path(tmp_path: Path) -> None:
+    """A workspace adopted from a directory elsewhere keeps its files there, recorded as
+    `workspace_path`. The store has to report *that* as its root.
+
+    Regression: it returned the standard folder instead, so `dgml workspace list` showed
+    an imported workspace's root as a directory its data was not in. Caught by driving
+    the real CLI, not by the contract tests — which is why this one exists.
+    """
+    root = tmp_path / "workspaces"
+    store = _local(root)
+    wid = new_workspace_id()
+    elsewhere = tmp_path / "corpus-on-another-disk"
+    store.write_config(
+        wid,
+        f'[workspace]\nstorage_service = "default"\n\n'
+        f'[storage.default]\nprovider = "dgml_core.storage_local:LocalStore"\n'
+        f'workspace_path = "{elsewhere}"\n',
+    )
+    assert store.workspace_root(wid) == elsewhere
+    # ...and with nothing declared it is still the folder in the store.
+    plain = new_workspace_id()
+    store.write_config(plain, CONFIG)
+    assert store.workspace_root(plain) == root / plain
+
+
+def test_workspace_root_falls_back_for_an_unknown_workspace(tmp_path: Path) -> None:
+    """Asked about a workspace it does not hold, the store still answers where one would
+    go — `workspace create` needs that to derive a root from a freshly minted id."""
+    store = _local(tmp_path / "workspaces")
+    wid = new_workspace_id()
+    assert store.workspace_root(wid) == tmp_path / "workspaces" / wid
+
+
+def test_the_local_backend_names_its_config_file(tmp_path: Path) -> None:
+    """It keeps configs as ordinary files, which is the whole point of a directory a
+    user can look inside — so it says so rather than inheriting the base "not a file"
+    default, and `config_location` is that path."""
+    root = tmp_path / "workspaces"
+    store = _local(root)
+    wid = new_workspace_id()
+    store.write_config(wid, CONFIG)
+    expected = root / wid / "config.toml"
+    assert store.config_file(wid) == expected
+    assert store.config_location(wid) == str(expected)
+
+
+def test_the_base_default_names_no_file(tmp_path: Path) -> None:
+    """A backend with no filesystem of its own inherits "not a file", and
+    `config_location` degrades to naming the store and the id — never a synthetic path
+    someone might try to restore from backup."""
+
+    class Nowhere(LocalDirWorkspacesStore):
+        config_file = WorkspacesStore.config_file
+
+    store = Nowhere(
+        Nowhere.parse_config(
+            WorkspacesConfig(
+                provider=DEFAULT_WORKSPACES_PROVIDER,
+                options={"root": str(tmp_path / "workspaces")},
+            )
+        )
+    )
+    wid = new_workspace_id()
+    assert store.config_file(wid) is None
+    assert store.config_location(wid) == f"{store.label()}/{wid}"

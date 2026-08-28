@@ -99,13 +99,19 @@ uv run dgml workspace create --organization "Acme" --name "Getting Started"
 *Note: `workspace create` is idempotent and safe to re-run. It creates the
 workspace (`docsets/` + `files/`), records its identity in `workspace.json`,
 including a stable `workspace_id` (`ws_…`, echoed in the JSON output), and writes
-`<workspace>/config.toml`. That id is a durable handle for the workspace:
-`dgml workspace list` shows every workspace indexed on this machine, and
-`dgml --workspace <workspace_id>` opens one by id instead of by path (this guide uses
-`$DGML_HOME` throughout, so you won't need it here). `workspace create` does **not**
-create or touch your user-level config — that's `dgml init`'s job (run once per
-machine; see §1.4). If you haven't run `dgml init` yet, `workspace create` still
-succeeds but prints a warning to configure credentials.*
+`<workspace>/config.toml`. `workspace create` does **not** create or touch your
+user-level config — that's `dgml init`'s job (run once per machine; see §1.4). If you
+haven't run `dgml init` yet, `workspace create` still succeeds but prints a warning to
+configure credentials.*
+
+*Because `$DGML_HOME` names a directory above, this guide's workspace is **detached**:
+it lives in `./my-dgml-workspace` and is addressed by path, exactly as shown throughout.
+Run `create` with no path and no `$DGML_HOME` instead and the workspace goes into the
+machine's **store of workspaces** — `~/dgml-workspaces/<workspace_id>/` by default —
+where `dgml workspace list` shows it and `dgml --workspace <workspace_id>` opens it from
+any directory. That is the better default for real work; the guide pins a path only so
+every command below can show one. `dgml workspace import ./my-dgml-workspace` moves this
+workspace into the store later if you want it listed.*
 
 > **Keep `<workspace>/config.toml` with the workspace — don't delete it.** It names
 > the storage backend the workspace's data lives on, and nothing else records that.

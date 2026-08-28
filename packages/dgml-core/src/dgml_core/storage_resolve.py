@@ -71,6 +71,14 @@ _ROLE_KEYS = ("blobs", "docs")
 # every in-tree provider takes its credentials from the environment instead.
 _SECRET_HINTS = ("key", "secret", "token", "password", "credential")
 
+# Option keys that name *where this machine keeps the data* rather than *which store
+# this is*, and so are also outside the identity fingerprint. Same argument as the one
+# that already excludes ``StorageConfig.root``: a workspace moved to another path is
+# the same workspace on the same backend, so relocating it must not read as a storage
+# change and must not require a re-seal. Matched exactly rather than by substring —
+# these are specific option names, not a family like the secret hints.
+_LOCATION_HINTS = frozenset({"workspace_path"})
+
 # ------------------------------------------------------------ building stores
 
 
@@ -249,7 +257,7 @@ def verify_storage_fingerprint(workspace: Workspace) -> None:
         return
     raise StorageBackendMismatch(
         f"the [storage] configuration this workspace resolves no longer matches the "
-        f"storage_fingerprint recorded in {workspace.config_path}. Its data is on the "
+        f"storage_fingerprint recorded in {workspace.config_location}. Its data is on the "
         f"previously sealed backend, so opening it against the new configuration could "
         f"read or write the wrong store. If the change was intended, run "
         f"'dgml workspace reseal {workspace.root}' to accept it; otherwise restore the "
@@ -260,34 +268,42 @@ def verify_storage_fingerprint(workspace: Workspace) -> None:
 # ------------------------------------------------------------ identity / seal
 
 
+def _excluded_from_identity(key: str) -> bool:
+    """Whether an option key is outside the store-identity hash."""
+    lowered = key.lower()
+    return any(hint in lowered for hint in _SECRET_HINTS) or lowered in _LOCATION_HINTS
+
+
 def _identity_hash(provider: str, options: Mapping[str, Any]) -> str:
     """The canonical credential-free store-identity hash for one backend."""
     identity = {
         "provider": provider,
-        "options": {
-            k: v
-            for k, v in sorted(options.items())
-            if not any(hint in k.lower() for hint in _SECRET_HINTS)
-        },
+        "options": {k: v for k, v in sorted(options.items()) if not _excluded_from_identity(k)},
     }
     blob = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(blob).hexdigest()
 
 
 def storage_fingerprint(config: StorageConfig) -> str:
-    """Credential-free content hash of one backend's identity (provider + non-secret
-    options). See :func:`storage_fingerprint_pair` for the two-backend seal a workspace
-    records in its ``config.toml``."""
+    """Credential-free content hash of one backend's identity (provider + non-secret,
+    non-location options). See :func:`storage_fingerprint_pair` for the two-backend seal
+    a workspace records in its ``config.toml``."""
     return _identity_hash(config.provider, config.options)
 
 
 def storage_fingerprint_pair(blob_cfg: StorageConfig, doc_cfg: StorageConfig) -> str:
     """The seal a workspace records: a credential-free hash over both roles.
 
-    ``root`` is deliberately outside the hash — a workspace copied or moved to another
-    path keeps its seal, because where the *config* lives is not where the *data*
-    lives. Secrets are outside it too (see :data:`_SECRET_HINTS`), so rotating a
-    credential never reads as "the store moved"."""
+    Three kinds of thing are deliberately outside the hash, all for the same reason —
+    the seal answers "is this the same store", not "is this the same address on this
+    machine":
+
+    - ``root``, so a workspace copied or moved to another path keeps its seal.
+    - Secret-named options (:data:`_SECRET_HINTS`), so rotating a credential never reads
+      as "the store moved".
+    - Location options (:data:`_LOCATION_HINTS`), for exactly the ``root`` argument: an
+      option naming where *this machine* keeps the data describes an address, not an
+      identity."""
     body = json.dumps(
         {"blobs": storage_fingerprint(blob_cfg), "docs": storage_fingerprint(doc_cfg)},
         sort_keys=True,

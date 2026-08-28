@@ -20,11 +20,17 @@ element can span pages.
 The root is determined in this order:
 
 1. `--workspace <path-or-id>` CLI flag (or `Workspace.resolve(<path-or-id>)` in
-   code). The argument is a filesystem path **or** a `ws_…` workspace id: when it
-   exactly matches an id in the [per-machine registry](#per-machine-workspace-registry),
-   the workspace opens at that entry's recorded root; otherwise it is treated as a
-   path (the `ws_` prefix + base32 charset means an id can't be mistaken for one).
-2. The `DGML_HOME` environment variable.
+   code). The argument is a filesystem path **or** a `ws_…` workspace id, decided by
+   **shape**: an id is `ws_` followed by exactly 16 base32-lowercase characters
+   (`[a-z2-7]` — so no separator, no dot, no uppercase, and never `0`, `1`, `8` or
+   `9`). Anything else is a path.
+
+   An id is looked up in [the store of workspaces](#the-store-of-workspaces); one it
+   does not hold is an error (`WORKSPACE_NOT_FOUND`), **not** a path. That is the point
+   of testing shape rather than membership: the same argument cannot mean a workspace on
+   one machine and a directory to create on another. A directory whose name happens to
+   be id-shaped is still addressable as `./ws_…`, which fails the test on the `./`.
+2. The `DGML_HOME` environment variable — also either a path or an id.
 3. Default: `./dgml-workspace` (relative to the current working directory).
 
 `dgml workspace create --organization <org>` (or `Workspace.init()` in code)
@@ -42,7 +48,7 @@ config merges across layers.
 ```
 <workspace_root>/
 ├── workspace.json                    # { name, organization, workspace_id, schema_version } — written by `workspace create`
-├── config.toml                       # OCR / LLM / clustering settings (optional)
+├── config.toml                       # storage binding + settings — REQUIRED
 ├── usage.jsonl                       # LLM call event log (optional)
 ├── docsets/
 │   └── <docset_id>/                  # 12-char base-36 ID
@@ -117,7 +123,7 @@ The workspace identity, written by `dgml workspace create`:
 - `workspace_id` — the workspace's **stable handle** (`ws_` + 16 lowercase
   base32 chars, 80 bits from `secrets`). Opaque and non-semantic, so it survives a
   directory rename. Minted at `workspace create` and carried here so the directory
-  self-describes; it also keys the [per-machine registry](#per-machine-workspace-registry).
+  self-describes; it is also how [the store of workspaces](#the-store-of-workspaces) keys it.
   A workspace created before this field existed is given one automatically the
   first time any command opens it (a schema migration). `dgml --workspace <workspace_id>`
   opens the workspace by this id.
@@ -140,56 +146,91 @@ The workspace identity, written by `dgml workspace create`:
 - `name` — human-readable label (`--name`, optional; defaults to the workspace
   directory name). Surfaced by `dgml status`; not used in URIs.
 
-## Per-machine workspace index
+## The store of workspaces
 
-A single **per-machine** index maps each `workspace_id` to where that workspace was
-last seen, so workspaces can be listed (`dgml workspace list`) and opened by id
-(`dgml --workspace <workspace_id>`). It sits next to the user config —
-`$XDG_CONFIG_HOME/dgml/workspaces.json` if set, else `%APPDATA%\dgml\workspaces.json`
-on Windows, else `~/.config/dgml/workspaces.json` — and is machine-managed **JSON**
-(not hand-edited, unlike `config.toml`), an object keyed by `workspace_id`:
+Which workspaces this machine can open is held in a **store of workspaces**, and so is
+each one's `config.toml`. It is selected by the `[workspaces]` table of the **user**
+config, and two backends ship.
 
-```json
-{
-  "ws_7f3k9q2m4b8xr5wa": {
-    "name": "Acme Contracts",
-    "organization": "Acme",
-    "root": "/Users/me/acme-ws",
-    "created_at": "2026-08-05T12:00:00Z",
-    "schema_version": 1
-  }
-}
+### Local disk (the default)
+
+One folder per workspace under `~/dgml-workspaces/`, each holding that workspace's
+`config.toml` — and, for the bundled `LocalStore`, its data too:
+
+```text
+~/dgml-workspaces/
+└── ws_7qxdm2pjk3n5rwts/
+    ├── config.toml
+    ├── files/
+    └── docsets/
 ```
 
-A workspace whose `config.toml` lives outside its directory (created with
-`--workspace-config`) also carries a `config_path`. It is a **hint, not an address**:
-resolution consults it only when `<root>/config.toml` is absent, and ignores it when
-the recorded file is gone. That is what lets `dgml --workspace <ws_id>` open such a
-workspace without repeating the flag, while a stale hint degrades to the ordinary
-"config is missing" error rather than to a wrong config.
+The parent is `$DGML_WORKSPACES` when set, else `[workspaces] root`, else
+`~/dgml-workspaces`. Not hidden and not under an XDG base directory, because it holds
+source documents and page images rather than settings.
 
-**This file is a regenerable cache and nothing more.** It records *where* workspaces
-are, never *how* they store data — that binding lives in each workspace's own
-[`config.toml`](#the-workspace-config-configtoml), which is authoritative and travels
-with the workspace. Deleting `workspaces.json` loses only the ability to enumerate:
-every entry comes back, with its `workspace_id` intact, as each workspace is next
-opened by path.
+The folder name *being* the `workspace_id` is what makes this work with no index: there
+is nothing to keep in sync, and a directory whose name is not a well-formed id is simply
+not a workspace, so a stray file in the parent is ignored rather than half-listed.
 
-- The index is **per-machine**, deliberately separate from `workspace.json` (which
-  travels with the directory): the same workspace opened on two machines has one
-  `workspace_id` but two entries, each with that machine's `root`.
-- `name` and `organization` are copies, carried so `workspace list` can render a row
-  without opening — and possibly failing to reach — every workspace's store.
-- `config_path` is recorded only when it is *not* the derivable `<root>/config.toml`
-  default, and is refreshed on open like `root`: where a workspace was last opened is
-  the best guess for where to find it next.
-- Entries are added and repaired automatically. `workspace create` records a new
-  workspace, and any command that opens one adds it if missing. Because the row
-  carries no authority, opening a workspace that has **moved** simply corrects its
-  recorded `root` in place; there is no explicit register step. (`dgml workspace
-  register` existed for exactly that and has been removed.)
-- Each write is atomic (write-temp-rename) and is an idempotent upsert by id, so a
-  lost update from a concurrent write self-heals on the next open.
+### MongoDB
+
+```toml
+# ~/.config/dgml/config.toml
+[workspaces]
+provider = "dgml_storage_mongo:MongoWorkspacesStore"
+mongo_host = "localhost"
+mongo_database = "dgml_workspaces"
+```
+
+One document per workspace, `_id` = its `workspace_id`, holding its `config.toml` as
+verbatim text plus a small derived projection for listing. Point two machines at one
+database and `dgml --workspace ws_…` opens the same workspace on both, with no config
+file passed between them. See
+[the package README](../packages/dgml-storage-mongo/README.md#the-list-of-workspaces)
+for the document shape, the compare-and-swap on writes, and what is deliberately *not*
+stored there.
+
+### What crosses the interface
+
+Exactly one thing per workspace: the text of its `config.toml`. A listing row is
+**derived** from that text, never stored beside it — so `dgml workspace list` can report
+`name`, `organization` and `storage_service` precisely *because* they are not a second
+copy that could disagree.
+
+`root` in a listing row is computed on the machine doing the listing (the
+`workspace_path` its config declares, else the standard folder). It is never stored: where
+a workspace's files sit is per-machine, and a shared column recording it is the mistake
+described below.
+
+`[workspaces]` is read **only** from the user config, with `tomllib`, never through the
+merged loader. The same table in a workspace's own `config.toml` is ignored, and cannot
+be honoured even in principle: the store was already used to fetch that file.
+
+### Not listed is not broken
+
+A workspace addressed by path — `dgml --workspace ./ws`, `$DGML_HOME`,
+`./dgml-workspace` — is **detached**: it works exactly as before and is simply not in
+the store, so it does not appear in `workspace list`. `dgml workspace import <path>`
+adds one when you want it there.
+
+Resolving by path never consults the store.
+
+### The legacy index (`workspaces.json`)
+
+Older versions kept a per-machine JSON index at `~/.config/dgml/workspaces.json`
+mapping each `workspace_id` to where that workspace was last seen. It is **no longer
+written and nothing resolves through it**.
+
+Its rows were a second copy of facts that lived elsewhere, so they could disagree with
+the workspace they described and had to be rewritten on every open to stay current —
+including correcting the recorded `root` of a workspace that had moved. None of that
+exists now: a listing row comes out of the workspace's own config.
+
+`dgml workspace import` with no arguments sweeps every workspace the old index lists
+into the store. Nothing happens automatically, the file is left in place so a
+half-finished sweep can be repeated, and once the workspaces you care about are imported
+it can be deleted.
 
 ## The workspace config (`config.toml`)
 
@@ -198,9 +239,15 @@ storage backend, so an initialized workspace without one fails with
 `STORAGE_CONFIG_INVALID` rather than silently falling back to local disk — an absent
 config is indistinguishable from a remote-backed workspace whose config was deleted.
 
-It normally lives at `<workspace>/config.toml`. `--workspace-config <path>` (or
-`$DGML_CONFIG`) points at one kept elsewhere; `--workspace` picks the root and
-`--workspace-config` picks the config, and the two are independent.
+Where it lives depends on how the workspace is addressed: `<workspace>/config.toml` for
+one addressed by path, and inside [the store of workspaces](#the-store-of-workspaces)
+for one addressed by id — which, on a networked backend, is not a file at all.
+
+(`--workspace-config` and `$DGML_CONFIG` used to point at a config kept elsewhere. They
+have been removed: that only ever worked because the per-machine index recorded the
+location and handed it back on the next open, so with nothing recording it the flag would
+have to be repeated forever. To start a workspace from a config you authored, use
+`dgml workspace create --from-config <path>`, which copies it in.)
 
 `dgml workspace create` writes it, adding a machine-managed `[workspace]` block:
 
@@ -274,7 +321,7 @@ of those above it (a layer overrides only what it sets and inherits the rest):
 |---|---|---|
 | 1 | Built-in defaults | shipped in the wheel (dataclass defaults: `max_pages`, `temperature`, …) |
 | 2 | **User config** | `$XDG_CONFIG_HOME/dgml/config.toml` if set, else `%APPDATA%\dgml\config.toml` on Windows, else `~/.config/dgml/config.toml` — written by `dgml init` |
-| 3 | Workspace config | `<workspace>/config.toml`, or `--workspace-config <path>` / `$DGML_CONFIG` — **required**; carries the storage binding plus any per-workspace overrides |
+| 3 | Workspace config | The workspace's own `config.toml` — a file in its directory, or held in [the store of workspaces](#the-store-of-workspaces). **Required**; carries the storage binding plus any per-workspace overrides |
 | 4 | Environment variables | `DGML_`-prefixed, `__` for nesting |
 | 5 | CLI flags | per invocation (e.g. `--schema-model`) |
 
@@ -284,10 +331,11 @@ of those above it (a layer overrides only what it sets and inherits the rest):
 > identity block, which is read directly from the workspace's own file so a stray key
 > in the user config cannot apply to every workspace on the machine.
 
-`dgml init` writes the **user config** (layer 2) — configure once per machine;
-every workspace inherits it. A per-workspace `config.toml` (layer 3) is optional
-and created by hand only for workspace-specific overrides; `dgml workspace
-create` does **not** write one.
+`dgml init` writes the **user config** (layer 2) — configure once per machine; every
+workspace inherits it. A workspace's own `config.toml` (layer 3) is **required** and is
+written by `dgml workspace create`: it carries the storage binding, so it is not
+optional and not merely a place for overrides. It may also carry any other section as a
+per-workspace override.
 
 **Env-var overrides (layer 4).** Prefix `DGML_`, split path segments on `__`,
 lowercased — e.g. `DGML_MODELS__ADVANCED=gemini/gemini-2.5-pro`,

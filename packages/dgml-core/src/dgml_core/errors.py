@@ -134,6 +134,17 @@ class WorkspaceNotFound(NotFoundError):
     code = "WORKSPACE_NOT_FOUND"
 
 
+class WorkspacesUnavailable(DgmlError):
+    """The machine's store of workspaces could not be reached.
+
+    Its own code because it is the ordinary operational failure of a networked store —
+    the server is down, the host is wrong, the VPN is off — and every command needs that
+    store to find a workspace. Left as an ``INTERNAL_ERROR`` it arrives as a wall of
+    driver text with nothing actionable in it."""
+
+    code = "WORKSPACES_UNAVAILABLE"
+
+
 class WorkspacesWriteConflict(DgmlError):
     """Another writer changed this workspace's ``config.toml`` since it was read.
 

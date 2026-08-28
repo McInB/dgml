@@ -263,9 +263,13 @@ def test_config_migration_is_idempotent(tmp_path: Path) -> None:
     assert ws.config_path.read_text() == first
 
 
-def test_migration_drops_the_legacy_keys_from_the_index(tmp_path: Path) -> None:
-    """Leaving a second, now-powerless copy of the binding on disk invites someone to
-    trust it later."""
+def test_migration_leaves_the_legacy_index_untouched(tmp_path: Path) -> None:
+    """The migration copies *out* of the legacy index and never writes to it.
+
+    It used to rewrite the row to strip the now-powerless `storage` keys. That is no
+    longer worth doing: nothing resolves through the file any more, rewriting it would
+    make a dead file look maintained, and `dgml workspace import` needs to read it
+    exactly as the older dgml left it."""
     import json
 
     from dgml_core import registry
@@ -274,10 +278,15 @@ def test_migration_drops_the_legacy_keys_from_the_index(tmp_path: Path) -> None:
     ws = Workspace(root=tmp_path / "ws")
     ws.root.mkdir()
     wid = _legacy_row(ws, service="default", snapshot={"blobs": {"provider": _LOCAL}})
-    migrate_workspace_config(ws)
+    before = registry.registry_path().read_bytes()
 
+    assert migrate_workspace_config(ws) == 1
+
+    assert registry.registry_path().read_bytes() == before
     row = json.loads(registry.registry_path().read_text())[wid]
-    assert not any(k.startswith("storage") for k in row)
+    assert row["storage"] == {"blobs": {"provider": _LOCAL}}
+    # ...and the binding it described now lives in the workspace's own config.
+    assert "[storage.default.blobs]" in (ws.config_text or "")
 
 
 def test_migration_never_invents_a_config(tmp_path: Path) -> None:

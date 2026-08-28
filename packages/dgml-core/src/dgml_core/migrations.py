@@ -142,7 +142,7 @@ def migrate_workspace_config(ws: Workspace) -> int:
     if not isinstance(service, str) or not service:
         service = DEFAULT_STORAGE_SERVICE
 
-    if table is None and not ws.config_path.exists():
+    if table is None and not ws.config_present:
         # Nothing to migrate *and* nothing to migrate into. Creating a config here
         # would be a guess — and the wrong one for the case that matters: a workspace
         # whose config was deleted would be silently re-sealed onto the local default
@@ -177,23 +177,14 @@ def migrate_workspace_config(ws: Workspace) -> int:
         )
     except OSError as exc:
         raise WorkspaceMigrationFailed(
-            f"could not write {ws.config_path} while moving this workspace's storage "
+            f"could not write {ws.config_location} while moving this workspace's storage "
             f"binding out of the machine registry: {exc}"
         ) from exc
 
-    # Rewrite the index row in the current shape so the legacy ``storage`` /
-    # ``storage_service`` / ``storage_fingerprint`` keys do not linger. They are inert
-    # (``RegistryEntry.from_dict`` ignores unknown keys) but leaving a second, now
-    # powerless copy of the binding on disk invites someone to trust it later.
-    # ``ensure_registered`` cannot do this — it returns early when the root matches.
-    wid = legacy.get("workspace_id")
-    if isinstance(wid, str) and wid:
-        registry.index_workspace(
-            ws,
-            workspace_id=wid,
-            name=str(legacy.get("name") or ws.root.name),
-            organization=str(legacy.get("organization") or ""),
-        )
+    # The legacy index row is deliberately left exactly as it was. It is no longer
+    # written or resolved through (see :mod:`dgml_core.registry`), so rewriting it would
+    # only make a dead file look maintained — and ``dgml workspace import`` still needs
+    # to read it as the older dgml left it.
     return 1
 
 
@@ -232,7 +223,7 @@ def _backfill_workspace_id(ws: Workspace) -> int:
     no-op once an id is present. Because it must run everywhere, it lives outside
     the LocalStore guard below (calling it unconditionally is the point).
     """
-    from .registry import mint_workspace_id
+    from .workspace_id import mint_workspace_id
 
     if ws.workspace_id is not None:
         return 0

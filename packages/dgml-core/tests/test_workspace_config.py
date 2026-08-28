@@ -25,6 +25,7 @@ the rest of the file is mostly their consequences:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -36,11 +37,48 @@ from dgml_core.storage_resolve import (
     storage_fingerprint_pair,
     verify_storage_fingerprint,
 )
+from dgml_core.workspace_id import mint_workspace_id
+from dgml_core.workspaces_resolve import default_workspaces_store
 
 LOCAL = "dgml_core.storage_local:LocalStore"
 
+# Which backing the workspaces built by `_ws` use for this test run. Mutated by the
+# autouse `_backing` fixture below so every test in this file runs twice — once with the
+# config as a file in the workspace directory, once with it held in the machine's store
+# of workspaces — without touching a single call site.
+_BACKING = ["file"]
+
+
+@pytest.fixture(autouse=True, params=["file", "store"])
+def _backing(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Run the whole file against both ways a config can be backed.
+
+    This is the highest-value coverage in the change: everything below —
+    comment preservation, banner absorption, span replacement, the round-trip
+    verification, the seal — is a *text* operation, and the whole point of routing it
+    through :func:`~dgml_core.workspace_config.read_config_state` /
+    :func:`~dgml_core.workspace_config.write_config_text` is that the behaviour cannot
+    depend on where that text is kept. Asserting that once, here, is worth more than any
+    new test: a backend-dependent splice would mean "your comments survive, depending on
+    where your workspace lives"."""
+    _BACKING[0] = request.param
+    yield
+    _BACKING[0] = "file"
+
 
 def _ws(tmp_path: Path, text: str = "") -> Workspace:
+    """A workspace whose config is a file in its own directory, or is held in the
+    machine's store of workspaces (per the current parametrization).
+
+    The store-backed variant roots the workspace at its folder in the store, which is
+    what the local backend does in production — so ``config_path`` still names the file
+    the store writes, and the file-level assertions below stay meaningful while the
+    store code path is the one actually exercised."""
+    if _BACKING[0] == "store":
+        store = default_workspaces_store()
+        wid = mint_workspace_id(store)
+        store.write_config(wid, text)
+        return Workspace(root=store.workspace_root(wid), workspaces_id=wid)
     root = tmp_path / "ws"
     root.mkdir(exist_ok=True)
     if text:
@@ -48,9 +86,43 @@ def _ws(tmp_path: Path, text: str = "") -> Workspace:
     return Workspace(root=root)
 
 
+def _reopen(ws: Workspace) -> Workspace:
+    """The same workspace, freshly constructed, so nothing is memoized from before a
+    write (see ``Workspace._config_state`` and ``store_configs``)."""
+    return Workspace(
+        root=ws.root, config_override=ws.config_override, workspaces_id=ws.workspaces_id
+    )
+
+
 def _seal(ws: Workspace) -> str:
     """Seal a *fresh* Workspace so no stale ``store_configs`` is memoized."""
-    return wc.reseal(Workspace(root=ws.root, config_override=ws.config_override))
+    return wc.reseal(_reopen(ws))
+
+
+# --------------------------------------------------- the parametrization is real
+
+
+def test_the_backing_under_test_is_the_one_being_exercised(tmp_path: Path) -> None:
+    """Guards every other test in this file against going vacuous.
+
+    If ``_ws`` ever stopped producing a store-backed workspace, the whole suite would
+    still pass — twice over the same file path — and the claim that splicing is
+    backend-independent would be untested. So assert the plumbing directly: a
+    store-backed workspace reads through the store, and a write lands there."""
+    ws = _ws(tmp_path, "[workspace]\nname = 'W'\n")
+    if _BACKING[0] == "file":
+        assert ws.workspaces_id is None
+        assert ws.config_path.is_file()
+        return
+
+    assert ws.workspaces_id is not None
+    store = default_workspaces_store()
+    found = store.read_config(ws.workspaces_id)
+    assert found is not None and "name = 'W'" in found[0]
+
+    wc.write_identity(ws, organization="acme")
+    written = store.read_config(ws.workspaces_id)
+    assert written is not None and "acme" in written[0]
 
 
 # ------------------------------------------------------------------- identity

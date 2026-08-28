@@ -146,8 +146,12 @@ class WorkspacesStore(ProviderConfigFields, ABC):
     @abstractmethod
     def write_config(
         self, workspace_id: str, text: str, *, expected_revision: int | None = None
-    ) -> None:
-        """Create or replace this workspace's ``config.toml`` text.
+    ) -> int | None:
+        """Create or replace this workspace's ``config.toml`` text, returning the new
+        revision (or ``None`` from a backend that issues none).
+
+        Returning it saves the caller a read-back to stay coherent after its own write,
+        which against a networked backend is a round trip on every ``reseal``.
 
         ``expected_revision`` is whatever :meth:`read_config` last returned. A backend
         that issues revisions must reject the write with
@@ -173,8 +177,16 @@ class WorkspacesStore(ProviderConfigFields, ABC):
         """Unlist this workspace; ``True`` if it was listed, ``False`` if absent.
 
         **Unlists, never deletes workspace data.** A local backend removes the
-        ``config.toml`` and leaves any ``files/`` and ``docsets/`` beside it untouched,
-        because dropping a broken listing entry must not be a way to lose a corpus.
+        ``config.toml`` and leaves any ``files/`` and ``docsets/`` beside it untouched.
+
+        No CLI command calls this yet, deliberately. A ``dgml workspace delete`` built
+        straight on top of it turned out to be a trap: because the config *is* the record,
+        removing it leaves the corpus on disk but unreachable — not by id (unlisted), not
+        by path (no config to name a backend), and not importable (nothing to import) —
+        while a payload could truthfully say the data was not deleted. What is actually
+        wanted is a command that removes a workspace *and* its data, which needs its own
+        design. Kept here because it is a natural part of a store's contract and is what
+        that command will be built on.
         """
 
     # ---------------------------------------------------------------- derived
@@ -222,3 +234,24 @@ class WorkspacesStore(ProviderConfigFields, ABC):
         """A short human-readable name for this store, for error messages ("no
         workspace ws_… in …"). Defaults to the provider's ``name``."""
         return self.name
+
+    def config_file(self, workspace_id: str) -> Path | None:
+        """The workspace's ``config.toml`` **as a file a user could open**, or ``None``
+        when this backend does not keep it as one.
+
+        ``None`` by default, because a networked backend has no file to name — and
+        answering with a plausible-looking path that does not exist is worse than
+        answering nothing, since it invites a caller to open or restore it.
+
+        A backend that *does* keep configs as files should say so: the config is
+        hand-editable there, and reporting it as absent needlessly denies a caller
+        something real."""
+        return None
+
+    def config_location(self, workspace_id: str) -> str:
+        """Where this workspace's config lives, for messages and payloads.
+
+        The file when there is one, else ``<label>/<id>`` — enough for a reader to know
+        which store and which workspace, without implying a path that isn't there."""
+        found = self.config_file(workspace_id)
+        return str(found) if found is not None else f"{self.label()}/{workspace_id}"

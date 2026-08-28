@@ -47,6 +47,7 @@ from __future__ import annotations
 import re
 import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .errors import CorruptMetadata, StorageConfigInvalid
@@ -98,23 +99,73 @@ class WorkspaceIdentity:
 # ------------------------------------------------------------------- reading
 
 
-def _load(ws: Workspace) -> dict[str, Any]:
-    """Parse ``ws.config_path``, or ``{}`` when it is absent.
+def read_config_state(ws: Workspace) -> tuple[str | None, int | None]:
+    """This workspace's ``config.toml`` text and revision, from wherever it lives.
 
-    Costs one ``exists()`` on the common path where no config is present, and one
-    small parse otherwise. Raises :class:`CorruptMetadata` on unparseable TOML —
-    the same failure :func:`dgml_core.config.load_merged_config` reports, surfaced
-    here because this read happens before that one."""
+    The single read funnel, and the one place that knows a config may not be a file: a
+    workspace held in the machine's store of workspaces gets its text from that store,
+    one addressed by path from ``ws.config_path``. ``(None, None)`` when there is no
+    config yet — the normal state of a directory that is not a workspace.
+
+    Reached through :attr:`dgml_core.storage.Workspace.config_text`, which caches it;
+    call that rather than this."""
+    if ws.workspaces_id is not None:
+        from .workspaces_resolve import default_workspaces_store
+
+        found = default_workspaces_store().read_config(ws.workspaces_id)
+        return found if found is not None else (None, None)
+
     path = ws.config_path
-    if not path.exists():
-        return {}
     try:
-        with path.open("rb") as fh:
-            return tomllib.load(fh)
-    except tomllib.TOMLDecodeError as exc:
-        raise CorruptMetadata(f"invalid TOML in {path}: {exc}") from exc
+        # newline="" so a CRLF file round-trips unchanged: the text read here is what
+        # gets spliced and written back.
+        with path.open("r", encoding="utf-8", newline="") as fh:
+            return fh.read(), None
+    except FileNotFoundError:
+        return None, None
     except OSError as exc:
         raise CorruptMetadata(f"could not read {path}: {exc}") from exc
+
+
+def write_config_text(ws: Workspace, text: str) -> None:
+    """Write this workspace's ``config.toml``, to wherever it lives.
+
+    The single write funnel. Hands back the revision that came with the text so a
+    shared backend can reject a lost update rather than silently discarding the other
+    writer's ``[storage]`` table and comments, then refreshes the workspace's cached
+    text so a write-then-read inside one command stays coherent without a second
+    round trip."""
+    if ws.workspaces_id is None:
+        path = ws.config_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(path, text)
+        return
+
+    from .workspaces_resolve import default_workspaces_store
+
+    revision = default_workspaces_store().write_config(
+        ws.workspaces_id, text, expected_revision=ws.config_revision
+    )
+    # Refresh the memo (see Workspace._config_state) so a write-then-read inside one
+    # command needs no second round trip. Writing into __dict__ is legal on a frozen
+    # dataclass — it is the same slot a cached_property would use. Only the store-backed
+    # case has a memo to refresh; a file is re-read each time.
+    ws.__dict__[ws._CONFIG_CACHE_KEY] = (text, revision)
+
+
+def _load(ws: Workspace) -> dict[str, Any]:
+    """The workspace's parsed config, or ``{}`` when it has none.
+
+    Raises :class:`CorruptMetadata` on unparseable TOML — the same failure
+    :func:`dgml_core.config.load_merged_config` reports, surfaced here because this
+    read happens before that one."""
+    text = ws.config_text
+    if text is None:
+        return {}
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise CorruptMetadata(f"invalid TOML in {ws.config_location}: {exc}") from exc
 
 
 def _str_or_none(table: dict[str, Any], key: str) -> str | None:
@@ -160,6 +211,53 @@ def identity_from_text(text: str, *, workspace_id: str | None = None) -> Workspa
 def read_identity(ws: Workspace) -> WorkspaceIdentity:
     """The workspace's ``[workspace]`` identity block, read store-free and unlayered."""
     return _identity_from_table(_load(ws).get(IDENTITY_TABLE))
+
+
+def local_workspace_path(text: str) -> Path | None:
+    """The ``workspace_path`` a config's selected storage service declares, or ``None``.
+
+    Takes **text** because ``Workspace.resolve`` needs the answer *before* it can build
+    a ``Workspace``: for a workspace listed in a store of workspaces the config is
+    fetched by id, so the text is in hand while the root is still being decided, and
+    that declared path is what the root must be. (Nothing circular — the dependency only
+    runs the other way for a workspace addressed by path, where the root is the path the
+    caller gave and no config is read to find it.)
+
+    Reads across both service forms and both roles, taking the first it finds: the option
+    belongs to :class:`~dgml_core.storage_local.LocalStore`, which may serve one role or
+    both. Wrong types read as absent — the store's own ``parse_config`` is what reports a
+    malformed value, and doing it here too would report it twice with less context.
+
+    Transitional. It exists only because ``Workspace.root`` still has to agree with the
+    store about where a workspace's files are; it goes away with ``root`` itself (#129).
+    """
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        # A caller mid-resolution has no useful place to report this; the ordinary
+        # config read that follows raises CorruptMetadata with a proper label.
+        return None
+    section = parsed.get("storage")
+    if not isinstance(section, dict):
+        return None
+    identity = _identity_from_table(parsed.get(IDENTITY_TABLE))
+    from .storage_resolve import DEFAULT_STORAGE_SERVICE
+
+    service = identity.storage_service or DEFAULT_STORAGE_SERVICE
+    inline = isinstance(section.get("provider"), str) or any(
+        isinstance(section.get(role), dict) for role in ("blobs", "docs")
+    )
+    table = section if inline else section.get(service)
+    if not isinstance(table, dict):
+        return None
+    candidates = [table, *(table.get(role) for role in ("blobs", "docs"))]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        declared = candidate.get("workspace_path")
+        if isinstance(declared, str) and declared.strip():
+            return Path(declared).expanduser()
+    return None
 
 
 def declared_services(ws: Workspace) -> list[str]:
@@ -317,14 +415,16 @@ def _write_tables(
     *,
     banners: dict[str, str | None] | None = None,
 ) -> None:
-    """Write ``{table_name: values}`` into ``ws.config_path``, preserving everything else.
+    """Write ``{table_name: values}`` into the workspace's config, preserving everything
+    else.
 
     Every write is verified by re-parsing the candidate text and comparing the affected
-    tables against what was intended, *before* the file is replaced. The splice is a
-    text operation on a user-authored file, so this check is what makes it safe."""
-    path = ws.config_path
-    label = str(path)
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    tables against what was intended, *before* anything is stored. The splice is a text
+    operation on a user-authored file, so this check is what makes it safe — and because
+    it happens on text, it protects a write to a networked store of workspaces exactly
+    as it protects a local file."""
+    label = ws.config_location
+    text = ws.config_text or ""
     if text.strip():
         try:
             tomllib.loads(text)
@@ -352,8 +452,7 @@ def _write_tables(
             raise CorruptMetadata(  # pragma: no cover - defensive
                 f"writing [{name}] to {label} did not round-trip; refusing to write"
             )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(path, text)
+    write_config_text(ws, text)
 
 
 def _lookup(parsed: dict[str, Any], dotted: str) -> Any:
@@ -406,6 +505,7 @@ def write_identity(
     organization: str | None = None,
     storage_service: str | None = None,
     storage_fingerprint: str | None = None,
+    created_at: str | None = None,
 ) -> None:
     """Update the ``[workspace]`` block, merge-preserving.
 
@@ -423,6 +523,7 @@ def write_identity(
         "storage_fingerprint": (
             storage_fingerprint if storage_fingerprint is not None else current.storage_fingerprint
         ),
+        "created_at": created_at if created_at is not None else current.created_at,
     }
     _write_tables(ws, {IDENTITY_TABLE: {k: v for k, v in merged.items() if v is not None}})
 
