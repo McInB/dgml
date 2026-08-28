@@ -23,10 +23,12 @@ From inside this repo, use `uv run dgml …` (the venv is managed by `uv sync`).
 The workspace root is picked in this order:
 
 1. `--workspace <path-or-id>` flag — a filesystem path **or** a `ws_…` workspace id
-   from `dgml workspace list` (an indexed id opens at its recorded root; anything
-   else is a path)
-2. `$DGML_HOME`
-3. `./dgml-workspace` (default, relative to cwd)
+   from `dgml workspace list`
+2. `$DGML_HOME` — also either form
+3. `./dgml-workspace`, relative to cwd — the last resort, and note that **nothing
+   creates it by default any more**: `dgml workspace create` with no path puts the
+   workspace in the store of workspaces instead. It is what keeps a workspace made by
+   an older dgml (or by `create <path>`) working, not a directory to expect.
 
 `--workspace` and `$DGML_HOME` each take a **path or a `ws_…` id**, told apart by shape
 (an id is `ws_` + exactly 16 chars from `[a-z2-7]`). An id is looked up in the machine's
@@ -46,6 +48,8 @@ Setup — the minimum is a **single** command:
 2. `dgml workspace create [path] --organization <org>` — creates the workspace (`docsets/` + `files/`), writes its `config.toml` (the storage binding plus a machine-managed `[workspace]` identity block), records its identity in `workspace.json`, and mints a stable `workspace_id` (echoed in the payload). **Where it goes depends on whether you name a place for it**: with no `path`, no `--workspace` and no `$DGML_HOME`, the workspace is created in the machine's store of workspaces and is listed by `dgml workspace list` (`"listed": true`); give a `path` (`dgml workspace create ./ws …`) and you get a **detached** workspace in that directory, addressed by path and not listed. Prefer the listed form for new work — `--workspace <id>` then opens it from any directory. It does **not** touch the user config; if the config is missing it still creates the workspace and warns on stderr to run `dgml init`. Safe to re-run — an existing `[storage.<name>]` is never overwritten and the recorded id, name and `created_at` are reused. `--organization` is **required for a new workspace** and is embedded in its docset namespace URIs (`http://dgml.io/<org>/<DocSetSlug>`); it becomes **optional** once the config records one (passing a different value re-organizes the workspace and warns on stderr). `--name` is an optional human-readable label. Use `--storage <name>` to materialize a named service defined as `[storage.<name>]` in the user config into this workspace's own config (omit for the bundled local-disk default); `--from-config <path>` starts from a config you authored, copied in verbatim (a template — the source is not tracked, and later edits to it do nothing). The two **compose**: `--from-config` supplies the config, `--storage` says which `[storage.<name>]` table in it to bind to — a config declaring `[storage.acme]` needs `--storage acme`, or create fails with `INVALID_ARGUMENT` rather than silently using local disk.
 
 **A workspace's `config.toml` is required and must travel with it** — it is the only record of which storage backend holds the data. A workspace whose config is missing fails with `STORAGE_CONFIG_INVALID`; do not delete it, and copy it along when moving a *detached* workspace's directory.
+
+A `ws_…` id is not visible in the filesystem the way a path is, so **in a new shell recover it with `dgml workspace list`** rather than guessing. The recipes below pass `--workspace "$wid"` on every command, which is what works when each command runs in its own shell (as agents usually run them); at an interactive prompt `export DGML_HOME=<id>` once is equivalent and shorter. dgml never sets that variable for you.
 
 Managing multiple workspaces: `dgml workspace list` prints every workspace the store of workspaces holds (`{workspace_id, name, organization, storage_service, root, created_at}`), and any `workspace_id` opens it from anywhere — e.g. `id=$(dgml workspace create --organization Acme | jq -r .workspace_id)` then `dgml --workspace "$id" file list`. Every field is derived from each workspace's own config, so a row cannot disagree with the workspace it describes. A **detached** workspace is not in the store of workspaces and so not listed; `dgml workspace import <path>` adds one, and `dgml workspace import` with no arguments sweeps every workspace an older dgml left in `~/.config/dgml/workspaces.json` (data never moves — the existing directory is recorded as `workspace_path`, which does not re-seal the workspace). (`dgml workspace register` has been removed.)
 
@@ -75,10 +79,13 @@ Use `--format text` only when a human asked for readable output directly; do not
 ### Add a single PDF and assign it to a DocSet
 
 ```bash
-uv run dgml workspace create --organization Acme              # once: workspace + its config.toml
-ds=$(uv run dgml docset create --name "Q2 contracts" | jq -r .id)
-fid=$(uv run dgml file add /path/to/contract.pdf --on-conflict skip | jq -r .file.id)
-uv run dgml docset add-file "$fid" --docset "$ds"
+# Once: create the workspace and keep its id — that is the handle for every command
+# below. `create` prints it, and `dgml workspace list` shows it again in a new shell.
+wid=$(uv run dgml workspace create --organization Acme | jq -r .workspace_id)
+
+ds=$(uv run dgml docset create --workspace "$wid" --name "Q2 contracts" | jq -r .id)
+fid=$(uv run dgml file add --workspace "$wid" /path/to/contract.pdf --on-conflict skip | jq -r .file.id)
+uv run dgml docset add-file --workspace "$wid" "$fid" --docset "$ds"
 ```
 
 ### One-shot: add a PDF and let an LLM pick (or create) its DocSet
@@ -103,8 +110,8 @@ classifications match against those questions, not against
 topical similarity.
 
 ```bash
-uv run dgml workspace create --organization Acme   # once: workspace + its config.toml
-payload=$(uv run dgml file add /path/to/doc.pdf --auto-classify)
+wid=$(uv run dgml workspace create --organization Acme | jq -r .workspace_id)
+payload=$(uv run dgml file add --workspace "$wid" /path/to/doc.pdf --auto-classify)
 ds=$(jq -r .classification.docset_id <<<"$payload")
 qs=$(jq -r '.classification.docset_key_questions | join(" | ")' <<<"$payload")
 err=$(jq -r '.classification.error // empty' <<<"$payload")
@@ -156,12 +163,12 @@ level only).
 
 ```bash
 DIR=/path/to/pdfs
-uv run dgml workspace create --organization Acme
+wid=$(uv run dgml workspace create --organization Acme | jq -r .workspace_id)
 
-ds=$(uv run dgml docset create --name "Imported PDFs" | jq -r .id)
+ds=$(uv run dgml docset create --workspace "$wid" --name "Imported PDFs" | jq -r .id)
 
 # One call adds every PDF under $DIR. --on-conflict skip → safe to re-run.
-payload=$(uv run dgml file add "$DIR" --on-conflict skip)
+payload=$(uv run dgml file add --workspace "$wid" "$DIR" --on-conflict skip)
 
 # The command exits 0 even when individual files soft- or hard-fail. Surface
 # those from the payload so they aren't buried (don't just trust the exit code).
@@ -173,10 +180,10 @@ jq -r '.results[]
 
 # Assign every successfully-added file (entries with a `.file` record) to the DocSet.
 for fid in $(jq -r '.results[] | select(.file) | .file.id' <<<"$payload"); do
-  uv run dgml docset add-file "$fid" --docset "$ds"
+  uv run dgml docset add-file --workspace "$wid" "$fid" --docset "$ds"
 done
 
-uv run dgml check    # authoritative health signal afterward
+uv run dgml check --workspace "$wid"   # authoritative health signal afterward
 ```
 
 The `summary` block (`{total, added, skipped, soft_failed, hard_failed}`,
@@ -233,8 +240,17 @@ A PDF with no extractable digital text (e.g. a scan) still gets a File record �
 ### OCR setup recipe
 
 ```bash
-# One-time per workspace: write the provider config.
-cat > "$DGML_HOME/config.toml" <<'EOF'
+# The workspace to configure — the id `workspace create` printed, or one from
+# `dgml workspace list`. (A workspace addressed by path works too: pass that path to
+# --workspace instead.)
+wid=ws_...
+
+# One-time per workspace: write the provider config. `status` reports where that config
+# is — do not construct the path, since for a workspace addressed by id it lives in the
+# store of workspaces rather than under the workspace root.
+cfg=$(uv run dgml status --workspace "$wid" | jq -r .workspace_config_path)
+cat >> "$cfg" <<'EOF'
+
 [ocr]
 provider = "azure"
 endpoint = "https://my-resource.cognitiveservices.azure.com/"
@@ -245,7 +261,7 @@ EOF
 export AZURE_DOCINTEL_KEY="..."
 
 # Add files using OCR.
-uv run dgml file add /path/to/scan.pdf --text-mode ocr
+uv run dgml file add --workspace "$wid" /path/to/scan.pdf --text-mode ocr
 ```
 
 ### Inspect state
@@ -300,28 +316,33 @@ in config, add all files to one docset, then generate (no per-run flags):
 
 ```bash
 DIR=/path/to/pdfs
-uv run dgml workspace create --organization Acme
+created=$(uv run dgml workspace create --organization Acme)
+wid=$(jq -r .workspace_id <<<"$created")
 
-# `workspace create` already wrote the user-level ~/.config/dgml/config.toml
-# with a [models] block (transcription ← standard tier, labeling ← advanced).
-# To override the models for THIS workspace only, drop a workspace config.toml
-# (it deep-merges over the user config):
-cat > "${DGML_HOME:-./dgml-workspace}/config.toml" <<'EOF'
+# To override the models for THIS workspace only, append to its own config.toml
+# (it deep-merges over the user config). Take the path from the payload rather than
+# constructing it: for a workspace addressed by id the config lives in the store, not
+# under the workspace root — and `workspace_config_path` is null when the store keeps
+# configs somewhere other than a file (`dgml status --workspace "$wid"` reports it too,
+# for a workspace you did not just create).
+cfg=$(jq -r .workspace_config_path <<<"$created")
+cat >> "$cfg" <<'EOF'
+
 [generation]
 model = "anthropic/claude-haiku-4-5"
 label_model = "anthropic/claude-sonnet-5"
 api_key_env = "ANTHROPIC_API_KEY"
 EOF
 
-ds=$(uv run dgml docset create --name "Imported PDFs" | jq -r .id)
+ds=$(uv run dgml docset create --workspace "$wid" --name "Imported PDFs" | jq -r .id)
 
-payload=$(uv run dgml file add "$DIR" --on-conflict skip)
+payload=$(uv run dgml file add --workspace "$wid" "$DIR" --on-conflict skip)
 for fid in $(jq -r '.results[] | select(.file) | .file.id' <<<"$payload"); do
-  uv run dgml docset add-file "$fid" --docset "$ds"
+  uv run dgml docset add-file --workspace "$wid" "$fid" --docset "$ds"
 done
 
 # Models come from config.toml — there are no --model/--label-model flags.
-uv run dgml docset generate "$ds"
+uv run dgml docset generate --workspace "$wid" "$ds"
 ```
 
 **Pin the vocabulary for consistent labels (`--schema-path`).** Labeling is
@@ -340,10 +361,13 @@ natural loop is "generate once, review/curate the schema, then reuse it":
 ```bash
 # 1) first run plans the vocabulary and exports it to docsets/<id>/schema.json
 #    (+ full-schema.rnc, the same schema as commented RELAX NG Compact)
-uv run dgml docset generate "$ds"
-# 2) reuse (optionally hand-curate) either export on later runs
-uv run dgml docset generate "$ds" \
-  --schema-path "$DGML_HOME/docsets/$ds/full-schema.rnc"
+uv run dgml docset generate --workspace "$wid" "$ds"
+# 2) reuse (optionally hand-curate) either export on later runs. --schema-path needs a
+#    local file, so take the workspace root from `status` rather than assuming one — and
+#    note this step is local-store only: on a remote blob backend the export has no path.
+root=$(uv run dgml status --workspace "$wid" | jq -r .workspace)
+uv run dgml docset generate --workspace "$wid" "$ds" \
+  --schema-path "$root/docsets/$ds/full-schema.rnc"
 ```
 
 Output always goes to the docset directory in the workspace — there is

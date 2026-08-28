@@ -274,6 +274,19 @@ def _stub_add_links(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every CLI test from an empty directory.
+
+    ``Workspace.resolve``'s last fallback is ``./dgml-workspace`` relative to the
+    *current* directory, and pytest runs from the repo root — where a gitignored
+    ``dgml-workspace/`` exists. So a test that forgets ``--workspace`` silently operated
+    on the developer's own workspace and passed for the wrong reason. That is exactly how
+    the bare-``create``-then-bare-command gap shipped unnoticed.
+    """
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_user_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Point the user-level config (``~/.config/dgml``) and the machine's store of
     workspaces (``~/dgml-workspaces``) at empty tmp dirs.

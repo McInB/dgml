@@ -84,7 +84,7 @@ git clone https://github.com/dgml-io/dgml-spec.git
 This gives you `dgml-spec/samples/<scenario>/files/`, where each scenario's raw source documents live (e.g. `dgml-spec/samples/1-NonTraded-NAV-REITs/files/`). The commands in this guide assume you run them from the parent directory that now contains `dgml-spec/`.
 
 ### 1.3 Initialize your Workspace
-All DGML documents, metadata, and schemas reside in a single directory called the **Workspace**. By default, DGML looks at the `DGML_HOME` environment variable, or falls back to `./dgml-workspace`.
+All DGML documents, metadata, and schemas reside in a single directory called the **Workspace**. A workspace is addressed either **by path** — `--workspace <path>`, `$DGML_HOME`, or the `./dgml-workspace` fallback — or **by id**, if it lives in the machine's store of workspaces (`~/dgml-workspaces/` by default), which is where `dgml workspace create` puts one when you do not name a path. This guide pins a path, so every command below can show one.
 
 Let's initialize a clean workspace. `--organization` is required the first time — it is
 embedded in this workspace's docset namespace URIs

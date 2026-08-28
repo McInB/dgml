@@ -174,15 +174,15 @@ Output (JSON):
 
 ```json
 {
-  "workspace": "…/dgml-workspace",
-  "workspace_id": "ws_7f3k9q2m4b8xr5wa",
-  "name": "dgml-workspace",
+  "workspace": "…/dgml-workspaces/ws_qf7imkc7f6oqzfwt",
+  "workspace_id": "ws_qf7imkc7f6oqzfwt",
+  "name": "Acme Contracts",
   "organization": "Acme",
   "storage_service": "default",
   "initialized": true,
-  "workspace_config_path": "…/dgml-workspace/config.toml",
-  "config_location": "…/dgml-workspace/config.toml",
-  "listed": false,
+  "workspace_config_path": "…/dgml-workspaces/ws_qf7imkc7f6oqzfwt/config.toml",
+  "config_location": "…/dgml-workspaces/ws_qf7imkc7f6oqzfwt/config.toml",
+  "listed": true,
   "storage_fingerprint": "sha256:…",
   "config_path": "~/.config/dgml/config.toml",
   "config_present": true
@@ -1967,7 +1967,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 
 | Code | Kind | Meaning |
 |---|---|---|
-| `WORKSPACE_NOT_INITIALIZED` | hard | A command that needs a workspace ran against a directory with no workspace layout (run `dgml workspace create`). |
+| `WORKSPACE_NOT_INITIALIZED` | hard | A command that needs a workspace ran against a directory with no workspace layout. The message names the resolved path and offers two remedies that work against *that* workspace: `dgml workspace create <path> --organization <org>` to make one there, or `dgml workspace list` to find one you already have. (It deliberately does not say a bare `dgml workspace create`, which would create a workspace elsewhere and leave the command failing identically.) |
 | `LEGACY_CONFIG_PRESENT` | hard | A pre-migration `<workspace>/config.toml` is the only config present; the format is now TOML. Run `dgml init` to write `~/.config/dgml/config.toml`, then migrate any settings. |
 | `MODELS_CONFIG_INVALID` | hard | The `[models]` tier block is malformed (a tier is set to a non-string / empty value). |
 | `MISSING_EXTRA` | hard | A command needs an optional extra that isn't installed (e.g. `dgml[clustering]`). |

@@ -33,9 +33,17 @@ The root is determined in this order:
 2. The `DGML_HOME` environment variable — also either a path or an id.
 3. Default: `./dgml-workspace` (relative to the current working directory).
 
+   Note this is a *lookup* of last resort, not a place anything creates: `dgml
+   workspace create` with no path builds the workspace in
+   [the store of workspaces](#the-store-of-workspaces) instead. Item 3 is what keeps a
+   workspace made by an older dgml — or by `create <path>` — opening with no arguments.
+
 `dgml workspace create --organization <org>` (or `Workspace.init()` in code)
 creates the directory layout for a fresh workspace and records its identity in
-`workspace.json`. Config is owned by `dgml init` (the "configure once per
+`workspace.json`. Where it creates it depends on whether you name a place: a path (or
+`--workspace` / `$DGML_HOME` pointing at one) makes a workspace in that directory,
+addressed by path; naming none puts it in the store of workspaces, addressed by its
+`ws_…` id. Config is owned by `dgml init` (the "configure once per
 machine" flow) — `workspace create` does not create or touch it. If the
 user-level config is absent, the workspace is still created and a warning is
 printed telling you to run `dgml init`. The CLI refuses to operate on an

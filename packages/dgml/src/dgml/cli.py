@@ -308,9 +308,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Directory to create the workspace in. Optional; when omitted the root "
-            "resolves in the usual order (the global --workspace, then $DGML_HOME, then "
-            "./dgml-workspace). A path given here overrides that."
+            "Directory to create the workspace in. Omit it and the workspace goes into "
+            "this machine's store of workspaces instead, addressed by its ws_… id and "
+            "shown by `dgml workspace list` — that is the default. Give a path here, or "
+            "set the global --workspace or $DGML_HOME to one, for a workspace that lives "
+            "in that directory and is addressed by path."
         ),
     )
     ws_create.add_argument(
@@ -1190,7 +1192,7 @@ def main(argv: list[str] | None = None) -> int:
             verify_storage_fingerprint(ws)
             if not ws.is_initialized():
                 raise WorkspaceNotInitialized(
-                    f"workspace at {ws.root} is not initialized — run 'dgml workspace create'"
+                    _uninitialized_message(ws, from_default=_root_is_the_cwd_default(args))
                 )
             if not ws.config_present:
                 # The config names the backend and cannot be reconstructed from
@@ -1332,6 +1334,37 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         )
     _emit(payload, fmt)
     return 0
+
+
+def _root_is_the_cwd_default(args: argparse.Namespace, *, path: Path | None = None) -> bool:
+    """Whether the workspace root came from the `./dgml-workspace` fallback rather than
+    from something the caller named. ``path`` is a subcommand's own positional, if it has
+    one."""
+    return (
+        path is None
+        and getattr(args, "workspace", None) is None
+        and not os.environ.get(WORKSPACE_ENV_VAR, "").strip()
+    )
+
+
+def _uninitialized_message(ws: Workspace, *, from_default: bool) -> str:
+    """Why this workspace cannot be used, and two remedies that actually work.
+
+    The old wording was "run 'dgml workspace create'", which became a loop: a bare
+    `create` now puts the workspace in the store of workspaces, so following the advice
+    literally creates one *somewhere else* and leaves the next command failing
+    identically. Both suggestions here resolve to the workspace the caller was asking
+    about — the same property :func:`_missing_config_message` has."""
+    looked = (
+        " (dgml looked there because neither --workspace nor $DGML_HOME was set)"
+        if from_default
+        else ""
+    )
+    return (
+        f"workspace at {ws.root} is not initialized{looked}. Create one there with "
+        f"'dgml workspace create {ws.root} --organization <org>', or, if you already have "
+        f"a workspace, find it with 'dgml workspace list' and pass --workspace <ws_id>."
+    )
 
 
 def _missing_config_message(ws: Workspace) -> str:
@@ -1830,6 +1863,29 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                 "Some commands will fail until credentials are configured.\n\n"
                 "Run `dgml init` and set ANTHROPIC_API_KEY / GEMINI_API_KEY.\n"
             )
+        if ws.workspaces_id is not None:
+            # A listed workspace has no path to use as a handle, and a bare next command
+            # resolves `./dgml-workspace` and fails — so say what the handle is. Always on
+            # stderr, because this is the likeliest place to get stuck and one field among
+            # thirteen in a JSON blob is not where a human looks.
+            #
+            # dgml only ever *prints* the export line. It does not set the variable and
+            # does not touch a shell profile: the caller's environment is theirs.
+            #
+            # `setdefault`, so a missing user config — which stops every LLM command, not
+            # just this one — keeps the more urgent `next_action`. The stderr line below
+            # still reaches the user either way.
+            payload.setdefault(
+                "next_action",
+                f"address it with --workspace {workspace_id} (or: export DGML_HOME={workspace_id})",
+            )
+            sys.stderr.write(
+                f"Workspace {workspace_id} is in this machine's store of workspaces, not a "
+                f"directory here.\n\n"
+                f"Use it with:  dgml --workspace {workspace_id} <command>\n"
+                f"or, for this shell:  export DGML_HOME={workspace_id}\n\n"
+                f"'dgml workspace list' shows it again later.\n"
+            )
         _emit(payload, fmt)
         return 0
 
@@ -1868,7 +1924,9 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             ws = Workspace.resolve(args.path)
         if not ws.is_initialized():
             raise WorkspaceNotInitialized(
-                f"workspace at {ws.root} is not initialized — run 'dgml workspace create'"
+                _uninitialized_message(
+                    ws, from_default=_root_is_the_cwd_default(args, path=args.path)
+                )
             )
         previous = wsconfig.read_identity(ws).storage_fingerprint
         blob_cfg, doc_cfg = ws.store_configs
@@ -1935,6 +1993,15 @@ def _dispatch(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                 "workspace": str(ws.root),
                 "name": ws.display_name,
                 "organization": ws.organization,
+                # Where this workspace's config is. Reported here because `create` used to
+                # be the only command that said, so anything wanting to edit an existing
+                # workspace's config had to reconstruct the path — and it cannot be
+                # reconstructed reliably: a listed workspace's config sits in the store,
+                # which is not under the data root when `workspace_path` relocates it, and
+                # is not a file at all on a networked backend (null, with config_location
+                # naming it instead).
+                "workspace_config_path": _workspace_config_file(ws),
+                "config_location": ws.config_location,
                 "docset_count": len(docsets),
                 "file_count": len(files),
             },

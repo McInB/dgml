@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -5322,3 +5323,144 @@ def test_changing_the_storage_service_warns_loudly(
     assert "'acme'" in captured.err
     assert "does not move data" in captured.err
     assert json.loads(captured.out)["storage_service"] == "default"
+
+
+# ------------------------------------------- the two ways of addressing a workspace
+#
+# Every test here chdirs into tmp_path. Without that they would resolve
+# `Path.cwd() / "dgml-workspace"` to the pytest invocation directory — and there is a
+# gitignored `dgml-workspace/` at the repo root, which would silently absorb the bare
+# commands below and make these tests pass for the wrong reason. That masking is why the
+# gap these cover shipped in the first place.
+
+
+def test_bare_create_then_a_bare_command_fails_with_a_remedy_that_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`create` with no path puts the workspace in the store, so a bare next command
+    resolves `./dgml-workspace` and finds nothing. That is expected — what must not
+    happen is the old advice, "run 'dgml workspace create'", which is the very
+    invocation that just failed to produce a workspace here: following it makes a
+    second workspace elsewhere and leaves this command failing identically.
+    """
+    monkeypatch.chdir(tmp_path)
+    assert main(["workspace", "create", "--organization", "Acme"]) == 0
+    capsys.readouterr()
+
+    assert main(["status"]) == 1
+    error = _read_stderr(capsys)["error"]
+    assert error["code"] == "WORKSPACE_NOT_INITIALIZED"
+    message = error["message"]
+    # Both remedies present, and each one runnable as printed.
+    assert f"dgml workspace create {tmp_path / 'dgml-workspace'}" in message
+    assert "dgml workspace list" in message
+    # ...and it says why dgml looked there, since the caller named no path.
+    assert "$DGML_HOME" in message
+
+
+def test_create_with_a_path_then_a_bare_command_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The path-shaped flow, which is what the `./dgml-workspace` fallback exists for.
+    Nothing covered it end to end before, so the fallback could have rotted unnoticed."""
+    monkeypatch.chdir(tmp_path)
+    assert main(["workspace", "create", "./dgml-workspace", "--organization", "Acme"]) == 0
+    capsys.readouterr()
+
+    assert main(["status"]) == 0
+    assert _read_stdout(capsys)["organization"] == "Acme"
+
+
+def test_a_listed_workspace_is_addressable_both_documented_ways(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The two remedies `create` prints. Asserted rather than assumed, because they are
+    the entire answer to "I ran create and now nothing works"."""
+    monkeypatch.chdir(tmp_path)
+    main(["workspace", "create", "--organization", "Acme", "--name", "Listed"])
+    wid = _read_stdout(capsys)["workspace_id"]
+
+    assert main(["--workspace", wid, "status"]) == 0
+    assert _read_stdout(capsys)["name"] == "Listed"
+
+    monkeypatch.setenv("DGML_HOME", wid)
+    assert main(["status"]) == 0
+    assert _read_stdout(capsys)["name"] == "Listed"
+
+
+def test_create_tells_you_how_to_address_a_listed_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    main(["init"])  # the documented first step, so next_action is free for this hint
+    capsys.readouterr()
+    main(["workspace", "create", "--organization", "Acme"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    wid = payload["workspace_id"]
+
+    assert wid in payload["next_action"]
+    assert "--workspace" in payload["next_action"]
+    # On stderr too: this is the likeliest place to get stuck, and one field among
+    # thirteen in a JSON blob is not where a human looks.
+    assert f"--workspace {wid}" in captured.err
+    assert f"export DGML_HOME={wid}" in captured.err
+
+
+def test_a_missing_user_config_keeps_the_more_urgent_next_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Creating before `dgml init` leaves two things to say. The payload's single
+    `next_action` goes to the one that blocks every LLM command, not just this one —
+    while the addressing hint still reaches the user on stderr, so neither is lost."""
+    monkeypatch.chdir(tmp_path)
+    main(["workspace", "create", "--organization", "Acme"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert "dgml init" in payload["next_action"]
+    assert f"export DGML_HOME={payload['workspace_id']}" in captured.err
+
+
+def test_create_does_not_hint_for_a_workspace_addressed_by_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A detached workspace's handle is its path, which the caller just typed. No
+    addressing hint, and no stderr noise about ids."""
+    monkeypatch.chdir(tmp_path)
+    main(["workspace", "create", "./ws", "--organization", "Acme"])
+    captured = capsys.readouterr()
+    assert "--workspace" not in json.loads(captured.out).get("next_action", "")
+    assert "export DGML_HOME" not in captured.err
+    assert "store of workspaces" not in captured.err
+
+
+def test_create_never_sets_dgml_home_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It prints the export line; it must not perform it. The caller's environment is
+    theirs, and a command that quietly repoints $DGML_HOME would change what every
+    later command in that shell resolves."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DGML_HOME", raising=False)
+    main(["workspace", "create", "--organization", "Acme"])
+    assert "DGML_HOME" not in os.environ
+
+
+def test_status_reports_where_the_config_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ "Where is this workspace's config?" had no answer for an existing workspace —
+    only `create` said — so anything wanting to edit one had to reconstruct the path.
+    It cannot be reconstructed: a listed workspace's config is in the store, not under
+    the data root."""
+    monkeypatch.chdir(tmp_path)
+    main(["workspace", "create", "--organization", "Acme"])
+    wid = _read_stdout(capsys)["workspace_id"]
+
+    main(["--workspace", wid, "status"])
+    status = _read_stdout(capsys)
+    assert Path(status["workspace_config_path"]).is_file()
+    assert status["config_location"] == status["workspace_config_path"]
+    # It is genuinely the config, not merely a path that exists.
+    assert "[workspace]" in Path(status["workspace_config_path"]).read_text(encoding="utf-8")
