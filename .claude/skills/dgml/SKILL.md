@@ -47,6 +47,8 @@ Setup — the minimum is a **single** command:
 1. `dgml init [--provider <anthropic|google|mixed>]` — **run once per machine.** Writes the user-level `~/.config/dgml/config.toml` with a `[models]` block. Omit `--provider` to auto-detect from the API-key env vars that are set (`ANTHROPIC_API_KEY` / `GEMINI_API_KEY`); pass `--force` to overwrite an existing file (backs it up first). There are **no** default models — an unconfigured model is a hard error, never a silent paid call.
 2. `dgml workspace create [path] --organization <org>` — creates the workspace (`docsets/` + `files/`), writes its `config.toml` (the storage binding plus a machine-managed `[workspace]` identity block), records its identity in `workspace.json`, and mints a stable `workspace_id` (echoed in the payload). **Where it goes depends on whether you name a place for it**: with no `path`, no `--workspace` and no `$DGML_HOME`, the workspace is created in the machine's store of workspaces and is listed by `dgml workspace list` (`"listed": true`); give a `path` (`dgml workspace create ./ws …`) and you get a **detached** workspace in that directory, addressed by path and not listed. Prefer the listed form for new work — `--workspace <id>` then opens it from any directory. It does **not** touch the user config; if the config is missing it still creates the workspace and warns on stderr to run `dgml init`. Safe to re-run — an existing `[storage.<name>]` is never overwritten and the recorded id, name and `created_at` are reused. `--organization` is **required for a new workspace** and is embedded in its docset namespace URIs (`http://dgml.io/<org>/<DocSetSlug>`); it becomes **optional** once the config records one (passing a different value re-organizes the workspace and warns on stderr). `--name` is an optional human-readable label. Use `--storage <name>` to materialize a named service defined as `[storage.<name>]` in the user config into this workspace's own config (omit for the bundled local-disk default); `--from-config <path>` starts from a config you authored, copied in verbatim (a template — the source is not tracked, and later edits to it do nothing). The two **compose**: `--from-config` supplies the config, `--storage` says which `[storage.<name>]` table in it to bind to — a config declaring `[storage.acme]` needs `--storage acme`, or create fails with `INVALID_ARGUMENT` rather than silently using local disk.
 
+**Per-workspace config overrides need a config that is a file.** `workspace_config_path` (from `workspace create` or `dgml status`) is the path to append a section like `[ocr]` or `[generation]` to — and it is `null` when the store of workspaces does not keep configs as files (the Mongo backend does not; `config_location` names where it is instead). In that case put the section in the user config, which every workspace layers over, or supply it at create time with `--from-config`. Recipes below guard on this rather than appending blindly: `jq -r` renders a JSON null as the string `null`, so an unguarded `cat >> "$cfg"` silently writes a file called `null` and the setting never takes effect.
+
 **A workspace's `config.toml` is required and must travel with it** — it is the only record of which storage backend holds the data. A workspace whose config is missing fails with `STORAGE_CONFIG_INVALID`; do not delete it, and copy it along when moving a *detached* workspace's directory.
 
 A `ws_…` id is not visible in the filesystem the way a path is, so **in a new shell recover it with `dgml workspace list`** rather than guessing. The recipes below pass `--workspace "$wid"` on every command, which is what works when each command runs in its own shell (as agents usually run them); at an interactive prompt `export DGML_HOME=<id>` once is equivalent and shorter. dgml never sets that variable for you.
@@ -249,6 +251,14 @@ wid=ws_...
 # is — do not construct the path, since for a workspace addressed by id it lives in the
 # store of workspaces rather than under the workspace root.
 cfg=$(uv run dgml status --workspace "$wid" | jq -r .workspace_config_path)
+if [ "$cfg" = "null" ]; then
+  # This workspace's config is not a file — its store of workspaces keeps it elsewhere
+  # (`config_location` says where). There is no per-workspace file to append to, so put
+  # the section in the user config instead (these sections layer over it), or supply it
+  # at create time with `--from-config`.
+  echo "config is not a file; set the section in ~/.config/dgml/config.toml" >&2
+  exit 1
+fi
 cat >> "$cfg" <<'EOF'
 
 [ocr]
@@ -326,6 +336,14 @@ wid=$(jq -r .workspace_id <<<"$created")
 # configs somewhere other than a file (`dgml status --workspace "$wid"` reports it too,
 # for a workspace you did not just create).
 cfg=$(jq -r .workspace_config_path <<<"$created")
+if [ "$cfg" = "null" ]; then
+  # This workspace's config is not a file — its store of workspaces keeps it elsewhere
+  # (`config_location` says where). There is no per-workspace file to append to, so put
+  # the section in the user config instead (these sections layer over it), or supply it
+  # at create time with `--from-config`.
+  echo "config is not a file; set the section in ~/.config/dgml/config.toml" >&2
+  exit 1
+fi
 cat >> "$cfg" <<'EOF'
 
 [generation]
