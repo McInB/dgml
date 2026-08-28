@@ -96,9 +96,13 @@ contract. `provider` is `null` when no keys were detected.
 **Where the workspace goes depends on whether you name a place for it.**
 
 - **No `PATH`, no global `--workspace`, no `$DGML_HOME`** → the workspace is created in
-  [the store of workspaces](storage-layout.md#the-store-of-workspaces) and is listed by
-  `dgml workspace list`. This is the default, and a change in behavior: it used to
-  create `./dgml-workspace`.
+  [the store of workspaces](storage-layout.md#the-store-of-workspaces): its root becomes
+  `~/dgml-workspaces/<workspace_id>/` on the local-disk default, its config is written
+  there, and it is listed by `dgml workspace list` and openable as
+  `--workspace <workspace_id>` from any directory. This is the default, and a change in
+  behavior — it used to create `./dgml-workspace` relative to the current directory.
+  It says nothing about where the workspace's *data* goes; that is whatever `[storage]`
+  names.
 - **`PATH` given** (`dgml workspace create ./ws …`), or the root resolved from
   `--workspace` / `$DGML_HOME` → a **detached** workspace in that directory, exactly as
   before. It is addressed by path and is not listed.
@@ -204,8 +208,8 @@ With the local-disk default that is per-machine; with a shared backend two machi
 one list. Opens no storage backend, so it works when a workspace's own blob store is
 unreachable.
 
-A **detached** workspace — one addressed by path — is not in the store and so is not
-listed. `dgml workspace import` adds one.
+A **detached** workspace — one addressed by path — is not in the store of workspaces and
+so is not listed. `dgml workspace import` adds one.
 
 Every field is derived from each workspace's own config, so a row cannot disagree with
 the workspace it describes.
@@ -245,7 +249,7 @@ workspaces is a decision, so it is a command.
 as `workspace_path` in its own `[storage.<service>]` table. That does **not** re-seal it:
 `workspace_path` is excluded from the storage fingerprint, because a workspace that has
 not moved is the same workspace on the same backend. `--move` relocates the directory
-into the store instead, and is opt-in because relocating a corpus of page images is not
+under the store of workspaces instead, and is opt-in because relocating a corpus of page images is not
 something to do on the caller's behalf.
 
 For a workspace whose `config.toml` is missing, the legacy row's inline `storage`
