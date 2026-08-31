@@ -10,11 +10,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the ghostscript-backed page renderer and its optional cache.
+"""Tests for the page-render abstraction: the ghostscript default, the
+pypdfium2 provider, the ``[rendering]`` config loader, and the render cache.
 
-Ghostscript is faked by monkeypatching ``pages.subprocess.run`` so these
-tests run without the system binary and can assert exactly how many times
-the renderer is invoked — the whole point of the cache.
+Ghostscript is faked by monkeypatching ``subprocess.run`` (and the binary
+probe in ``pages_ghostscript``) so these tests run without the system binary
+and can assert exactly how many times the renderer is invoked — the whole
+point of the cache. The pypdfium2 tests run against the real PDFium (a dev
+dependency, no system binary needed).
 """
 
 from __future__ import annotations
@@ -23,8 +26,18 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from dgml_core import pages
-from dgml_core.pages import PAGE_CACHE_ENV, render_pages
+from dgml_core import pages, pages_ghostscript
+from dgml_core.errors import RenderingConfigInvalid
+from dgml_core.pages import (
+    PAGE_CACHE_ENV,
+    RendererName,
+    RenderingConfig,
+    load_rendering_config,
+    render_pages,
+)
+from dgml_core.storage import Workspace
+
+from .conftest import _write_text_pdf, write_config
 
 
 def _fake_gs_factory(n_pages: int, counter: list[int]) -> object:
@@ -56,7 +69,7 @@ def test_no_cache_env_always_renders(
     tmp_path: Path, pdf: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv(PAGE_CACHE_ENV, raising=False)
-    monkeypatch.setattr(pages, "ghostscript_path", lambda: "gs")
+    monkeypatch.setattr(pages_ghostscript, "ghostscript_path", lambda: "gs")
     calls: list[int] = []
     monkeypatch.setattr(subprocess, "run", _fake_gs_factory(2, calls))
 
@@ -71,7 +84,7 @@ def test_cache_miss_populates_then_hit_skips_ghostscript(
 ) -> None:
     cache = tmp_path / "cache"
     monkeypatch.setenv(PAGE_CACHE_ENV, str(cache))
-    monkeypatch.setattr(pages, "ghostscript_path", lambda: "gs")
+    monkeypatch.setattr(pages_ghostscript, "ghostscript_path", lambda: "gs")
     calls: list[int] = []
     monkeypatch.setattr(subprocess, "run", _fake_gs_factory(3, calls))
 
@@ -87,7 +100,9 @@ def test_cache_miss_populates_then_hit_skips_ghostscript(
     # A later render of identical bytes into a fresh dir is served from cache;
     # ghostscript must not be invoked again — assert by making it fail loudly.
     monkeypatch.setattr(
-        pages, "ghostscript_path", lambda: (_ for _ in ()).throw(AssertionError("gs called"))
+        pages_ghostscript,
+        "ghostscript_path",
+        lambda: (_ for _ in ()).throw(AssertionError("gs called")),
     )
     out2 = tmp_path / "out2"
     assert render_pages(pdf, out2) == 3
@@ -104,7 +119,7 @@ def test_cache_key_differs_by_content(
 ) -> None:
     cache = tmp_path / "cache"
     monkeypatch.setenv(PAGE_CACHE_ENV, str(cache))
-    monkeypatch.setattr(pages, "ghostscript_path", lambda: "gs")
+    monkeypatch.setattr(pages_ghostscript, "ghostscript_path", lambda: "gs")
     calls: list[int] = []
     monkeypatch.setattr(subprocess, "run", _fake_gs_factory(1, calls))
 
@@ -122,7 +137,7 @@ def test_partial_cache_entry_is_treated_as_miss(
 ) -> None:
     cache = tmp_path / "cache"
     monkeypatch.setenv(PAGE_CACHE_ENV, str(cache))
-    monkeypatch.setattr(pages, "ghostscript_path", lambda: "gs")
+    monkeypatch.setattr(pages_ghostscript, "ghostscript_path", lambda: "gs")
     calls: list[int] = []
     monkeypatch.setattr(subprocess, "run", _fake_gs_factory(2, calls))
 
@@ -140,7 +155,7 @@ def test_dpi_reaches_ghostscript(
     tmp_path: Path, pdf: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv(PAGE_CACHE_ENV, raising=False)
-    monkeypatch.setattr(pages, "ghostscript_path", lambda: "gs")
+    monkeypatch.setattr(pages_ghostscript, "ghostscript_path", lambda: "gs")
     seen: list[list[str]] = []
 
     def capture(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -163,7 +178,7 @@ def test_cache_entries_do_not_collide_across_dpi(
     # with the page_text/ boxes written alongside them.
     cache = tmp_path / "cache"
     monkeypatch.setenv(PAGE_CACHE_ENV, str(cache))
-    monkeypatch.setattr(pages, "ghostscript_path", lambda: "gs")
+    monkeypatch.setattr(pages_ghostscript, "ghostscript_path", lambda: "gs")
     calls: list[int] = []
     monkeypatch.setattr(subprocess, "run", _fake_gs_factory(2, calls))
 
@@ -175,3 +190,116 @@ def test_cache_entries_do_not_collide_across_dpi(
     # ...and each is still cached in its own right.
     assert render_pages(pdf, tmp_path / "c", dpi=150) == 2
     assert len(calls) == 2
+
+
+def test_cache_entries_do_not_collide_across_renderers(pdf: Path) -> None:
+    # Same bytes at the same dpi through different backends are different
+    # renders — the pixels differ subtly (anti-aliasing, ±1px rounding).
+    key_gs = pages._pdf_cache_key(pdf, 300, RendererName.GHOSTSCRIPT)
+    key_pdfium = pages._pdf_cache_key(pdf, 300, RendererName.PYPDFIUM2)
+    assert key_gs != key_pdfium
+    # The default parameter is the ghostscript default, so pre-existing cache
+    # entries keyed before renderers were configurable stay valid.
+    assert pages._pdf_cache_key(pdf, 300) == key_gs
+
+
+# ---------------------------------------------------------------------------
+# The pypdfium2 renderer (real PDFium — a dev dependency, no system binary)
+# ---------------------------------------------------------------------------
+
+
+def test_pypdfium2_renders_all_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(PAGE_CACHE_ENV, raising=False)
+    pdf_path = tmp_path / "doc.pdf"
+    _write_text_pdf(pdf_path, pages_text=["Hello World", "Second Page"])
+    # Ghostscript must play no part — fail loudly if its probe runs.
+    monkeypatch.setattr(
+        pages_ghostscript,
+        "ghostscript_path",
+        lambda: (_ for _ in ()).throw(AssertionError("gs called")),
+    )
+
+    out = tmp_path / "out"
+    config = RenderingConfig(provider=RendererName.PYPDFIUM2)
+    assert render_pages(pdf_path, out, dpi=72, config=config) == 2
+    pngs = sorted(p.name for p in out.glob("page_*.png"))
+    assert pngs == ["page_1.png", "page_2.png"]
+    for name in pngs:
+        assert (out / name).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_pypdfium2_dpi_scales_pixel_dimensions(tmp_path: Path) -> None:
+    # US Letter is 612x792 pt; at 72 dpi that's 612x792 px, at 144 dpi doubled.
+    from dgml_core.ocr import _image_dimensions
+
+    pdf_path = tmp_path / "doc.pdf"
+    _write_text_pdf(pdf_path, pages_text=["Hello"])
+    config = RenderingConfig(provider=RendererName.PYPDFIUM2)
+
+    out72 = tmp_path / "out72"
+    render_pages(pdf_path, out72, dpi=72, config=config)
+    assert _image_dimensions((out72 / "page_1.png").read_bytes()) == (612, 792)
+
+    out144 = tmp_path / "out144"
+    render_pages(pdf_path, out144, dpi=144, config=config)
+    assert _image_dimensions((out144 / "page_1.png").read_bytes()) == (1224, 1584)
+
+
+def test_pypdfium2_unreadable_pdf_raises_page_render_failed(tmp_path: Path) -> None:
+    from dgml_core.errors import PageRenderFailed
+
+    bogus = tmp_path / "bogus.pdf"
+    bogus.write_bytes(b"not a pdf at all")
+    config = RenderingConfig(provider=RendererName.PYPDFIUM2)
+    with pytest.raises(PageRenderFailed, match="pypdfium2"):
+        render_pages(bogus, tmp_path / "out", config=config)
+
+
+def test_pypdfium2_render_is_served_from_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    monkeypatch.setenv(PAGE_CACHE_ENV, str(cache))
+    pdf_path = tmp_path / "doc.pdf"
+    _write_text_pdf(pdf_path, pages_text=["Hello"])
+    config = RenderingConfig(provider=RendererName.PYPDFIUM2)
+
+    assert render_pages(pdf_path, tmp_path / "a", config=config) == 1
+    # A hit constructs no renderer at all — prove it by making construction fail.
+    monkeypatch.setattr(
+        pages,
+        "make_renderer",
+        lambda cfg: (_ for _ in ()).throw(AssertionError("renderer constructed on a cache hit")),
+    )
+    assert render_pages(pdf_path, tmp_path / "b", config=config) == 1
+
+
+# ---------------------------------------------------------------------------
+# load_rendering_config — reading the [rendering] section of config.toml
+# ---------------------------------------------------------------------------
+
+
+def test_rendering_config_defaults_to_ghostscript(workspace: Workspace) -> None:
+    assert load_rendering_config(workspace) == RenderingConfig(provider=RendererName.GHOSTSCRIPT)
+
+
+def test_rendering_config_empty_section_is_default(workspace: Workspace) -> None:
+    write_config(workspace, {"rendering": {}})
+    assert load_rendering_config(workspace).provider is RendererName.GHOSTSCRIPT
+
+
+def test_rendering_config_selects_pypdfium2(workspace: Workspace) -> None:
+    write_config(workspace, {"rendering": {"provider": "pypdfium2"}})
+    assert load_rendering_config(workspace).provider is RendererName.PYPDFIUM2
+
+
+def test_rendering_config_rejects_unknown_provider(workspace: Workspace) -> None:
+    write_config(workspace, {"rendering": {"provider": "poppler"}})
+    with pytest.raises(RenderingConfigInvalid, match="poppler"):
+        load_rendering_config(workspace)
+
+
+def test_rendering_config_rejects_unknown_fields(workspace: Workspace) -> None:
+    write_config(workspace, {"rendering": {"provider": "ghostscript", "dpi": 300}})
+    with pytest.raises(RenderingConfigInvalid, match="dpi"):
+        load_rendering_config(workspace)

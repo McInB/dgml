@@ -96,7 +96,9 @@ def test_cli_hybrid_mode_reads_text_mode_from_record(
 
     import dgml_core.files as files_mod
 
-    def fake_render(pdf_path: Path, output_dir: Path, *, dpi: int = 300) -> int:
+    def fake_render(
+        pdf_path: Path, output_dir: Path, *, dpi: int = 300, config: object = None
+    ) -> int:
         _seed_page_images(output_dir, n=2)
         return 2
 
@@ -137,7 +139,9 @@ def test_cli_hybrid_verbose_surfaces_per_page_diagnostics(
 
     import dgml_core.files as files_mod
 
-    def fake_render(pdf_path: Path, output_dir: Path, *, dpi: int = 300) -> int:
+    def fake_render(
+        pdf_path: Path, output_dir: Path, *, dpi: int = 300, config: object = None
+    ) -> int:
         _seed_page_images(output_dir, n=2)
         return 2
 

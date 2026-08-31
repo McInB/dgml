@@ -64,7 +64,15 @@ class InvalidPDF(DgmlError):
     code = "INVALID_PDF"
 
 
-class GhostscriptNotFound(DgmlError):
+class RendererNotAvailable(DgmlError):
+    """The configured page renderer cannot run — its binary or Python package
+    is not installed. Subclassed by :class:`GhostscriptNotFound`; catch this
+    base to handle "renderer missing" uniformly across providers."""
+
+    code = "RENDERER_NOT_AVAILABLE"
+
+
+class GhostscriptNotFound(RendererNotAvailable):
     code = "GHOSTSCRIPT_NOT_FOUND"
 
 
@@ -176,6 +184,10 @@ class WorkspaceMigrationFailed(DgmlError):
     empty — and a wrong answer is worse than a refusal."""
 
     code = "WORKSPACE_MIGRATION_FAILED"
+
+
+class RenderingConfigInvalid(DgmlError):
+    code = "RENDERING_CONFIG_INVALID"
 
 
 class OcrConfigInvalid(DgmlError):

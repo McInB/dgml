@@ -35,6 +35,8 @@ from .errors import (
     InvalidArgument,
     InvalidPDF,
     PageRenderFailed,
+    RendererNotAvailable,
+    RenderingConfigInvalid,
     UnsupportedFileType,
     WorkspaceMigrationFailed,
     WorkspaceNotInitialized,
@@ -70,6 +72,7 @@ from .migrations import (
     workspace_schema_version,
 )
 from .models import DocSet, FileRecord
+from .pages import RendererName, RenderingConfig, load_rendering_config
 from .storage import Workspace
 from .storage_local import LocalStore
 from .storage_resolve import (
@@ -139,6 +142,10 @@ __all__ = [
     "Migration",
     "MigrationResult",
     "PageRenderFailed",
+    "RendererName",
+    "RendererNotAvailable",
+    "RenderingConfig",
+    "RenderingConfigInvalid",
     "StorageConfig",
     "UnsupportedFileType",
     "VerifyResult",
@@ -161,6 +168,7 @@ __all__ = [
     "is_workspace_id",
     "layout",
     "load_conversion_config",
+    "load_rendering_config",
     "load_store_configs",
     "load_workspaces_config",
     "make_blob_store",

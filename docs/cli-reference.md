@@ -369,7 +369,7 @@ Walk the workspace and report inconsistencies. Issue kinds emitted today:
 | `pdf_unreadable` | file | pypdf can't parse the PDF (records a permanent error so the next check skips re-parsing) |
 | `pdf_unreadable_permanent` | file | A previous parse recorded a permanent failure; not retried without `--retry-errors` |
 | `page_count_mismatch` | file | `page_images/` has the wrong number of PNGs (`repaired: true` if rerendered successfully) |
-| `page_render_failed` | file | ghostscript failed during rerender |
+| `page_render_failed` | file | the configured page renderer failed during rerender |
 | `page_render_failed_permanent` | file | A previous render recorded a permanent failure; not retried without `--retry-errors` |
 | `page_text_count_mismatch` | file | `page_text/` has the wrong number of per-page JSONs (`repaired: true` if re-extracted successfully) |
 | `page_text_corrupt` | file | A `page_text/page_N.json` exists but is not valid JSON / missing required fields |
@@ -778,7 +778,8 @@ the workspace's pre-rendered `page_images/page_N.png` files at LLM
 input time, so no extra rasterizer is needed at run time (and no
 GPL/poppler escape hatch). For non-workspace inputs (library callers
 passing arbitrary paths), the pipeline renders to a tempdir via the
-same canonical `pages.render_pages` (ghostscript).
+same canonical `pages.render_pages` (the configured renderer — ghostscript
+by default; see [Page rendering configuration](#page-rendering-configuration)).
 
 The models are **not** CLI flags — like every other model-consuming command
 (`extraction generate-schema`, `extraction extract`, `discover`), `generate` reads them
@@ -1239,7 +1240,7 @@ The `dgml file add` response also includes:
 - `note` — human-readable explanation when the policy did something
   surprising (e.g. `replace` on a hash-conflict is a no-op since content is
   already identical).
-- `page_render_error` — set if ghostscript failed or rendered a wrong page count.
+- `page_render_error` — set if the page renderer failed or rendered a wrong page count.
 - `page_count_error` — set if pypdf could not parse the PDF to extract a
   page count. The File record is still created (with `page_count: null`)
   and a permanent error is recorded; consistency check will skip retrying
@@ -1499,6 +1500,33 @@ Auth resolution, in order of precedence:
 - `profile` is **optional**. When omitted, boto3's default credential
   chain is used (env vars, `~/.aws/credentials`, IAM role, SSO).
 - Textract is invoked once per rendered page image (5 MB sync limit).
+
+## Page rendering configuration
+
+`page_images/` PNGs are rasterized by a configurable renderer, selected by
+the `rendering` section of `<workspace>/config.toml` (or the user config —
+the same layered resolution as every other section). With no section, the
+system **ghostscript** binary is used, as always. To render in-process with
+PDFium instead — no system binary needed, `pip install dgml[pdfium]`:
+
+```toml
+[rendering]
+provider = "pypdfium2"
+```
+
+Valid providers: `ghostscript` (default), `pypdfium2`. An unknown provider or
+a stray key yields `RENDERING_CONFIG_INVALID`. Selecting `pypdfium2` without
+the `pdfium` extra installed yields `RENDERER_NOT_AVAILABLE` at render time,
+recorded as a page-render failure like any other renderer error.
+
+The renderer used at add time is recorded on each File
+(`page_image_renderer`) and `dgml check --retry-errors` re-renders with the
+*recorded* renderer, so repaired pages reproduce the file's existing pixels
+(backends differ subtly — anti-aliasing, ±1 px dimension rounding). Changing
+the config only affects files added afterwards. PDF page *slicing* is not
+affected: it always uses ghostscript's `pdfwrite` device, so a `docset
+generate` that needs to slice pages still requires ghostscript regardless of
+the configured renderer.
 
 ## Managing secrets locally
 
@@ -2060,8 +2088,10 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `WALLET_KEY_MISSING` | hard | No signing key in the OS keyring, or it doesn't control `--from`. |
 | `RECORD_NOT_FOUND` | hard | `prove` could not find the anchored record (bad checksum/registry). |
 | `MANIFEST_INVALID` | hard | A `dgmlx verify` bundle is structurally broken (missing/duplicate page number, absent artifact). |
-| `GHOSTSCRIPT_NOT_FOUND` | soft | The ghostscript binary (`gs`, or `gswin64c`/`gswin32c` on Windows) is not on `PATH`; recorded as a page-render failure. |
-| `PAGE_RENDER_FAILED` | soft | ghostscript failed to render a page; recorded on the File (`page_render_error`). |
+| `RENDERER_NOT_AVAILABLE` | soft | The configured page renderer cannot run (e.g. `pypdfium2` without the `pdfium` extra installed); recorded as a page-render failure. |
+| `GHOSTSCRIPT_NOT_FOUND` | soft | The ghostscript binary (`gs`, or `gswin64c`/`gswin32c` on Windows) is not on `PATH` (a `RENDERER_NOT_AVAILABLE` subtype); recorded as a page-render failure. |
+| `PAGE_RENDER_FAILED` | soft | The page renderer failed to render a page; recorded on the File (`page_render_error`). |
+| `RENDERING_CONFIG_INVALID` | hard | The `rendering` config section is malformed (unknown provider or stray key). |
 | `PDF_SLICE_FAILED` | soft | A PDF page-slice operation failed during generation. |
 | `TEXT_EXTRACTION_FAILED` | soft | pdfminer.six extracted no digital text; recorded (`text_extraction_error`). |
 | `CORRUPT_METADATA` | hard / soft | A `file.json`/`docset.json` is not valid JSON (also reported by `dgml check`). |
@@ -2082,9 +2112,13 @@ per-file soft-fail fields.
 ## System requirements
 
 - Python 3.11+
-- Ghostscript (`gs`) — installed system-wide for page-image rendering.
-  See [CLAUDE.md](../CLAUDE.md) for the licensing rationale (ghostscript
-  is AGPL but invoked as a subprocess; it is not bundled with `dgml`).
+- Ghostscript (`gs`) — installed system-wide for page-image rendering (the
+  default renderer) and PDF page slicing during generation. See
+  [CLAUDE.md](../CLAUDE.md) for the licensing rationale (ghostscript is AGPL
+  but invoked as a subprocess; it is not bundled with `dgml`). Page-image
+  rendering can instead use PDFium in-process — `pip install dgml[pdfium]`
+  plus `rendering.provider = "pypdfium2"` in the config (see
+  [Page rendering configuration](#page-rendering-configuration)).
 
 ## Examples for an LLM agent
 

@@ -115,6 +115,19 @@ def test_add_pdf(store: FileStore, sample_pdf: Path) -> None:
     assert len(pages) == 2
 
 
+def test_add_pdf_with_pypdfium2_renderer(store: FileStore, sample_pdf: Path) -> None:
+    """A workspace configured for pypdfium2 renders through PDFium (no
+    ghostscript needed — hence no ``needs_gs``) and records the provider."""
+    from .conftest import write_config
+
+    write_config(store.ws, {"rendering": {"provider": "pypdfium2"}})
+    result = store.add(sample_pdf)
+    assert result.created
+    assert result.page_render_error is None
+    assert result.record.page_image_renderer == "pypdfium2"
+    assert len(_page_pngs(store.ws, result.record.id)) == 2
+
+
 @needs_gs
 def test_add_pdf_custom_dpi_is_rendered_and_recorded(store: FileStore, sample_pdf: Path) -> None:
     result = store.add(sample_pdf, dpi=150)

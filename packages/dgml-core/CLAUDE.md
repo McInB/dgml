@@ -22,10 +22,10 @@ unsupported (the CLI package re-exports nothing).
 
 ## Optional extras
 
-`aws`, `azure`, `macos`, `clustering`, and `chain` are declared here. The
-`dgml` CLI mirrors them as pass-throughs, so `pip install dgml[aws]` resolves
-to `dgml-core[aws]`. Keep the two extra lists in sync when you add or rename
-one.
+`aws`, `azure`, `macos`, `pdfium`, `clustering`, and `chain` are declared
+here. The `dgml` CLI mirrors them as pass-throughs, so `pip install dgml[aws]`
+resolves to `dgml-core[aws]`. Keep the two extra lists in sync when you add or
+rename one.
 
 ## OCR providers
 
@@ -43,3 +43,19 @@ providers never touch the disk.
 
 To add a new provider: see the "Adding a new provider" section in the
 [src/dgml_core/ocr.py](src/dgml_core/ocr.py) module docstring.
+
+## Page renderers
+
+Page-image rendering follows the same shape: a `PageRenderer` ABC, config
+loader (`load_rendering_config`, the `[rendering]` section), and registry
+live in [src/dgml_core/pages.py](src/dgml_core/pages.py); concrete renderers
+live in sibling modules — `src/dgml_core/pages_ghostscript.py` (the default,
+a subprocess over the system `gs` binary) and
+`src/dgml_core/pages_pypdfium2.py` (PDFium in-process, the `pdfium` extra).
+Renderers only write `page_N.png` files; the shared `render_pages` wrapper
+owns the `$DGML_PAGE_CACHE` cache, stale-image cleanup, and page counting.
+PDF *slicing* (`extract_pdf_pages`) is not provider-based — it always uses
+ghostscript's `pdfwrite`.
+
+To add a new renderer: see the "Adding a new renderer" section in the
+[src/dgml_core/pages.py](src/dgml_core/pages.py) module docstring.

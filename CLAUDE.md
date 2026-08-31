@@ -29,12 +29,17 @@ License: **Apache 2.0**.
 
 ### System dependencies (not Python packages)
 
-- **Ghostscript** (`gs`) — required for PDF page-image rendering. Install
+- **Ghostscript** (`gs`) — required for PDF page-image rendering (the
+  default renderer) and PDF page slicing during generation. Install
   via the OS package manager (`brew install ghostscript`,
   `apt-get install ghostscript`, etc.). Ghostscript is AGPL, but DGML
   invokes it as a *subprocess* (like `git` or `ffmpeg`); the AGPL applies
   to the user's ghostscript install, not to the dgml wheel. The permissive-license
   policy below governs Python deps that ship inside our wheel.
+  Page-image rendering is provider-based (mirroring OCR): `rendering.provider
+  = "pypdfium2"` in the config swaps in PDFium in-process (the `dgml[pdfium]`
+  extra — pypdfium2 is Apache-2.0/BSD-3, allowed) so no system binary is
+  needed for rendering; PDF slicing still goes through ghostscript.
 
 ## Repository layout
 
@@ -194,8 +199,10 @@ PDF-space gotchas to watch for:
   renders into a tempdir via the same canonical helper for non-workspace
   inputs), so no poppler-backed rasterizer is needed.
 - ✅ acceptable PDF libs: `pypdf` (BSD-3), `pdfminer.six` (MIT),
-  `pdfplumber` (MIT). `pikepdf` is MPL-2.0 and therefore borderline —
-  acceptable transitively but not as a direct dep; prefer alternatives.
+  `pdfplumber` (MIT), `pypdfium2` (Apache-2.0 OR BSD-3-Clause; wraps
+  PDFium, BSD-3 — the optional `pdfium` page-render backend). `pikepdf`
+  is MPL-2.0 and therefore borderline — acceptable transitively but not
+  as a direct dep; prefer alternatives.
 
 Run an audit when in doubt — `--partial-match` is required for the
 deny tokens to match real license strings, and MPL is intentionally
