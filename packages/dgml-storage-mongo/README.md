@@ -80,8 +80,7 @@ One document per workspace, `_id` = its `workspace_id`:
 ```javascript
 {
   _id:         "ws_7qxdm2pjk3n5rwts",
-  config_toml: "…verbatim UTF-8 text…",   // AUTHORITATIVE
-  revision:    7,                          // compare-and-swap token
+  config_toml: "…verbatim UTF-8 text…",   // AUTHORITATIVE, and the CAS token
   name:         "Acme Contracts",          // ↓ derived, regenerated on every write
   organization: "acme",
   storage_service: "bym",
@@ -110,7 +109,7 @@ against the copy instead of the thing; and any path, because where a workspace's
 sit is per-machine and a shared column recording it is the mistake the old
 `workspaces.json` index made.
 
-### Why this store needs a revision and the local one does not
+### Why this store detects conflicts and the local one does not
 
 A config is written **read-modify-write over the whole text**. So a lost update here
 does not drop the field being written — it discards the other machine's `[storage]`
@@ -118,10 +117,27 @@ table, `[models]` edits and comments, and the result still parses. The old per-m
 index tolerated interleaved writes because its rows were a cache; that argument does not
 transfer to authority.
 
-Every write is therefore conditional on the revision that was read, and a mismatch
-raises `WORKSPACES_WRITE_CONFLICT` rather than overwriting. `updated_at` is for humans
-and ordering only and must **never** be the predicate — see the GridFS notes below on
-what millisecond-resolution timestamps do to a comparison.
+Every write is therefore conditional, and the predicate is **`config_toml` itself**: the
+document is replaced only if the stored text is still exactly what the writer read,
+otherwise `WORKSPACES_WRITE_CONFLICT` rather than an overwrite. The local backend passes
+`expected_text` too and ignores it — one writer per machine by construction.
+
+There is deliberately **no `revision` counter**. It would be a second source of truth to
+keep in step with the field that already answers the question, and the reason the
+interface once carried one — a backend is handed the read and the write as separate
+calls, so no transaction spans them — is not fixed by making the token an integer. Two
+consequences fall out, both wanted: rewriting identical text succeeds instead of
+conflicting, and an A→B→A sequence does not conflict, because the stored state is what
+was read.
+
+`updated_at` is for humans and ordering only and must **never** be the predicate — see
+the GridFS notes below on what millisecond-resolution timestamps do to a comparison.
+Comparing content has no such tie: two different texts are two different strings.
+
+One collection-level caveat, the mirror of that same hazard: BSON string equality is
+byte-exact, but a collection created with a case- or accent-insensitive default
+`collation` would make the predicate match text that differs. Do not give this
+collection a collation.
 
 ### Reachability
 

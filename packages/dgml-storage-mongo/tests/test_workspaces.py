@@ -20,7 +20,8 @@ Three things are worth testing here and the rest follows from them:
    survives a round trip byte-for-byte, which the local backend also promises.
 2. **Lost updates.** A config is written whole, so an overwrite discards the other
    writer's `[storage]` table and comments — not just the field being written. That is
-   why this backend has a revision and the local one does not.
+   why this backend makes its writes conditional on the stored text and the local one
+   does not.
 3. **The representation.** `config_toml` must stay a single string. A future
    "let's just parse it into BSON" refactor has to fail loudly here rather than quietly
    start dropping comments and rejecting valid TOML dates.
@@ -126,7 +127,7 @@ def test_write_read_list_delete(workspaces_store: MongoWorkspacesStore) -> None:
 
     workspaces_store.write_config(WID, CONFIG)
     found = workspaces_store.read_config(WID)
-    assert found is not None and found[0] == CONFIG
+    assert found is not None and found == CONFIG
     assert workspaces_store.exists(WID) is True
     assert workspaces_store.list_ids() == [WID]
 
@@ -174,7 +175,7 @@ def test_derived_fields_are_regenerated_on_every_write(
     found = workspaces_store.read_config(WID)
     assert found is not None
     workspaces_store.write_config(
-        WID, found[0].replace("Acme Contracts", "Renamed"), expected_revision=found[1]
+        WID, found.replace("Acme Contracts", "Renamed"), expected_text=found
     )
     (entry,) = workspaces_store.list_entries()
     assert entry.name == "Renamed"
@@ -227,7 +228,7 @@ def test_config_text_round_trips_byte_for_byte(
     workspaces_store.write_config(WID, HOSTILE)
     found = workspaces_store.read_config(WID)
     assert found is not None
-    assert found[0] == HOSTILE
+    assert found == HOSTILE
 
 
 def test_the_config_is_stored_as_one_string(
@@ -246,48 +247,55 @@ def test_the_config_is_stored_as_one_string(
 # ---------------------------------------------------------------- lost updates
 
 
-def test_a_stale_revision_is_refused(
+def test_a_stale_write_is_refused(
     workspaces_store: MongoWorkspacesStore, workspaces_store_b: MongoWorkspacesStore
 ) -> None:
     """Two machines, one workspace. The loser must be told, not silently discarded —
     its write carries a whole config, so it would take the winner's `[storage]` table
     and comments with it."""
     workspaces_store.write_config(WID, CONFIG)
-    first = workspaces_store.read_config(WID)
-    assert first is not None
-    text, stale_revision = first
+    stale = workspaces_store.read_config(WID)
+    assert stale is not None
 
     # The other machine reads, then writes first.
     other = workspaces_store_b.read_config(WID)
     assert other is not None
     workspaces_store_b.write_config(
-        WID,
-        other[0] + "\n[models]\nadvanced = 'x'\n",
-        expected_revision=other[1],
+        WID, other + "\n[models]\nadvanced = 'x'\n", expected_text=other
     )
 
     with pytest.raises(WorkspacesWriteConflict, match="another writer"):
-        workspaces_store.write_config(WID, text, expected_revision=stale_revision)
+        workspaces_store.write_config(WID, stale, expected_text=stale)
 
     # The winner's content is intact.
     current = workspaces_store.read_config(WID)
-    assert current is not None and "[models]" in current[0]
+    assert current is not None and "[models]" in current
 
 
-def test_a_fresh_revision_is_accepted_and_bumped(
+def test_a_current_write_is_accepted(
     workspaces_store: MongoWorkspacesStore,
 ) -> None:
     workspaces_store.write_config(WID, CONFIG)
-    found = workspaces_store.read_config(WID)
-    assert found is not None
-    text, revision = found
-    assert isinstance(revision, int)
+    text = workspaces_store.read_config(WID)
+    assert text is not None
 
-    returned = workspaces_store.write_config(WID, text, expected_revision=revision)
-    assert returned == revision + 1
+    workspaces_store.write_config(WID, text + "\n[models]\n", expected_text=text)
+    assert workspaces_store.read_config(WID) == CONFIG + "\n[models]\n"
 
-    after = workspaces_store.read_config(WID)
-    assert after is not None and after[1] == revision + 1
+
+def test_no_revision_counter_is_stored(
+    workspaces_store: MongoWorkspacesStore,
+) -> None:
+    """`config_toml` is the conflict token, so a counter beside it would be a second
+    source of truth to keep in step. Pinned because adding one back is the obvious
+    "improvement" to reach for."""
+    workspaces_store.write_config(WID, CONFIG)
+    text = workspaces_store.read_config(WID)
+    assert text is not None
+    workspaces_store.write_config(WID, text + "\n", expected_text=text)
+
+    doc = workspaces_store._docs.find_one({"_id": WID})
+    assert doc is not None and "revision" not in doc
 
 
 def test_writing_a_deleted_workspace_says_so(
@@ -302,7 +310,7 @@ def test_writing_a_deleted_workspace_says_so(
     workspaces_store_b.delete(WID)
 
     with pytest.raises(WorkspacesWriteConflict, match="no longer in the store"):
-        workspaces_store.write_config(WID, CONFIG, expected_revision=found[1])
+        workspaces_store.write_config(WID, CONFIG, expected_text=found)
 
 
 def test_two_instances_share_one_database(
@@ -341,7 +349,7 @@ def test_both_backends_describe_a_workspace_identically(
     local_text = local.read_config(WID)
     mongo_text = workspaces_store.read_config(WID)
     assert local_text is not None and mongo_text is not None
-    assert local_text[0] == mongo_text[0] == HOSTILE
+    assert local_text == mongo_text == HOSTILE
 
 
 # --------------------------------------------------------------- reachability

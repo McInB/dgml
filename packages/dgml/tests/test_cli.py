@@ -610,7 +610,7 @@ def test_workspace_list_rows_are_derived_from_each_config(
     store = default_workspaces_store()
     found = store.read_config(wid)
     assert found is not None
-    store.write_config(wid, found[0].replace('name = "', 'name = "Renamed '))
+    store.write_config(wid, found.replace('name = "', 'name = "Renamed '))
     main(["workspace", "list"])
     rows = {r["workspace_id"]: r for r in _read_stdout(capsys)["workspaces"]}
     assert rows[wid]["name"].startswith("Renamed ")

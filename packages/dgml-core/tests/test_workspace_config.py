@@ -118,11 +118,11 @@ def test_the_backing_under_test_is_the_one_being_exercised(tmp_path: Path) -> No
     assert ws.workspaces_id is not None
     store = default_workspaces_store()
     found = store.read_config(ws.workspaces_id)
-    assert found is not None and "name = 'W'" in found[0]
+    assert found is not None and "name = 'W'" in found
 
     wc.write_identity(ws, organization="acme")
     written = store.read_config(ws.workspaces_id)
-    assert written is not None and "acme" in written[0]
+    assert written is not None and "acme" in written
 
 
 # ------------------------------------------------------------------- identity

@@ -29,8 +29,7 @@ One document per workspace, ``_id`` = its ``workspace_id``:
 
     {
       _id:         "ws_7qxdm2pjk3n5rwts",
-      config_toml: "…verbatim UTF-8 text…",   // AUTHORITATIVE
-      revision:    7,                          // CAS token, see below
+      config_toml: "…verbatim UTF-8 text…",   // AUTHORITATIVE, and the CAS token
       name:         "Acme Contracts",          // ↓ derived, regenerated on every write
       organization: "acme",
       storage_service: "bym",
@@ -78,11 +77,24 @@ machine's ``[storage]`` table, ``[models]`` edits and comments, and the result s
 parses. The old per-machine index tolerated interleaved writes because its rows were a
 cache; that argument does not transfer to authority.
 
-Hence ``revision``: every write is conditional on the revision that was read, and a
-mismatch raises :class:`~dgml_core.errors.WorkspacesWriteConflict` rather than
-overwriting. ``updated_at`` is for humans and ordering only and must **never** be the
-predicate — this package already contains the case study for why, in
-``gridfs_store``'s notes on millisecond ``uploadDate`` ties.
+So every write is conditional, and the predicate is **``config_toml`` itself**: the
+document is only replaced if the stored text is still exactly what the writer read,
+otherwise :class:`~dgml_core.errors.WorkspacesWriteConflict` rather than an overwrite.
+There is deliberately no ``revision`` counter. It would be a second source of truth to
+keep in step with the field that already answers the question, and the reason the
+interface once needed one — that a backend is handed the read and the write as separate
+calls — is not fixed by making the token an integer.
+
+``updated_at`` is for humans and ordering only and must **never** be the predicate —
+this package already contains the case study for why, in ``gridfs_store``'s notes on
+millisecond ``uploadDate`` ties, where two writes inside one millisecond leave the
+ordering undefined and the failure mode is a *silent stale read*. Comparing content has
+no such tie: two different texts are two different strings.
+
+One collection-level caveat, the mirror of the same hazard: BSON string equality is
+byte-exact, but a collection created with a case- or accent-insensitive default
+``collation`` would make the predicate match text that differs. Do not give this
+collection a collation.
 
 Credentials
 -----------
@@ -197,7 +209,7 @@ class MongoWorkspacesStore(WorkspacesStore):
 
     # ---- the list of workspaces ----
 
-    def read_config(self, workspace_id: str) -> tuple[str, int | None] | None:
+    def read_config(self, workspace_id: str) -> str | None:
         with self._reachable():
             doc = self._docs.find_one({"_id": workspace_id})
         if doc is None:
@@ -208,47 +220,40 @@ class MongoWorkspacesStore(WorkspacesStore):
                 f"{self.label()} document {workspace_id!r} has no 'config_toml' string; "
                 f"something other than dgml wrote it"
             )
-        revision = doc.get("revision")
-        return text, revision if isinstance(revision, int) else None
+        return text
 
     def write_config(
-        self, workspace_id: str, text: str, *, expected_revision: int | None = None
-    ) -> int | None:
+        self, workspace_id: str, text: str, *, expected_text: str | None = None
+    ) -> None:
         derived = self._derive(workspace_id, text)
         with self._reachable():
-            return self._store(workspace_id, text, derived, expected_revision)
+            self._store(workspace_id, text, derived, expected_text)
 
     def _store(
         self,
         workspace_id: str,
         text: str,
         derived: dict[str, Any],
-        expected_revision: int | None,
-    ) -> int | None:
-        if expected_revision is None:
+        expected_text: str | None,
+    ) -> None:
+        if expected_text is None:
             # A first write, or a caller that read nothing. Upsert unconditionally: there
-            # is no revision to be stale against.
+            # is no prior text to be stale against.
             self._docs.update_one(
                 {"_id": workspace_id},
                 {
                     "$set": {"config_toml": text, **derived},
                     "$currentDate": {"updated_at": True},
-                    "$setOnInsert": {
-                        "revision": 1,
-                        "schema_version": CATALOG_SCHEMA_VERSION,
-                    },
+                    "$setOnInsert": {"schema_version": CATALOG_SCHEMA_VERSION},
                 },
                 upsert=True,
             )
-            found = self._docs.find_one({"_id": workspace_id}, {"revision": 1})
-            revision = (found or {}).get("revision")
-            return revision if isinstance(revision, int) else None
+            return
 
         result = self._docs.update_one(
-            {"_id": workspace_id, "revision": expected_revision},
+            {"_id": workspace_id, "config_toml": expected_text},
             {
                 "$set": {"config_toml": text, **derived},
-                "$inc": {"revision": 1},
                 "$currentDate": {"updated_at": True},
             },
         )
@@ -266,7 +271,6 @@ class MongoWorkspacesStore(WorkspacesStore):
                 f"Its config is written whole, so overwriting would discard whatever that "
                 f"writer changed. Re-run the command to work from the current config."
             )
-        return expected_revision + 1
 
     def list_configs(self) -> dict[str, str]:
         with self._reachable():
