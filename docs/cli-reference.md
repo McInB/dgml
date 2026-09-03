@@ -2018,7 +2018,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 
 | Code | Kind | Meaning |
 |---|---|---|
-| `WORKSPACE_NOT_INITIALIZED` | hard | A command that needs a workspace ran against a directory with no workspace layout. The message names the resolved path and offers two remedies that work against *that* workspace: `dgml workspace create <path> --organization <org>` to make one there, or `dgml workspace list` to find one you already have. (It deliberately does not say a bare `dgml workspace create`, which would create a workspace elsewhere and leave the command failing identically.) |
+| `WORKSPACE_NOT_INITIALIZED` | hard | A command that needs a workspace ran against a directory that has no workspace **config** — which is what makes a directory a workspace, since the config names the storage backend and cannot be reconstructed. This covers both "never a workspace" and "a workspace whose `config.toml` was deleted"; nothing on disk distinguishes them for a remote-backed workspace, so one error carries all the remedies. The message names the resolved path and offers remedies that work against *that* workspace: `dgml workspace create <path> --organization <org>` to make one there, `dgml workspace list` to find one you already have, or restoring the config from backup. (It deliberately does not say a bare `dgml workspace create`, which would create a workspace elsewhere and leave the command failing identically.) |
 | `LEGACY_CONFIG_PRESENT` | hard | A pre-migration `<workspace>/config.toml` is the only config present; the format is now TOML. Run `dgml init` to write `~/.config/dgml/config.toml`, then migrate any settings. |
 | `MODELS_CONFIG_INVALID` | hard | The `[models]` tier block is malformed (a tier is set to a non-string / empty value). |
 | `MISSING_EXTRA` | hard | A command needs an optional extra that isn't installed (e.g. `dgml[clustering]`). |
@@ -2065,7 +2065,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `PDF_SLICE_FAILED` | soft | A PDF page-slice operation failed during generation. |
 | `TEXT_EXTRACTION_FAILED` | soft | pdfminer.six extracted no digital text; recorded (`text_extraction_error`). |
 | `CORRUPT_METADATA` | hard / soft | A `file.json`/`docset.json` is not valid JSON (also reported by `dgml check`). |
-| `STORAGE_CONFIG_INVALID` | hard | A `[storage]` / `[storage.<name>]` table is malformed, `--storage NAME` names a service that isn't configured, or an initialized workspace has **no `config.toml`** — that file names its storage backend and cannot be reconstructed from anything else. |
+| `STORAGE_CONFIG_INVALID` | hard | A `[storage]` / `[storage.<name>]` table is malformed, or `--storage NAME` names a service that isn't configured. (A workspace with **no** config reports `WORKSPACE_NOT_INITIALIZED` instead — having a config is what being a workspace means.) |
 | `STORAGE_PROVIDER_UNRESOLVABLE` | hard | A storage `provider` dotted path (`module:Class`) can't be imported/resolved. |
 | `WORKSPACES_CONFIG_INVALID` | hard | The `[workspaces]` table is malformed, or its provider was handed an option it does not accept. |
 | `WORKSPACE_NOT_FOUND` | hard | `--workspace <ws_id>` named an id the store of workspaces does not hold. Deliberately an error rather than falling through to path resolution — an id has a distinctive shape, so a caller that typed one meant a workspace. |

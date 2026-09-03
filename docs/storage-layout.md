@@ -53,6 +53,12 @@ config merges across layers.
 
 ## Directory structure
 
+Only for a workspace whose data is on local disk, and **only what has been written**:
+nothing is pre-created. `workspace create` writes `config.toml` and `workspace.json`;
+`docsets/` and `files/` appear when the first docset or file lands in them. A workspace
+whose blobs and documents both live on a remote backend has no `docsets/` or `files/`
+at all — see [storage services](#storage-services-storage).
+
 ```
 <workspace_root>/
 ├── workspace.json                    # { name, organization, workspace_id, schema_version } — written by `workspace create`
@@ -242,10 +248,11 @@ it can be deleted.
 
 ## The workspace config (`config.toml`)
 
-Every workspace has a `config.toml`. It is **required**: it names the workspace's
-storage backend, so an initialized workspace without one fails with
-`STORAGE_CONFIG_INVALID` rather than silently falling back to local disk — an absent
-config is indistinguishable from a remote-backed workspace whose config was deleted.
+Every workspace has a `config.toml`. It is **required**, and it is what *makes* a
+directory a workspace: it names the storage backend, so a directory without one fails
+with `WORKSPACE_NOT_INITIALIZED` rather than silently falling back to local disk — an
+absent config is indistinguishable from a remote-backed workspace whose config was
+deleted, and both want the same answer from the caller.
 
 Where it lives depends on how the workspace is addressed: `<workspace>/config.toml` for
 one addressed by path, and inside [the store of workspaces](#the-store-of-workspaces)

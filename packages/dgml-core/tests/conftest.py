@@ -82,6 +82,9 @@ def dump_toml(data: dict[str, Any], _prefix: str = "") -> str:
 
 def write_config(workspace: Workspace, data: dict[str, Any]) -> None:
     """Write ``<workspace>/config.toml`` (resolution layer 3) from a dict."""
+    # Nothing scaffolds the workspace root any more (`Workspace.init()` is gone),
+    # so a helper that writes into it has to make sure it exists.
+    workspace.root.mkdir(parents=True, exist_ok=True)
     workspace.config_path.write_text(dump_toml(data) + "\n", encoding="utf-8")
 
 
@@ -160,7 +163,9 @@ def _write_text_pdf(path: Path, pages_text: list[str]) -> None:
 @pytest.fixture
 def workspace(tmp_path: Path) -> Workspace:
     ws = Workspace(root=tmp_path / "ws")
-    ws.init()
+    # Nothing scaffolds the root now that `init()` is gone; stores create what they
+    # write into, but a test writing directly under the root needs it to exist.
+    ws.root.mkdir(parents=True, exist_ok=True)
     return ws
 
 
