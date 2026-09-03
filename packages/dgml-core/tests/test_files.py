@@ -150,7 +150,10 @@ def test_add_rejects_nonpositive_dpi(store: FileStore, sample_pdf: Path) -> None
     for bad in (0, -300):
         with pytest.raises(ValueError, match="dpi"):
             store.add(sample_pdf, dpi=bad)
-    assert not any(store.ws.files_dir.iterdir())
+    # Nothing written: the directory is created by the first write, so on a rejected
+    # add it should not exist at all (and must certainly be empty if it does).
+    files_dir = store.ws.files_dir
+    assert not files_dir.exists() or not any(files_dir.iterdir())
 
 
 @needs_gs

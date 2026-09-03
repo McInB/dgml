@@ -45,7 +45,6 @@ from dgml_core.errors import (
     DgmlError,
     InvalidArgument,
     StorageBackendMismatch,
-    StorageConfigInvalid,
     WorkspaceNotInitialized,
     now_iso,
     short_error_message,
@@ -1195,16 +1194,14 @@ def main(argv: list[str] | None = None) -> int:
             # silently opening an empty backend. `workspace reseal` (exempt above,
             # under the `workspace` group) is how an intended change is accepted.
             verify_storage_fingerprint(ws)
+            # One check, not two: `is_initialized()` *is* "has a config". The config
+            # names the backend and cannot be reconstructed from anything else, so an
+            # absent one is indistinguishable from "never a workspace" — and both want
+            # the same answer from the caller. The message covers both readings.
             if not ws.is_initialized():
                 raise WorkspaceNotInitialized(
                     _uninitialized_message(ws, from_default=_root_is_the_cwd_default(args))
                 )
-            if not ws.config_present:
-                # The config names the backend and cannot be reconstructed from
-                # anything else — an absent one is indistinguishable from "this was a
-                # remote workspace whose config was deleted", which would otherwise
-                # fall through to the local default and report an empty workspace.
-                raise StorageConfigInvalid(_missing_config_message(ws))
             _warn_if_config_declares_workspaces(ws)
             # Upgrade an older workspace in place before anything reads it. This
             # is the one point every command passes through, so there is no
@@ -1353,27 +1350,22 @@ def _root_is_the_cwd_default(args: argparse.Namespace, *, path: Path | None = No
 
 
 def _uninitialized_message(ws: Workspace, *, from_default: bool) -> str:
-    """Why this workspace cannot be used, and two remedies that actually work.
+    """Why this workspace cannot be used, and remedies that actually work.
 
-    The old wording was "run 'dgml workspace create'", which became a loop: a bare
-    `create` now puts the workspace in the store of workspaces, so following the advice
-    literally creates one *somewhere else* and leaves the next command failing
-    identically. Both suggestions here resolve to the workspace the caller was asking
-    about — the same property :func:`_missing_config_message` has."""
-    looked = (
-        " (dgml looked there because neither --workspace nor $DGML_HOME was set)"
-        if from_default
-        else ""
-    )
-    return (
-        f"workspace at {ws.root} is not initialized{looked}. Create one there with "
-        f"'dgml workspace create {ws.root} --organization <org>', or, if you already have "
-        f"a workspace, find it with 'dgml workspace list' and pass --workspace <ws_id>."
-    )
+    ``is_initialized()`` is "has a config", so this one message answers two readings
+    of the same fact: *never a workspace*, and *a workspace whose config is gone*.
+    Nothing on disk distinguishes them for a remote-backed workspace, and for a local
+    one the distinction would not change the advice — so both remedies are offered
+    rather than guessed between.
 
+    Addressed by id, the root is meaningless (the workspace lives in a store, not at a
+    path), so that case names the store and the id instead.
 
-def _missing_config_message(ws: Workspace) -> str:
-    """Why this workspace cannot be opened, and what would fix it."""
+    "Run 'dgml workspace create'" alone would be a loop: a bare `create` puts the
+    workspace in the store of workspaces, so following it literally creates one
+    *somewhere else* and leaves the next command failing identically. Every suggestion
+    below resolves to the workspace the caller was actually asking about.
+    """
     if ws.workspaces_id is not None:
         return (
             f"{ws.config_location} holds no config for {ws.workspaces_id}. It names this "
@@ -1381,11 +1373,17 @@ def _missing_config_message(ws: Workspace) -> str:
             f"backup, or run 'dgml workspace list' to see what this machine's store of "
             f"workspaces does hold."
         )
+    looked = (
+        " (dgml looked there because neither --workspace nor $DGML_HOME was set)"
+        if from_default
+        else ""
+    )
     return (
-        f"{ws.config_path} is missing. It names this workspace's storage backend and "
-        f"cannot be reconstructed — restore it from backup, or, if this workspace is on "
-        f"default local storage, re-run 'dgml workspace create {ws.root} "
-        f"--organization <org>'."
+        f"no workspace at {ws.root}: {ws.config_path} is missing{looked}. The config "
+        f"names the storage backend and cannot be reconstructed — create a workspace "
+        f"there with 'dgml workspace create {ws.root} --organization <org>', restore the "
+        f"config from backup, or, if you already have a workspace, find it with "
+        f"'dgml workspace list' and pass --workspace <ws_id>."
     )
 
 
@@ -1885,8 +1883,9 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         ws = Workspace(root=ws.root, workspaces_id=ws.workspaces_id)
         wsconfig.write_identity(ws, storage_fingerprint=storage_fingerprint_pair(*ws.store_configs))
 
-        # Now build the workspace through the selected backend.
-        ws.init()
+        # Now build the workspace through the selected backend. Nothing is
+        # scaffolded first: stores create their own containers on write, so the
+        # workspace exists by virtue of its config and this first document.
         ws.write_meta(name=name, organization=organization, workspace_id=workspace_id)
         # Stamp the current layout revision so a brand-new workspace is never
         # mistaken for an old one and re-scanned by the migration on first use.
