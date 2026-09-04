@@ -171,6 +171,17 @@ class WorkspacesStore(ProviderConfigFields, ABC):
         will refuse that write. Both are acceptable: a backend may refuse **more** eagerly
         than content comparison would, never less.
 
+        Whatever the mechanism, the comparison must be **byte-exact**. A backend whose
+        equality folds case, accents, Unicode normal form or trailing whitespace will judge
+        two *different* configs equal and overwrite the other writer — precisely the failure
+        this parameter exists to prevent, arrived at silently. That is easy to inherit
+        rather than choose: MySQL's default collation (``utf8mb4_0900_ai_ci``) is case- and
+        accent-insensitive, Postgres 12+ offers non-deterministic collations, and a MongoDB
+        collection can carry a default ``collation``. So pin a byte-comparing collation, or
+        compare a hash, or compare bytes — not the engine's default notion of string
+        equality. The opposite error is harmless by comparison: judging equal text unequal
+        raises a spurious conflict, and the caller re-runs.
+
         Must be atomic with respect to concurrent readers: a reader sees the old text
         or the new one, never a partial file.
         """
