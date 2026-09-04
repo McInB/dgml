@@ -23,10 +23,10 @@ from .errors import (
     AuthError,
     CorruptMetadata,
     DgmlError,
+    EngineNotAvailable,
     OcrFailed,
     PageRenderFailed,
     RecordedError,
-    RendererNotAvailable,
     TextExtractionFailed,
     append_recorded_error,
     clear_recorded_errors,
@@ -37,9 +37,9 @@ from .hybrid import extract_text_hybrid
 from .ocr import extract_text_ocr, load_ocr_config
 from .pages import (
     DEFAULT_DPI,
-    RendererName,
-    RenderingConfig,
-    load_rendering_config,
+    EngineName,
+    PdfConfig,
+    load_pdf_config,
     render_pages,
 )
 from .storage import Workspace
@@ -300,9 +300,7 @@ def _check_file(
         )
 
 
-def _render(
-    ws: Workspace, source_key: str, pages_prefix: str, dpi: int, config: RenderingConfig
-) -> int:
+def _render(ws: Workspace, source_key: str, pages_prefix: str, dpi: int, config: PdfConfig) -> int:
     """Render the source PDF's page images through the store.
 
     Materialize the source to a real path (the renderer needs one) and render
@@ -330,7 +328,7 @@ def _recorded_dpi(record_data: dict[str, Any]) -> int:
     return DEFAULT_DPI
 
 
-def _recorded_renderer(record_data: dict[str, Any], ws: Workspace) -> RenderingConfig:
+def _recorded_renderer(record_data: dict[str, Any], ws: Workspace) -> PdfConfig:
     """The renderer this file's pages were produced with, per its own record.
 
     Same rationale as :func:`_recorded_dpi`: a repair must reproduce the
@@ -342,10 +340,10 @@ def _recorded_renderer(record_data: dict[str, Any], ws: Workspace) -> RenderingC
     recorded = record_data.get("page_image_renderer")
     if isinstance(recorded, str):
         try:
-            return RenderingConfig(provider=RendererName(recorded))
+            return PdfConfig(provider=EngineName(recorded))
         except ValueError:
             pass
-    return load_rendering_config(ws)
+    return load_pdf_config(ws)
 
 
 def _recover_missing_pages(
@@ -356,7 +354,7 @@ def _recover_missing_pages(
     permanent_ops: set[str],
     file_id: str,
     dpi: int,
-    render_config: RenderingConfig,
+    render_config: PdfConfig,
     report: CheckReport,
 ) -> int:
     """Recover a file whose stored page count is unknown/bogus and which has
@@ -380,7 +378,7 @@ def _recover_missing_pages(
 
     try:
         actual = _render(ws, source_key, pages_prefix, dpi, render_config)
-    except (RendererNotAvailable, PageRenderFailed) as exc:
+    except (EngineNotAvailable, PageRenderFailed) as exc:
         append_recorded_error(
             ws,
             file_id,
@@ -434,7 +432,7 @@ def _check_page_rendering(
     permanent_ops: set[str],
     file_id: str,
     dpi: int,
-    render_config: RenderingConfig,
+    render_config: PdfConfig,
     report: CheckReport,
 ) -> None:
     if rendered == expected:
@@ -456,7 +454,7 @@ def _check_page_rendering(
 
     try:
         actual = _render(ws, source_key, pages_prefix, dpi, render_config)
-    except (RendererNotAvailable, PageRenderFailed) as exc:
+    except (EngineNotAvailable, PageRenderFailed) as exc:
         append_recorded_error(
             ws,
             file_id,

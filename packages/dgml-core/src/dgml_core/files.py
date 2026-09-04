@@ -31,6 +31,7 @@ from .errors import (
     AuthError,
     ConflictError,
     DgmlError,
+    EngineNotAvailable,
     FileNotFound,
     InvalidArgument,
     InvalidPDF,
@@ -49,8 +50,8 @@ from .models import FileRecord
 from .ocr import extract_text_ocr, load_ocr_config
 from .pages import (
     DEFAULT_DPI,
-    RenderingConfig,
-    load_rendering_config,
+    PdfConfig,
+    load_pdf_config,
     pdf_page_count,
     render_pages,
 )
@@ -307,7 +308,7 @@ class FileStore:
         # Page count, render, and text extraction all need a real PDF path; one
         # materialize yields it (zero-copy on LocalStore, a temp download on a
         # remote store) and all three share it.
-        render_config = load_rendering_config(self.ws)
+        render_config = load_pdf_config(self.ws)
         with self.ws.blobs.materialize(pdf_key) as pdf_path:
             page_count, page_count_error = self._safe_page_count(pdf_path, file_id)
             page_render_error = self._render_pages(
@@ -422,7 +423,7 @@ class FileStore:
         *,
         expected: int | None,
         dpi: int = DEFAULT_DPI,
-        config: RenderingConfig | None = None,
+        config: PdfConfig | None = None,
     ) -> str | None:
         """Render pages, recording errors. Returns a human-readable error
         message on failure or partial success, or ``None`` on full success."""
@@ -430,7 +431,12 @@ class FileStore:
             pages_prefix = layout.file_pages_prefix(file_id)
             with self.ws.blobs.staged_write(pages_prefix) as pages_dir:
                 rendered = render_pages(pdf_path, pages_dir, dpi=dpi, config=config)
-        except PageRenderFailed as exc:
+        # EngineNotAvailable is caught with PageRenderFailed, not left to
+        # escape: the source blob is already uploaded by this point, so an
+        # uncaught raise strands it with no file.json and `dgml check` reports
+        # the workspace broken. A misconfigured renderer is a soft, recorded
+        # per-file failure — the same shape consistency.py already uses.
+        except (EngineNotAvailable, PageRenderFailed) as exc:
             append_recorded_error(
                 self.ws,
                 file_id,

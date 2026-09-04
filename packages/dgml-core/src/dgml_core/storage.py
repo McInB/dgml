@@ -506,11 +506,11 @@ _OCR_GUIDANCE = """\
 # api_key_env = "AZURE_DOCINTEL_KEY"
 """
 
-_RENDERING_GUIDANCE = """\
-# Page-image rendering defaults to the system ghostscript binary. To render
-# in-process with PDFium instead (no system binary; `pip install dgml[pdfium]`),
-# uncomment:
-# [rendering]
+_PDF_GUIDANCE = """\
+# PDF work — rendering page images and slicing page ranges — defaults to the
+# system ghostscript binary. To use PDFium in-process instead (no system
+# binary; `pip install dgml[pdfium]`), uncomment:
+# [pdf]
 # provider = "pypdfium2"
 """
 
@@ -586,7 +586,7 @@ def render_config_toml(provider: str | None) -> str:
             '# standard = "..."\n'
             '# advanced = "..."\n'
             '# expert   = "..."\n'
-            "\n" + _OCR_GUIDANCE + "\n" + _RENDERING_GUIDANCE + "\n" + _FEATURE_GUIDANCE
+            "\n" + _OCR_GUIDANCE + "\n" + _PDF_GUIDANCE + "\n" + _FEATURE_GUIDANCE
         )
     tiers = PROVIDER_MODELS[provider]
     width = max(len(t) for t in tiers)
@@ -594,13 +594,7 @@ def render_config_toml(provider: str | None) -> str:
     for tier in ("light", "standard", "advanced", "expert"):
         lines.append(f'{tier.ljust(width)} = "{tiers[tier]}"')
     return (
-        "\n".join(lines)
-        + "\n\n"
-        + _OCR_GUIDANCE
-        + "\n"
-        + _RENDERING_GUIDANCE
-        + "\n"
-        + _FEATURE_GUIDANCE
+        "\n".join(lines) + "\n\n" + _OCR_GUIDANCE + "\n" + _PDF_GUIDANCE + "\n" + _FEATURE_GUIDANCE
     )
 
 

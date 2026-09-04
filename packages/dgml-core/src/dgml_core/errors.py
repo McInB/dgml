@@ -64,15 +64,16 @@ class InvalidPDF(DgmlError):
     code = "INVALID_PDF"
 
 
-class RendererNotAvailable(DgmlError):
-    """The configured page renderer cannot run — its binary or Python package
-    is not installed. Subclassed by :class:`GhostscriptNotFound`; catch this
-    base to handle "renderer missing" uniformly across providers."""
+class EngineNotAvailable(DgmlError):
+    """The configured PDF engine cannot run — its binary or Python package is
+    not installed. Raised for either capability (rendering or slicing), since
+    both come from one engine. Subclassed by :class:`GhostscriptNotFound`;
+    catch this base to handle "engine missing" uniformly across providers."""
 
-    code = "RENDERER_NOT_AVAILABLE"
+    code = "ENGINE_NOT_AVAILABLE"
 
 
-class GhostscriptNotFound(RendererNotAvailable):
+class GhostscriptNotFound(EngineNotAvailable):
     code = "GHOSTSCRIPT_NOT_FOUND"
 
 
@@ -186,8 +187,8 @@ class WorkspaceMigrationFailed(DgmlError):
     code = "WORKSPACE_MIGRATION_FAILED"
 
 
-class RenderingConfigInvalid(DgmlError):
-    code = "RENDERING_CONFIG_INVALID"
+class PdfConfigInvalid(DgmlError):
+    code = "PDF_CONFIG_INVALID"
 
 
 class OcrConfigInvalid(DgmlError):

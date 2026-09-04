@@ -103,7 +103,7 @@ with `secrets.choice` ([packages/dgml/src/dgml/ids.py](../packages/dgml/src/dgml
 ## Page-image render cache (`$DGML_PAGE_CACHE`, optional)
 
 Rendering `page_images/` runs the configured renderer (the system
-ghostscript binary by default, or PDFium via `rendering.provider =
+ghostscript binary by default, or PDFium via `[pdf] provider =
 "pypdfium2"`), which dominates the cost of `dgml file add`. The render is a
 pure function of the PDF bytes, the renderer, and the dpi, so when the
 **`DGML_PAGE_CACHE`** environment variable names a directory, the renderer
@@ -966,7 +966,7 @@ overlap, OCR wins on conflict).
 
 `page_image_dpi` and `page_image_renderer` record how `page_images/` were
 rendered — the renderer is `"ghostscript"` (the default) or `"pypdfium2"`,
-per the workspace's `rendering.provider` config at add time; the dpi is `300`
+per the workspace's `[pdf] provider` config at add time; the dpi is `300`
 unless `dgml file add --dpi N` set otherwise. They are stored per file both so
 a later renderer change is detectable and because they are load-bearing: the
 dpi is the scale of every `page_text/` word box (see below), and `dgml check

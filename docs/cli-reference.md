@@ -778,8 +778,8 @@ the workspace's pre-rendered `page_images/page_N.png` files at LLM
 input time, so no extra rasterizer is needed at run time (and no
 GPL/poppler escape hatch). For non-workspace inputs (library callers
 passing arbitrary paths), the pipeline renders to a tempdir via the
-same canonical `pages.render_pages` (the configured renderer — ghostscript
-by default; see [Page rendering configuration](#page-rendering-configuration)).
+same canonical `pages.render_pages` (the configured engine — ghostscript by
+default; see [PDF engine configuration](#pdf-engine-configuration)).
 
 The models are **not** CLI flags — like every other model-consuming command
 (`extraction generate-schema`, `extraction extract`, `discover`), `generate` reads them
@@ -1501,32 +1501,43 @@ Auth resolution, in order of precedence:
   chain is used (env vars, `~/.aws/credentials`, IAM role, SSO).
 - Textract is invoked once per rendered page image (5 MB sync limit).
 
-## Page rendering configuration
+## PDF engine configuration
 
-`page_images/` PNGs are rasterized by a configurable renderer, selected by
-the `rendering` section of `<workspace>/config.toml` (or the user config —
-the same layered resolution as every other section). With no section, the
-system **ghostscript** binary is used, as always. To render in-process with
-PDFium instead — no system binary needed, `pip install dgml[pdfium]`:
+DGML needs two things from a PDF library: rasterizing pages into
+`page_images/`, and slicing a page range into a new PDF (the per-window
+payload `docset generate` sends to the model). Both come from one
+**engine**, selected by the `pdf` section of `<workspace>/config.toml` (or
+the user config — the same layered resolution as every other section). With
+no section, the system **ghostscript** binary is used, as always. To use
+PDFium in-process instead — no system binary needed, `pip install
+dgml[pdfium]`:
 
 ```toml
-[rendering]
+[pdf]
 provider = "pypdfium2"
 ```
 
+One key governs both capabilities on purpose: the reason to switch is usually
+"don't require a system binary", which is only satisfied when neither
+rendering nor slicing shells out.
+
 Valid providers: `ghostscript` (default), `pypdfium2`. An unknown provider or
-a stray key yields `RENDERING_CONFIG_INVALID`. Selecting `pypdfium2` without
-the `pdfium` extra installed yields `RENDERER_NOT_AVAILABLE` at render time,
-recorded as a page-render failure like any other renderer error.
+a stray key yields `PDF_CONFIG_INVALID`. Selecting `pypdfium2` without the
+`pdfium` extra installed yields `ENGINE_NOT_AVAILABLE`, recorded as a soft
+per-file page-render failure like any other engine error (and as a per-file
+`failed` entry during `docset generate`).
 
 The renderer used at add time is recorded on each File
 (`page_image_renderer`) and `dgml check --retry-errors` re-renders with the
 *recorded* renderer, so repaired pages reproduce the file's existing pixels
 (backends differ subtly — anti-aliasing, ±1 px dimension rounding). Changing
 the config only affects files added afterwards. PDF page *slicing* is not
-affected: it always uses ghostscript's `pdfwrite` device, so a `docset
-generate` that needs to slice pages still requires ghostscript regardless of
-the configured renderer.
+Page *slicing* follows the same engine: ghostscript's `pdfwrite` by default,
+or PDFium's structural page import when configured. The two are
+interchangeable in what a slice contains, but not byte-for-byte — ghostscript
+re-encodes images (smaller payloads on scans, lossily), while PDFium copies
+them verbatim (higher fidelity, up to ~2x larger). Slices are never persisted
+or hashed, so switching engines cannot invalidate an attestation or a cache.
 
 ## Managing secrets locally
 
@@ -2088,11 +2099,11 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `WALLET_KEY_MISSING` | hard | No signing key in the OS keyring, or it doesn't control `--from`. |
 | `RECORD_NOT_FOUND` | hard | `prove` could not find the anchored record (bad checksum/registry). |
 | `MANIFEST_INVALID` | hard | A `dgmlx verify` bundle is structurally broken (missing/duplicate page number, absent artifact). |
-| `RENDERER_NOT_AVAILABLE` | soft | The configured page renderer cannot run (e.g. `pypdfium2` without the `pdfium` extra installed); recorded as a page-render failure. |
-| `GHOSTSCRIPT_NOT_FOUND` | soft | The ghostscript binary (`gs`, or `gswin64c`/`gswin32c` on Windows) is not on `PATH` (a `RENDERER_NOT_AVAILABLE` subtype); recorded as a page-render failure. |
+| `ENGINE_NOT_AVAILABLE` | soft | The configured PDF engine cannot run (e.g. `pypdfium2` without the `pdfium` extra installed); recorded as a page-render failure, or a per-file `failed` entry when it was slicing. |
+| `GHOSTSCRIPT_NOT_FOUND` | soft | The ghostscript binary (`gs`, or `gswin64c`/`gswin32c` on Windows) is not on `PATH` (an `ENGINE_NOT_AVAILABLE` subtype); recorded as a page-render failure. |
 | `PAGE_RENDER_FAILED` | soft | The page renderer failed to render a page; recorded on the File (`page_render_error`). |
-| `RENDERING_CONFIG_INVALID` | hard | The `rendering` config section is malformed (unknown provider or stray key). |
-| `PDF_SLICE_FAILED` | soft | A PDF page-slice operation failed during generation. |
+| `PDF_CONFIG_INVALID` | hard | The `pdf` config section is malformed (unknown provider or stray key). |
+| `PDF_SLICE_FAILED` | soft | A PDF page-slice operation failed during generation (bad page range, or a backend error). |
 | `TEXT_EXTRACTION_FAILED` | soft | pdfminer.six extracted no digital text; recorded (`text_extraction_error`). |
 | `CORRUPT_METADATA` | hard / soft | A `file.json`/`docset.json` is not valid JSON (also reported by `dgml check`). |
 | `STORAGE_CONFIG_INVALID` | hard | A `[storage]` / `[storage.<name>]` table is malformed, or `--storage NAME` names a service that isn't configured. (A workspace with **no** config reports `WORKSPACE_NOT_INITIALIZED` instead — having a config is what being a workspace means.) |
@@ -2112,13 +2123,13 @@ per-file soft-fail fields.
 ## System requirements
 
 - Python 3.11+
-- Ghostscript (`gs`) — installed system-wide for page-image rendering (the
-  default renderer) and PDF page slicing during generation. See
-  [CLAUDE.md](../CLAUDE.md) for the licensing rationale (ghostscript is AGPL
-  but invoked as a subprocess; it is not bundled with `dgml`). Page-image
-  rendering can instead use PDFium in-process — `pip install dgml[pdfium]`
-  plus `rendering.provider = "pypdfium2"` in the config (see
-  [Page rendering configuration](#page-rendering-configuration)).
+- Ghostscript (`gs`) — the default PDF engine, installed system-wide for
+  page-image rendering and page slicing. See [CLAUDE.md](../CLAUDE.md) for the
+  licensing rationale (ghostscript is AGPL but invoked as a subprocess; it is
+  not bundled with `dgml`). **Optional:** `pip install dgml[pdfium]` plus
+  `[pdf] provider = "pypdfium2"` uses PDFium in-process for both operations,
+  removing the system-binary requirement entirely (see
+  [PDF engine configuration](#pdf-engine-configuration)).
 
 ## Examples for an LLM agent
 

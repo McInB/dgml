@@ -29,17 +29,20 @@ License: **Apache 2.0**.
 
 ### System dependencies (not Python packages)
 
-- **Ghostscript** (`gs`) — required for PDF page-image rendering (the
-  default renderer) and PDF page slicing during generation. Install
-  via the OS package manager (`brew install ghostscript`,
-  `apt-get install ghostscript`, etc.). Ghostscript is AGPL, but DGML
-  invokes it as a *subprocess* (like `git` or `ffmpeg`); the AGPL applies
-  to the user's ghostscript install, not to the dgml wheel. The permissive-license
-  policy below governs Python deps that ship inside our wheel.
-  Page-image rendering is provider-based (mirroring OCR): `rendering.provider
-  = "pypdfium2"` in the config swaps in PDFium in-process (the `dgml[pdfium]`
-  extra — pypdfium2 is Apache-2.0/BSD-3, allowed) so no system binary is
-  needed for rendering; PDF slicing still goes through ghostscript.
+- **Ghostscript** (`gs`) — the **default** PDF engine, used for page-image
+  rendering and page slicing. Install via the OS package manager
+  (`brew install ghostscript`, `apt-get install ghostscript`, etc.).
+  Ghostscript is AGPL, but DGML invokes it as a *subprocess* (like `git` or
+  `ffmpeg`); the AGPL applies to the user's ghostscript install, not to the
+  dgml wheel. The permissive-license policy below governs Python deps that
+  ship inside our wheel.
+
+  Ghostscript is **not required**: PDF work is engine-based (mirroring OCR).
+  `[pdf] provider = "pypdfium2"` swaps in PDFium in-process for *both*
+  rendering and slicing (the `dgml[pdfium]` extra — pypdfium2 is
+  Apache-2.0/BSD-3, allowed), so a workspace can run with no system binary at
+  all. One `provider` governs both capabilities deliberately: the motivating
+  use case is only satisfied when neither operation shells out.
 
 ## Repository layout
 

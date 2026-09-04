@@ -120,7 +120,7 @@ def test_add_pdf_with_pypdfium2_renderer(store: FileStore, sample_pdf: Path) -> 
     ghostscript needed — hence no ``needs_gs``) and records the provider."""
     from .conftest import write_config
 
-    write_config(store.ws, {"rendering": {"provider": "pypdfium2"}})
+    write_config(store.ws, {"pdf": {"provider": "pypdfium2"}})
     result = store.add(sample_pdf)
     assert result.created
     assert result.page_render_error is None

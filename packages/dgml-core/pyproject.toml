@@ -41,8 +41,8 @@ macos = [
     "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
 ]
-# Install with `pip install dgml-core[pdfium]` to render page images in-process
-# with PDFium (`rendering.provider = "pypdfium2"`) instead of the system
+# Install with `pip install dgml-core[pdfium]` for page rendering and slicing
+# with PDFium (`[pdf] provider = "pypdfium2"`) instead of the system
 # ghostscript binary. pypdfium2 is (Apache-2.0 OR BSD-3-Clause) and PDFium is
 # BSD-3-Clause; Pillow (MIT-CMU) writes the PNGs.
 pdfium = [
