@@ -67,7 +67,6 @@ def _init_ws(ws: Path) -> None:
     from dgml_core import workspace_config
 
     workspace = Workspace(root=ws.resolve())
-    workspace.init()
     workspace_config.write_identity(
         workspace,
         workspace_id="ws_testxxxxxxxxxxxx",
@@ -185,8 +184,11 @@ def test_workspace_create(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert workspace_id.startswith("ws_")
     # With no --storage it lands on the bundled default service.
     assert payload["storage_service"] == "default"
-    assert (ws / "docsets").is_dir()
-    assert (ws / "files").is_dir()
+    # `create` scaffolds nothing: stores build what they write into, so a brand-new
+    # workspace is its config plus workspace.json. This is what keeps a remote-backed
+    # workspace from getting empty local files/ and docsets/ it never uses.
+    assert not (ws / "docsets").exists()
+    assert not (ws / "files").exists()
     # The workspace config is now written by create and is authoritative for storage.
     assert (ws / "config.toml").exists()
     assert payload["workspace_config_path"] == str(ws / "config.toml")
@@ -218,7 +220,7 @@ def test_workspace_create_positional_path(
     assert rc == 0
     payload = _read_stdout(capsys)
     assert Path(payload["workspace"]) == ws.resolve()
-    assert (ws / "docsets").is_dir()
+    assert (ws / "config.toml").is_file()
 
     # The positional wins over a (differing) global --workspace.
     other = tmp_path / "other"
@@ -235,8 +237,8 @@ def test_workspace_create_positional_path(
     )
     assert rc == 0
     assert Path(_read_stdout(capsys)["workspace"]) == other.resolve()
-    assert (other / "docsets").is_dir()
-    assert not (tmp_path / "ignored" / "docsets").exists()
+    assert (other / "config.toml").is_file()
+    assert not (tmp_path / "ignored").exists()
 
 
 def test_create_without_a_path_is_listed_and_opens_by_id(
@@ -340,7 +342,7 @@ def test_open_backfills_a_missing_id(tmp_path: Path, capsys: pytest.CaptureFixtu
     # an older schema version so the backfill migration runs. It has a config.toml
     # (every workspace does) but no identity block yet.
     ws = Workspace(root=tmp_path / "legacy")
-    ws.init()
+    ws.root.mkdir(parents=True)
     ws.config_path.write_text('[storage]\nprovider = "dgml_core.storage_local:LocalStore"\n')
     ws.write_meta(name="legacy", organization="Acme")
     stamp_schema_version(ws, 0)
@@ -369,7 +371,7 @@ def test_a_cloned_directory_keeps_its_id_and_opens_by_path(
     machine's store: the id travels with the directory, and what a machine *lists* is
     now a deliberate choice rather than a side effect of opening something."""
     ws = Workspace(root=tmp_path / "cloned")
-    ws.init()
+    ws.root.mkdir(parents=True)
     ws.config_path.write_text('[storage]\nprovider = "dgml_core.storage_local:LocalStore"\n')
     wid = "ws_clonedaaaaaaaaaa"
     ws.write_meta(name="Cloned", organization="Acme", workspace_id=wid)
@@ -476,7 +478,14 @@ def test_deleting_the_workspace_config_is_a_clean_error(
 
     Workspace(root=ws).config_path.unlink()
     assert main(_ws_args(ws) + ["status"]) == 1
-    assert _read_stderr(capsys)["error"]["code"] == "STORAGE_CONFIG_INVALID"
+    # Reported as WORKSPACE_NOT_INITIALIZED, not a separate config error: having a
+    # config *is* being a workspace, so the two are one check. Nothing on disk
+    # distinguishes "config deleted" from "never a workspace" for a remote-backed
+    # workspace anyway, so the message carries both remedies.
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "WORKSPACE_NOT_INITIALIZED"
+    assert "config.toml is missing" in err["message"]
+    assert "restore the config from backup" in err["message"]
 
 
 def test_config_storage_edit_trips_the_seal(
@@ -673,8 +682,7 @@ def test_workspace_create_without_prior_init_warns_but_succeeds(
     assert payload["config_present"] is False
     assert "next_action" in payload
     # Workspace was created regardless.
-    assert (ws / "docsets").is_dir()
-    assert (ws / "files").is_dir()
+    assert (ws / "config.toml").is_file()
     # The user config was NOT created by workspace create.
     assert not user_config_path().exists()
     # Warning always on stderr (no --verbose needed).
@@ -965,7 +973,9 @@ def test_file_add_rejects_nonpositive_dpi(tmp_path: Path, text_pdf: Path) -> Non
         with pytest.raises(SystemExit) as exc:
             main(_ws_args(ws) + ["file", "add", str(text_pdf), "--dpi", bad])
         assert exc.value.code == 2
-    assert not list((ws / "files").iterdir())
+    # Nothing written: the directory is created by the first write, so a rejected
+    # add should leave it absent entirely.
+    assert not (ws / "files").exists() or not list((ws / "files").iterdir())
 
 
 @needs_gs
@@ -5191,7 +5201,7 @@ def test_import_sweeps_the_legacy_index_without_moving_data(
     main(["workspace", "list"])
     assert {r["workspace_id"] for r in _read_stdout(capsys)["workspaces"]} == {id_a, id_b}
     assert (a / "config.toml").is_file()
-    assert (b / "docsets").is_dir()
+    assert (b / "config.toml").is_file()
 
     # ...and each opens by id, from the directory it was already in.
     assert main(["--workspace", id_a, "status"]) == 0
@@ -5597,7 +5607,6 @@ def _legacy_workspace(
     workspace_id = workspace_id or new_workspace_id()
 
     ws = Workspace(root=root)
-    ws.init()
     ws.write_meta(name="Legacy", organization="Acme", workspace_id=workspace_id)
     ws.config_path.unlink(missing_ok=True)
 
@@ -5675,7 +5684,9 @@ def test_a_plain_command_never_invents_a_binding(
     _legacy_workspace(root, with_storage_snapshot=False)
 
     assert main(_ws_args(root) + ["status"]) == 1
-    assert _read_stderr(capsys)["error"]["code"] == "STORAGE_CONFIG_INVALID"
+    # One guard now: having a config *is* being a workspace, so a missing config
+    # reports WORKSPACE_NOT_INITIALIZED rather than a separate storage error.
+    assert _read_stderr(capsys)["error"]["code"] == "WORKSPACE_NOT_INITIALIZED"
     assert not (root / "config.toml").exists()
 
 

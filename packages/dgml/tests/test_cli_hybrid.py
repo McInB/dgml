@@ -80,7 +80,6 @@ def test_cli_hybrid_mode_reads_text_mode_from_record(
 ) -> None:
     """CLI accepts ``--text-mode hybrid`` end-to-end."""
     ws = tmp_path / "ws"
-    Workspace(root=ws).init()
     capsys.readouterr()
 
     write_ocr_config(
@@ -122,7 +121,6 @@ def test_cli_hybrid_verbose_surfaces_per_page_diagnostics(
     """``dgml --verbose file add … --text-mode hybrid`` emits per-page
     summary + warnings on stderr; stdout still carries the JSON payload."""
     ws = tmp_path / "ws"
-    Workspace(root=ws).init()
     capsys.readouterr()
 
     write_ocr_config(

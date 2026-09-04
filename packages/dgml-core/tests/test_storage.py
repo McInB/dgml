@@ -48,13 +48,54 @@ def test_resolve_default_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert ws.root == (tmp_path / "dgml-workspace").resolve()
 
 
-def test_init_creates_dirs(tmp_path: Path) -> None:
+def test_is_initialized_follows_the_config_not_the_directories(tmp_path: Path) -> None:
+    """A workspace is one because it has a config, not because two directories exist.
+
+    The old test asserted the reverse — that ``init()`` created ``files/`` and
+    ``docsets/`` and that their existence meant "initialized". That described
+    ``LocalStore``'s layout rather than a workspace, so a remote-backed workspace
+    could satisfy it only by scaffolding directories it never wrote to.
+    """
     ws = Workspace(root=tmp_path / "ws")
+    ws.root.mkdir(parents=True)
     assert not ws.is_initialized()
-    ws.init()
-    assert ws.is_initialized()
-    assert ws.docsets_dir.is_dir()
-    assert ws.files_dir.is_dir()
+
+    # Directories alone do not make a workspace.
+    ws.docsets_dir.mkdir()
+    ws.files_dir.mkdir()
+    assert not ws.is_initialized()
+
+    # A config does, with no directories needed.
+    for d in (ws.docsets_dir, ws.files_dir):
+        d.rmdir()
+    ws.config_path.write_text(
+        '[storage.default.blobs]\nprovider = "dgml_core.storage_local:LocalStore"\n',
+        encoding="utf-8",
+    )
+    assert Workspace(root=ws.root).is_initialized()
+
+
+def test_local_store_creates_its_directories_on_write(tmp_path: Path) -> None:
+    """Nothing scaffolds ``files/``/``docsets/`` any more, so the write paths must.
+
+    This is what replaced ``init()``: ``LocalStore``'s writes ``mkdir`` their own
+    parents. If that ever moved, every local workspace would break — hence a test
+    on the property rather than on the removed method.
+    """
+    from dgml_core import layout
+    from dgml_core.storage_local import LocalStore
+    from dgml_core.storage_service import StorageConfig
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    store = LocalStore(LocalStore.parse_config(StorageConfig(provider="x", root=root)))
+    assert not (root / layout.FILES_DIR).exists()
+
+    store.put_blob(layout.file_source_key("f1", "a.pdf"), b"bytes")
+    store.put_doc(layout.Collection.DOCSETS, "d1", {"id": "d1"})
+
+    assert (root / layout.FILES_DIR).is_dir()
+    assert (root / layout.DOCSETS_DIR).is_dir()
 
 
 def test_atomic_write_roundtrip(tmp_path: Path) -> None:
@@ -214,7 +255,7 @@ def test_write_user_config_create_then_refresh_with_backup(
 
 def test_has_legacy_json_config(tmp_path: Path) -> None:
     ws = Workspace(root=tmp_path / "ws")
-    ws.init()
+    ws.root.mkdir(parents=True)  # nothing scaffolds the root now that init() is gone
     assert ws.has_legacy_json_config() is False
     (ws.root / "config.json").write_text("{}", encoding="utf-8")
     assert ws.has_legacy_json_config() is True

@@ -383,11 +383,25 @@ class Workspace:
         return name if isinstance(name, str) and name else self.root.name
 
     def is_initialized(self) -> bool:
-        return self.docsets_dir.is_dir() and self.files_dir.is_dir()
+        """Whether this root is a workspace at all.
 
-    def init(self) -> None:
-        self.docsets_dir.mkdir(parents=True, exist_ok=True)
-        self.files_dir.mkdir(parents=True, exist_ok=True)
+        The config is the marker. Every workspace has one — ``workspace create``
+        writes it even for the zero-config local default, where it names
+        ``LocalStore`` explicitly — and it is the only evidence that means the same
+        thing on every backend, addressed by path or by id.
+
+        This used to test for the ``files/`` and ``docsets/`` directories, which
+        described ``LocalStore``'s layout rather than a workspace: a remote-backed
+        workspace could satisfy it only by scaffolding two directories it never
+        wrote to, and deleting them made a fully-populated remote workspace report
+        uninitialized.
+
+        There is deliberately no scaffolding step to go with this. Stores
+        materialize their own containers on write — ``LocalStore``'s write paths
+        create their parents — so a workspace becomes usable by being configured,
+        not by being pre-built.
+        """
+        return self.config_present
 
     def has_legacy_json_config(self) -> bool:
         """True when a pre-migration ``config.json`` is present but the new

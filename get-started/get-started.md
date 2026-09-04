@@ -97,7 +97,7 @@ export DGML_HOME=./my-dgml-workspace
 uv run dgml workspace create --organization "Acme" --name "Getting Started"
 ```
 *Note: `workspace create` is idempotent and safe to re-run. It creates the
-workspace (`docsets/` + `files/`), records its identity in `workspace.json`,
+workspace, records its identity in `workspace.json`,
 including a stable `workspace_id` (`ws_…`, echoed in the JSON output), and writes
 `<workspace>/config.toml`. `workspace create` does **not** create or touch your
 user-level config — that's `dgml init`'s job (run once per machine; see §1.4). If you
@@ -115,7 +115,7 @@ workspace into the store later if you want it listed.*
 
 > **Keep `<workspace>/config.toml` with the workspace — don't delete it.** It names
 > the storage backend the workspace's data lives on, and nothing else records that.
-> A workspace whose config is missing fails with `STORAGE_CONFIG_INVALID` rather than
+> A workspace whose config is missing fails with `WORKSPACE_NOT_INITIALIZED` rather than
 > quietly opening an empty one. To override models for this workspace, **edit** that
 > file: every section except `[storage]` deep-merges over your user config.*
 
