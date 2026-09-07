@@ -291,16 +291,32 @@ def test_workspace_root_is_the_folder(tmp_path: Path) -> None:
 
 def test_stray_directories_are_not_workspaces(tmp_path: Path) -> None:
     """The parent is an ordinary directory a user may look inside, so anything whose
-    name is not a well-formed id has to be ignored rather than half-listed."""
+    name could not be an id has to be ignored rather than half-listed.
+
+    Since an id no longer needs a prefix, that name filter is weak — a plain lowercase
+    folder name *is* a well-formed id — so what actually keeps a stray out of the
+    listing is the `config.toml` requirement (see the test below). Only names that could
+    never be an id are excluded on name alone."""
     root = tmp_path / "workspaces"
     store = _local(root)
     wid = new_workspace_id()
     store.write_config(wid, CONFIG)
-    for stray in ("notes", "ws_short", f"{wid}.bak", "ws_UPPERCASEAAAAAAAA"):
+    for stray in (f"{wid}.bak", "UPPERCASE", "x"):
         (root / stray).mkdir(parents=True, exist_ok=True)
         (root / stray / "config.toml").write_text(CONFIG, encoding="utf-8")
     (root / "loose.toml").write_text(CONFIG, encoding="utf-8")
     assert store.list_ids() == [wid]
+
+
+def test_a_prefix_free_id_round_trips(tmp_path: Path) -> None:
+    """`workspace create --id my-workspace` names the folder, and the folder names the
+    workspace — the same identity the minted `ws_…` ids have always had."""
+    root = tmp_path / "workspaces"
+    store = _local(root)
+    store.write_config("my-workspace", CONFIG)
+    assert store.exists("my-workspace")
+    assert store.list_ids() == ["my-workspace"]
+    assert store.workspace_root("my-workspace") == root / "my-workspace"
 
 
 def test_a_folder_without_a_config_is_not_listed(tmp_path: Path) -> None:

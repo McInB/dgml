@@ -78,7 +78,7 @@ from dgml_core.storage_resolve import (
     verify_storage_fingerprint,
 )
 from dgml_core.text_extraction import TextMode
-from dgml_core.workspace_id import is_workspace_id, mint_workspace_id
+from dgml_core.workspace_id import ID_SHAPE, is_workspace_id, mint_workspace_id
 from dgml_core.workspaces_resolve import default_workspaces_store
 from dgml_core.workspaces_store import WorkspacesStore
 
@@ -186,7 +186,10 @@ def _add_global_flags(parser: argparse.ArgumentParser, *, suppress: bool) -> Non
     at parser-construction time, taking ``dgml --help`` down with it."""
     parser.add_argument(
         "--workspace",
-        type=Path,
+        # Deliberately *not* `type=Path`: `Path("./notes")` normalizes to `notes`, and
+        # that leading `./` is load-bearing. It is how a caller says "the directory, not
+        # the workspace of that name" — the escape when a listed id shadows a local
+        # directory — and `Workspace.resolve` can only honour it if it survives argparse.
         default=argparse.SUPPRESS if suppress else None,
         help=_WORKSPACE_HELP,
     )
@@ -332,6 +335,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Human-readable workspace name (identity metadata, stored in workspace.json). "
             "Defaults to the workspace directory name."
+        ),
+    )
+    ws_create.add_argument(
+        "--id",
+        default=None,
+        metavar="WORKSPACE_ID",
+        help=(
+            f"Set the workspace's stable handle instead of minting one — {ID_SHAPE}, "
+            "e.g. 'my-workspace'. It is what --workspace and $DGML_HOME address the "
+            "workspace by, and the folder name the local store of workspaces gives it. "
+            "Fails with CONFLICT if this machine's store of workspaces already holds "
+            "that id. Omit it for a minted ws_… id."
         ),
     )
     ws_create.add_argument(
@@ -1601,8 +1616,8 @@ def _import_one(
             **row,
             "status": "failed",
             "reason": (
-                f"workspace_id {workspace_id!r} is not well-formed — it must be 'ws_' "
-                f"followed by exactly 16 characters from [a-z2-7], or nothing can address "
+                f"workspace_id {workspace_id!r} is not well-formed — it must be "
+                f"{ID_SHAPE}, or nothing can address "
                 f"or list this workspace. Correct it in {source.config_location} (the "
                 f"[workspace] block) and in {root / layout.WORKSPACE_FILE}, then re-run. "
                 f"The legacy index is left in place, so nothing is lost meanwhile."
@@ -1726,6 +1741,61 @@ def _workspace_import(args: argparse.Namespace, fmt: str) -> int:
     return 0 if not payload["failed"] else 2
 
 
+def _requested_workspace_id(args: argparse.Namespace, ws: Workspace) -> str | None:
+    """``workspace create --id``, validated against the workspace being created.
+
+    Returns the id to use, or ``None`` when the caller passed none and one should be
+    minted. Everything here runs before the workspace's config, directory or store row
+    exists, so a rejected ``--id`` leaves nothing behind.
+
+    Three ways it can fail, and they are different errors on purpose: a malformed id is
+    the caller's typo (``INVALID_ARGUMENT``); an id that disagrees with one this
+    workspace already records is a re-run that would *re-identify* an existing
+    workspace, which ``create`` never does, and is also the caller's mistake; an id
+    another workspace already holds is a genuine collision (``CONFLICT``), because
+    proceeding would overwrite that workspace's config in the store.
+    """
+    from dgml_core import workspace_config as wsconfig
+
+    requested: str | None = args.id
+    if requested is None:
+        return None
+    if not is_workspace_id(requested):
+        raise InvalidArgument(
+            f"--id {requested!r} is not a well-formed workspace id: it must be "
+            f"{ID_SHAPE}. The id is this workspace's address (--workspace <id>) and the "
+            f"folder name its store of workspaces gives it, so it has to be a safe, "
+            f"unambiguous path segment."
+        )
+
+    # What this workspace is *already* called, if anything: the id it is listed under,
+    # else the one its own config records. `create` is documented as safe to re-run, so
+    # an --id that agrees with it is a no-op rather than a conflict — including for a
+    # detached workspace that has since been imported into the store, where the naive
+    # `store.exists` check below would otherwise report the workspace colliding with
+    # itself.
+    known = ws.workspaces_id or wsconfig.read_identity(ws).workspace_id
+    if known is not None:
+        if known != requested:
+            raise InvalidArgument(
+                f"--id {requested!r} does not match {known!r}, the id this workspace "
+                f"already has. 'workspace create' never re-identifies an existing "
+                f"workspace: its id is how every other record refers to it. Re-run with "
+                f"--id {known!r}, or without --id at all."
+            )
+        return requested
+
+    store = default_workspaces_store()
+    if store.exists(requested):
+        raise ConflictError(
+            f"{store.label()} already holds a workspace {requested}. Pick another --id, "
+            f"or open the existing one with --workspace {requested}.",
+            kind="workspace",
+            existing_id=requested,
+        )
+    return requested
+
+
 def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     """Workspace lifecycle: create, list, reseal.
 
@@ -1753,13 +1823,18 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             # `dgml workspace create ./ws …` reads without doubling --workspace.
             ws = Workspace(root=Path(args.path).expanduser().resolve())
 
+        # --id, settled before anything is written. A rejected id must not leave a
+        # half-built workspace behind, and for a listed workspace the id decides the
+        # root, so there is no later point at which this could be checked.
+        requested_id = _requested_workspace_id(args, ws)
+
         seed = _read_seed_config(args)
 
         if listed and ws.workspaces_id is None:
             # The id has to come first, because for a store-listed workspace the root is
             # derived from it — the reverse of the detached order.
             store = default_workspaces_store()
-            new_id = mint_workspace_id(store)
+            new_id = requested_id or mint_workspace_id(store)
             store.write_config(new_id, seed or "")
             ws = Workspace(root=store.workspace_root(new_id), workspaces_id=new_id)
         elif seed is not None and not ws.config_present:
@@ -1867,7 +1942,9 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         # and left two rows for one workspace, and running it on a second machine
         # against a shared config changed the org's workspace identity — including the
         # `workspace` record in the remote doc store.
-        workspace_id = ws.workspaces_id or recorded.workspace_id or mint_workspace_id()
+        workspace_id = (
+            ws.workspaces_id or recorded.workspace_id or requested_id or mint_workspace_id()
+        )
         wsconfig.write_identity(
             ws,
             workspace_id=workspace_id,

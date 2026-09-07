@@ -98,7 +98,8 @@ uv run dgml workspace create --organization "Acme" --name "Getting Started"
 ```
 *Note: `workspace create` is idempotent and safe to re-run. It creates the
 workspace, records its identity in `workspace.json`,
-including a stable `workspace_id` (`ws_…`, echoed in the JSON output), and writes
+including a stable `workspace_id` (minted as `ws_…` and echoed in the JSON output, or
+set outright with `--id my-workspace`), and writes
 `<workspace>/config.toml`. `workspace create` does **not** create or touch your
 user-level config — that's `dgml init`'s job (run once per machine; see §1.4). If you
 haven't run `dgml init` yet, `workspace create` still succeeds but prints a warning to

@@ -126,10 +126,13 @@ class WorkspacesConfigInvalid(DgmlError):
 
 
 class WorkspaceNotFound(NotFoundError):
-    """``--workspace <ws_id>`` named an id the machine's store of workspaces does not
-    hold. Deliberately an error rather than a fallthrough to path resolution: an id
-    has a distinctive shape (:func:`dgml_core.workspace_id.is_workspace_id`), so a
-    caller that typed one meant a workspace, not a directory to create."""
+    """``--workspace <id>`` named something the machine's store of workspaces does not
+    hold and that is not an existing directory either.
+
+    Deliberately an error rather than a fallthrough to path resolution: with both
+    places looked in and neither answering, the likeliest explanation is a typo in an
+    id, and resolving to a path would silently turn that typo into a new directory in
+    the working directory."""
 
     code = "WORKSPACE_NOT_FOUND"
 

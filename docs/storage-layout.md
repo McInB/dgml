@@ -20,16 +20,24 @@ element can span pages.
 The root is determined in this order:
 
 1. `--workspace <path-or-id>` CLI flag (or `Workspace.resolve(<path-or-id>)` in
-   code). The argument is a filesystem path **or** a `ws_…` workspace id, decided by
-   **shape**: an id is `ws_` followed by exactly 16 base32-lowercase characters
-   (`[a-z2-7]` — so no separator, no dot, no uppercase, and never `0`, `1`, `8` or
-   `9`). Anything else is a path.
+   code). The argument is a filesystem path **or** a workspace id. Since an id needs no
+   distinguishing prefix (`my-workspace` is as valid as a minted `ws_qf7imkc7f6oqzfwt`)
+   it is also a legal directory name, so the two are told apart in four steps:
 
-   An id is looked up in [the store of workspaces](#the-store-of-workspaces); one it
-   does not hold is an error (`WORKSPACE_NOT_FOUND`), **not** a path. That is the point
-   of testing shape rather than membership: the same argument cannot mean a workspace on
-   one machine and a directory to create on another. A directory whose name happens to
-   be id-shaped is still addressable as `./ws_…`, which fails the test on the `./`.
+   1. **Not a well-formed id** — it carries a separator, a dot, an uppercase letter, or
+      is outside 3–40 characters — so it is a path. No store is built to decide this,
+      and it is what keeps `./my-workspace` addressing the directory.
+   2. **[The store of workspaces](#the-store-of-workspaces) holds it** → that workspace.
+   3. **A directory of that name exists** → a path. This is the same cwd-relative
+      reading a path argument has always had, so nothing about `--workspace notes`
+      moves.
+   4. **Neither** → `WORKSPACE_NOT_FOUND`, naming both places looked in.
+
+   Step 4 is the important one: falling through to path resolution would turn a typo'd
+   id into a new directory in the working directory. And because step 2 precedes step 3,
+   a listed id always wins over a same-named local directory — no `mkdir` can redirect a
+   working command at a different workspace — with `./name` as the escape for addressing
+   the directory.
 2. The `DGML_HOME` environment variable — also either a path or an id.
 3. Default: `./dgml-workspace` (relative to the current working directory).
 
@@ -134,10 +142,12 @@ The workspace identity, written by `dgml workspace create`:
 }
 ```
 
-- `workspace_id` — the workspace's **stable handle** (`ws_` + 16 lowercase
-  base32 chars, 80 bits from `secrets`). Opaque and non-semantic, so it survives a
-  directory rename. Minted at `workspace create` and carried here so the directory
-  self-describes; it is also how [the store of workspaces](#the-store-of-workspaces) keys it.
+- `workspace_id` — the workspace's **stable handle**: 3–40 characters from `[a-z0-9_-]`
+  starting with a letter or digit, so it is always a safe single path segment. Minted at
+  `workspace create` as `ws_` + 16 lowercase base32 chars (80 bits from `secrets`) —
+  opaque and non-semantic, so it survives a directory rename — or set outright with
+  `workspace create --id my-workspace`. Carried here so the directory self-describes;
+  it is also how [the store of workspaces](#the-store-of-workspaces) keys it.
   A workspace created before this field existed is given one automatically the
   first time any command opens it (a schema migration). `dgml --workspace <workspace_id>`
   opens the workspace by this id.
@@ -184,8 +194,12 @@ The parent is `$DGML_WORKSPACES` when set, else `[workspaces] root`, else
 source documents and page images rather than settings.
 
 The folder name *being* the `workspace_id` is what makes this work with no index: there
-is nothing to keep in sync, and a directory whose name is not a well-formed id is simply
-not a workspace, so a stray file in the parent is ignored rather than half-listed.
+is nothing to keep in sync. A folder is listed only if it **holds a `config.toml`** — the
+config being the record — and only if its name could be a `workspace_id` at all, so
+neither a stray `notes.bak/` nor a loose file in the parent is half-listed. Note the name
+test alone is weak now that an id needs no prefix (a plain lowercase folder name is a
+well-formed id, which is exactly what `workspace create --id my-workspace` produces);
+it is the `config.toml` that decides.
 
 ### MongoDB
 
