@@ -37,7 +37,7 @@ or after a command group (`dgml docset --format text list`).
 
 | Flag             | Description |
 |------------------|-------------|
-| `--workspace`    | Override the workspace to open — a filesystem path **or** a `ws_…` id from `dgml workspace list`. The two are told apart by **shape**: an id is `ws_` + exactly 16 base32-lowercase chars (`[a-z2-7]`), anything else is a path. An id is looked up in the store of workspaces; one it does not hold fails with `WORKSPACE_NOT_FOUND` rather than being treated as a path to create. Default: `$DGML_HOME` (also either form) then `./dgml-workspace`. |
+| `--workspace`    | Override the workspace to open — a filesystem path **or** a workspace id from `dgml workspace list`. An id is 3–40 chars from `[a-z0-9_-]` starting with a letter or digit (`my-workspace`, or a minted `ws_…`), so it can also be a directory name; the two are told apart by **looking**: a value the store of workspaces holds is that workspace, an existing directory of that name is a path, and a value that is neither fails with `WORKSPACE_NOT_FOUND` rather than being treated as a path to create. A listed id wins over a same-named directory — address the directory as `./name`. Anything carrying a separator, a dot or an uppercase letter is always a path. Default: `$DGML_HOME` (also either form) then `./dgml-workspace`. |
 | `--workspace-config` | **Removed.** Still accepted so an existing caller gets a JSON error envelope instead of an argparse usage dump; passing it (or setting `$DGML_CONFIG`) fails with `INVALID_ARGUMENT` naming the replacement. It only ever worked as an address because the per-machine index recorded the location and handed it back on the next open. To start a workspace from a config you authored, use `dgml workspace create --from-config <path>`. |
 | `--format`       | `json` (default) or `text`. |
 | `--verbose`      | Emit informational diagnostics to stderr. Controls hybrid text-mode warnings (digital/OCR conflicts, OCR misses) and the per-page merge summary, plus the `docset generate` pipeline's progress lines. Off by default — stderr stays reserved for error envelopes. |
@@ -91,7 +91,7 @@ The human-readable report (detected keys, the `[models]` block with inline
 tier→capability comments, next steps) goes to **stderr**; stdout stays the JSON
 contract. `provider` is `null` when no keys were detected.
 
-### `dgml workspace create [PATH] --organization ORG [--name NAME] [--storage NAME] [--from-config PATH]`
+### `dgml workspace create [PATH] --organization ORG [--name NAME] [--id WORKSPACE_ID] [--storage NAME] [--from-config PATH]`
 
 **Where the workspace goes depends on whether you name a place for it.**
 
@@ -146,6 +146,27 @@ the corpus across two namespaces with nothing to flag it later.
 `--name` is optional human-readable identity metadata; it likewise falls back to the
 recorded name, then to the workspace directory name.
 
+`--id WORKSPACE_ID` sets the workspace's stable handle instead of minting one — useful
+when the id is decided elsewhere (a tenant id, a fixture, an IaC template) or when a
+workspace is being re-created deterministically. It must be **3–40 characters from
+`[a-z0-9_-]`, starting with a lowercase letter or digit** — the id is what `--workspace`
+addresses the workspace by and the folder name the local store of workspaces gives it, so
+it has to be a safe, unambiguous path segment. Anything else fails with
+`INVALID_ARGUMENT`. No `ws_` prefix is required: `--id my-workspace` is as valid as the
+minted `ws_…` form.
+
+Three rules keep it from doing damage, all checked **before** anything is written, so a
+rejected `--id` never leaves a half-built workspace behind:
+
+- An id this machine's store of workspaces already holds fails with `CONFLICT`. It is
+  never an overwrite — the store's write is an upsert, so proceeding would replace that
+  workspace's config (and its `[storage]` binding) while its corpus stayed where it was.
+- An `--id` matching the id the workspace already has is a **no-op**, so `create` stays
+  safe to re-run.
+- An `--id` that *differs* from the id the workspace already has fails with
+  `INVALID_ARGUMENT`. An id is how every other record refers to a workspace, so `create`
+  never re-identifies an existing one.
+
 `--storage NAME` selects the **storage service** the workspace is created on — a
 `[storage.<name>]` template in your user-level `config.toml` (see
 [storage-layout.md](storage-layout.md)). It is **materialized into the workspace's
@@ -195,10 +216,10 @@ always names where that config lives, as a path or as `<store>/<workspace_id>`, 
 what error messages quote. `listed` says which of the two kinds of workspace this is.
 `config_path`/`config_present` refer to the **user-level** config.
 
-`workspace_id` is the stable handle (`ws_` + 16 base32 chars) minted for this
-workspace; pass it to any command as `--workspace <workspace_id>`. It survives a
-directory rename, is written to `workspace.json`, and is how the store of workspaces
-keys it. `config_present` reports whether the user-level config exists. When it
+`workspace_id` is the stable handle for this workspace — minted (`ws_` + 16 base32
+chars) unless `--id` supplied one; pass it to any command as `--workspace
+<workspace_id>`. It survives a directory rename, is written to `workspace.json`, and is
+how the store of workspaces keys it. `config_present` reports whether the user-level config exists. When it
 is `false`, an extra `next_action` field is present and the stderr warning above
 is emitted — but the workspace is created regardless (exit `0`).
 
@@ -267,11 +288,12 @@ Two things are still refused, because neither can be reconstructed:
 - **No workspace identity** — no `[workspace] workspace_id`, no `workspace.json`, and no
   legacy row. A directory that merely has `docsets/` and `files/` in it is not a
   workspace; minting an id would adopt an arbitrary directory as one.
-- **A malformed `workspace_id`** — anything other than `ws_` plus exactly 16 characters
-  from `[a-z2-7]`. Such an id addresses nothing: the local backend filters its folders by
-  that same test, so the workspace would be written where `workspace list` never looks and
-  `--workspace <id>` never resolves. dgml's generator only emits well-formed ids, so this
-  is a hand-edited value; the failure names both places to correct it.
+- **A malformed `workspace_id`** — anything that is not 3–40 characters from `[a-z0-9_-]`
+  starting with a letter or digit. Such an id addresses nothing: the local backend filters
+  its folders by that same test, so the workspace would be written where `workspace list`
+  never looks and `--workspace <id>` never resolves. dgml's generator only emits
+  well-formed ids, so this is a hand-edited value; the failure names both places to
+  correct it.
 
 `--on-conflict` decides what happens when the store already holds that id: `skip`
 (default), `fail`, or `replace` the stored config. The legacy index is left in place, so
@@ -1266,7 +1288,7 @@ Error codes that can come back on `file add`:
 | `UNSUPPORTED_FILE_TYPE` | Path is not a `.pdf` and is not a convertible source with a converter configured for its format family. |
 | `INVALID_PDF` | File does not start with the `%PDF-` magic. |
 | `CONVERSION_CONFIG_INVALID` | The `conversion` section of `<workspace>/config.toml` is malformed or names an unresolvable/invalid provider. |
-| `CONFLICT` | Hash- or path-conflict and `--on-conflict error`. |
+| `CONFLICT` | Hash- or path-conflict and `--on-conflict error`. (Also `workspace create --id <id>` when the store of workspaces already holds that id.) |
 | `CLASSIFICATION_CONFIG_MISSING` | `--auto-classify` was passed but `<workspace>/config.toml` is missing or has no `classification` section. |
 | `CLASSIFICATION_CONFIG_INVALID` | The `classification` section exists but a required field is missing or malformed. |
 
@@ -2029,7 +2051,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `FILE_NOT_FOUND` | hard / soft | A File id, assignment, or source is missing. Soft as a per-item `results` entry in `docset generate`/`ground`. |
 | `UNSUPPORTED_FILE_TYPE` | hard | `file add` path is neither a PDF nor a convertible source. |
 | `INVALID_PDF` | hard | File does not start with the `%PDF-` magic. |
-| `CONFLICT` | hard | Hash- or path-conflict under `--on-conflict error`. |
+| `CONFLICT` | hard | Hash- or path-conflict under `--on-conflict error`, or `workspace create --id <id>` naming an id the store of workspaces already holds. |
 | `CONVERSION_CONFIG_INVALID` | hard | The `conversion` config section is malformed. |
 | `CONVERSION_FAILED` | hard / soft | A docx/xlsx→PDF conversion failed (soft as `conversion_error` on a bulk add entry). |
 | `OCR_CONFIG_MISSING` | hard | `--text-mode ocr`/`hybrid` with no `ocr` config section. |
@@ -2068,7 +2090,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `STORAGE_CONFIG_INVALID` | hard | A `[storage]` / `[storage.<name>]` table is malformed, or `--storage NAME` names a service that isn't configured. (A workspace with **no** config reports `WORKSPACE_NOT_INITIALIZED` instead — having a config is what being a workspace means.) |
 | `STORAGE_PROVIDER_UNRESOLVABLE` | hard | A storage `provider` dotted path (`module:Class`) can't be imported/resolved. |
 | `WORKSPACES_CONFIG_INVALID` | hard | The `[workspaces]` table is malformed, or its provider was handed an option it does not accept. |
-| `WORKSPACE_NOT_FOUND` | hard | `--workspace <ws_id>` named an id the store of workspaces does not hold. Deliberately an error rather than falling through to path resolution — an id has a distinctive shape, so a caller that typed one meant a workspace. |
+| `WORKSPACE_NOT_FOUND` | hard | `--workspace <id>` named something the store of workspaces does not hold and that is not an existing directory either. Deliberately an error rather than falling through to path resolution: with both places looked in and neither answering, the likeliest explanation is a typo'd id, and resolving to a path would turn that typo into a new directory. |
 | `WORKSPACES_WRITE_CONFLICT` | hard | Another writer changed this workspace's `config.toml` since it was read. A config is written whole, so overwriting would discard whatever that writer changed; re-run the command to work from the current config. Only backends that make writes conditional on the stored text (Mongo) can report this; the local-dir store has one writer per machine and does not. |
 | `STORAGE_BACKEND_MISMATCH` | hard | The `[storage]` configuration a workspace resolves no longer matches the `storage_fingerprint` sealed in its `config.toml` — its data is on the previously sealed backend. Accept the change with `dgml workspace reseal <root>`, or restore the `[storage]` table. |
 | `NOT_IMPLEMENTED` | hard | A requested mode/path is not implemented. |
