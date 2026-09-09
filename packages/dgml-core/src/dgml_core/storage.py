@@ -68,12 +68,13 @@ class Workspace:
         """Resolve a workspace from ``override`` (the ``--workspace`` value), then
         ``$DGML_HOME``, then ``./dgml-workspace``.
 
-        ``override`` may be a **path** or a **workspace id**. An id (``ws_`` + 16
-        base32 chars — no separator, no dot, no uppercase) is looked up in the machine's
-        store of workspaces; anything else is a path. ``$DGML_HOME`` takes either too,
-        so a container can name a workspace rather than a directory. A directory whose
-        name happens to be id-shaped is still addressable as ``./ws_…``, which fails the
-        id test on the ``./``.
+        ``override`` may be a **path** or a **workspace id**, decided by
+        :meth:`_from_workspaces_store`: a value the store of workspaces holds is that
+        workspace, an existing directory of that name is a path, and an id-shaped value
+        that is neither raises :class:`~dgml_core.errors.WorkspaceNotFound` rather than
+        being taken as a directory to create. ``$DGML_HOME`` takes either form too, so a
+        container can name a workspace rather than a directory. A directory whose name
+        collides with a listed id is still addressable as ``./name``.
 
         ``config`` (the ``--workspace-config`` value) points at a ``config.toml``
         outside the workspace directory. It applies only to a workspace addressed by
@@ -98,19 +99,27 @@ class Workspace:
     @classmethod
     def _from_workspaces_store(cls, value: str, config: Path | None) -> Workspace | None:
         """``value`` resolved through the machine's store of workspaces, or ``None`` when
-        it is not an id at all and should be treated as a path.
+        it should be treated as a path instead.
 
-        The id test is on **shape** (:func:`dgml_core.workspace_id.is_workspace_id`), not
-        on what the store happens to hold. That matters: the old test asked "is this
-        string in the index", so the same argument could mean a workspace on one machine
-        and a directory to create on another. With a shape test, an id-shaped argument
-        the store does not know is an error — which is almost always what the caller
-        wants to hear, rather than having a ``ws_…`` directory appear in the current
-        working directory.
+        An id no longer carries a distinguishing prefix — ``my-workspace`` is as valid
+        an id as ``ws_qf7imkc7f6oqzfwt`` — and is also a legal relative directory name,
+        so the two cannot be told apart by shape alone. The rule, in order:
 
-        Raises :class:`~dgml_core.errors.WorkspaceNotFound` for an unknown id, and
-        :class:`~dgml_core.errors.InvalidArgument` if a config override is combined with
-        one."""
+        1. Not :func:`~dgml_core.workspace_id.is_workspace_id` — it carries a separator,
+           a dot, uppercase, or the wrong length — so it is a path, and no store is
+           built to decide that.
+        2. The store holds it: that workspace.
+        3. A directory of that name exists: a path. Note this is the *same*
+           cwd-relative reading a path argument has always had, so nothing about
+           ``--workspace notes`` moves; and because step 2 comes first, no ``mkdir`` can
+           redirect a working command at a different workspace.
+        4. Neither: :class:`~dgml_core.errors.WorkspaceNotFound`, naming both places
+           looked in. Falling through to path resolution here is what the shape test
+           used to prevent, and the reason is unchanged — a typo'd id must not become a
+           new directory in the working directory.
+
+        Also raises :class:`~dgml_core.errors.InvalidArgument` if a config override is
+        combined with an id."""
         from .workspace_id import is_workspace_id
 
         if not is_workspace_id(value):
@@ -119,15 +128,28 @@ class Workspace:
         from .errors import InvalidArgument, WorkspaceNotFound
         from .workspaces_resolve import default_workspaces_store
 
+        store = default_workspaces_store()
+        if not store.exists(value):
+            # `is_dir`, not `exists`: a *file* of that name is no more a workspace root
+            # than a missing one, and saying so beats resolving to it and failing later
+            # with a message about an uninitialized workspace.
+            if Path(value).expanduser().is_dir():
+                return None
+            raise WorkspaceNotFound(
+                f"no workspace {value} in {store.label()}, and no directory ./{value}. "
+                f"'dgml workspace list' shows the workspaces this machine holds; "
+                f"'dgml workspace create --id {value}' would create this one."
+            )
+
+        # Checked only now that `value` is known to be an id: reaching it earlier would
+        # reject `--workspace-config` alongside a plain path, which is exactly the case
+        # the flag exists for.
         if config is not None:
             raise InvalidArgument(
                 f"a workspace config cannot be supplied for {value}: its config lives in "
                 f"the machine's store of workspaces, which is where that workspace was "
                 f"found. Address the workspace by path to use your own config file."
             )
-        store = default_workspaces_store()
-        if not store.exists(value):
-            raise WorkspaceNotFound(f"no workspace {value} in {store.label()}")
 
         # The store answers where the workspace's files are, including honouring a
         # `workspace_path` its config declares. Asking it — rather than parsing the

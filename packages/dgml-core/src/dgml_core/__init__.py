@@ -90,7 +90,7 @@ from .storage_service import (
     StorageConfig,
 )
 from .workspace_config import WorkspaceIdentity
-from .workspace_id import is_workspace_id, mint_workspace_id, new_workspace_id
+from .workspace_id import ID_SHAPE, is_workspace_id, mint_workspace_id, new_workspace_id
 from .workspace_ops import WorkspaceOps
 from .workspaces_local import LocalDirWorkspacesStore
 from .workspaces_resolve import (
@@ -107,6 +107,7 @@ __all__ = [
     "DEFAULT_STORAGE_PROVIDER",
     "DEFAULT_STORAGE_SERVICE",
     "DEFAULT_WORKSPACES_PROVIDER",
+    "ID_SHAPE",
     "WORKSPACE_SCHEMA_VERSION",
     "AddFileResult",
     "ArtifactKind",

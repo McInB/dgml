@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 from dgml_core.default_config import PROVIDER_MODELS
+from dgml_core.errors import InvalidArgument, WorkspaceNotFound
 from dgml_core.storage import (
     Workspace,
     canonical_provider,
@@ -28,6 +29,8 @@ from dgml_core.storage import (
     write_json_atomic,
     write_user_config,
 )
+from dgml_core.workspace_id import new_workspace_id
+from dgml_core.workspaces_resolve import default_workspaces_store
 
 
 def test_resolve_explicit(tmp_path: Path) -> None:
@@ -46,6 +49,118 @@ def test_resolve_default_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.chdir(tmp_path)
     ws = Workspace.resolve()
     assert ws.root == (tmp_path / "dgml-workspace").resolve()
+
+
+# --------------------------------------------------------------- id versus path
+#
+# An id no longer carries a distinguishing prefix, so `--workspace my-workspace` could
+# mean a listed workspace or a directory. These pin the four-step rule that decides.
+
+
+def _list_workspace(workspace_id: str) -> Path:
+    """Register ``workspace_id`` in the (tmp-dir-isolated) store and return its root."""
+    store = default_workspaces_store()
+    store.write_config(workspace_id, "")
+    return store.workspace_root(workspace_id)
+
+
+def test_a_listed_id_resolves_to_that_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 2, and the point of the whole feature: a prefix-free id addresses a
+    workspace from any directory, where the same string used to mean `./my-workspace`
+    in whichever one you happened to be standing in."""
+    root = _list_workspace("my-workspace")
+    monkeypatch.chdir(tmp_path)
+    ws = Workspace.resolve("my-workspace")
+    assert ws.workspaces_id == "my-workspace"
+    assert ws.root == root.resolve()
+
+
+def test_a_minted_id_resolves_the_same_way(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `ws_` prefix buys nothing at resolution any more — a minted id goes through
+    exactly the steps a custom one does."""
+    wid = new_workspace_id()
+    root = _list_workspace(wid)
+    monkeypatch.chdir(tmp_path)
+    assert Workspace.resolve(wid).root == root.resolve()
+    with pytest.raises(WorkspaceNotFound):
+        Workspace.resolve(new_workspace_id())
+
+
+def test_an_unheld_name_with_a_directory_is_a_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 3. `--workspace notes` has always meant `./notes`, and still does when the
+    store holds nothing by that name — the cwd-relative reading is unchanged."""
+    (tmp_path / "notes").mkdir()
+    monkeypatch.chdir(tmp_path)
+    ws = Workspace.resolve("notes")
+    assert ws.workspaces_id is None
+    assert ws.root == (tmp_path / "notes").resolve()
+
+
+def test_an_unheld_name_with_no_directory_is_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 4. Both places were looked in and neither answered, so the likeliest
+    explanation is a typo'd id — which must not become a new directory here."""
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(WorkspaceNotFound) as exc:
+        Workspace.resolve("my-workspace")
+    assert "my-workspace" in str(exc.value)
+    assert not (tmp_path / "my-workspace").exists()
+
+
+def test_a_file_of_that_name_is_not_a_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`is_dir`, not `exists`: resolving to a regular file only defers the failure to a
+    confusing message about an uninitialized workspace."""
+    (tmp_path / "notes").write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(WorkspaceNotFound):
+        Workspace.resolve("notes")
+
+
+def test_a_listed_id_beats_a_same_named_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 2 runs before step 3, so the answer cannot change under someone's `mkdir`.
+    The escape for the shadowed directory is the leading `./`."""
+    root = _list_workspace("my-workspace")
+    (tmp_path / "my-workspace").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert Workspace.resolve("my-workspace").root == root.resolve()
+
+    shadowed = Workspace.resolve("./my-workspace")
+    assert shadowed.workspaces_id is None
+    assert shadowed.root == (tmp_path / "my-workspace").resolve()
+
+
+def test_the_env_var_takes_an_id_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _list_workspace("my-workspace")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DGML_HOME", "my-workspace")
+    assert Workspace.resolve().root == root.resolve()
+
+
+def test_a_workspace_config_is_refused_for_an_id_but_allowed_for_a_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listed workspace's config lives in the store, so pointing elsewhere can only be
+    a mistake. The check has to come *after* the id/path decision, or `--workspace-config`
+    alongside an ordinary directory — the case the flag exists for — would fail too."""
+    _list_workspace("my-workspace")
+    (tmp_path / "notes").mkdir()
+    monkeypatch.chdir(tmp_path)
+    override = tmp_path / "elsewhere.toml"
+
+    with pytest.raises(InvalidArgument):
+        Workspace.resolve("my-workspace", config=override)
+
+    ws = Workspace.resolve("notes", config=override)
+    assert ws.config_override == override
 
 
 def test_is_initialized_follows_the_config_not_the_directories(tmp_path: Path) -> None:
