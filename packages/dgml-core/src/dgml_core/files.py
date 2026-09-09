@@ -31,6 +31,7 @@ from .errors import (
     AuthError,
     ConflictError,
     DgmlError,
+    EngineNotAvailable,
     FileNotFound,
     InvalidArgument,
     InvalidPDF,
@@ -47,7 +48,13 @@ from .hybrid import extract_text_hybrid
 from .ids import new_id
 from .models import FileRecord
 from .ocr import extract_text_ocr, load_ocr_config
-from .pages import DEFAULT_DPI, RENDERER_NAME, pdf_page_count, render_pages
+from .pages import (
+    DEFAULT_DPI,
+    PdfConfig,
+    load_pdf_config,
+    pdf_page_count,
+    render_pages,
+)
 from .storage import Workspace
 from .text_extraction import TextMode, classify_extraction_outcome, extract_text_digital
 from .text_extraction_config import load_text_extraction_config
@@ -301,9 +308,12 @@ class FileStore:
         # Page count, render, and text extraction all need a real PDF path; one
         # materialize yields it (zero-copy on LocalStore, a temp download on a
         # remote store) and all three share it.
+        render_config = load_pdf_config(self.ws)
         with self.ws.blobs.materialize(pdf_key) as pdf_path:
             page_count, page_count_error = self._safe_page_count(pdf_path, file_id)
-            page_render_error = self._render_pages(pdf_path, file_id, expected=page_count, dpi=dpi)
+            page_render_error = self._render_pages(
+                pdf_path, file_id, expected=page_count, dpi=dpi, config=render_config
+            )
             text_extraction_error, text_summary = self._extract_text(
                 pdf_path,
                 file_id,
@@ -323,7 +333,7 @@ class FileStore:
             page_count=page_count,
             text_mode=text_mode.value,
             page_image_dpi=dpi,
-            page_image_renderer=RENDERER_NAME,
+            page_image_renderer=render_config.provider.value,
             pdf_converter=pdf_converter,
         )
         self.ws.docs.put_doc(layout.Collection.FILES, file_id, record.to_json())
@@ -407,15 +417,26 @@ class FileStore:
             return None, message
 
     def _render_pages(
-        self, pdf_path: Path, file_id: str, *, expected: int | None, dpi: int = DEFAULT_DPI
+        self,
+        pdf_path: Path,
+        file_id: str,
+        *,
+        expected: int | None,
+        dpi: int = DEFAULT_DPI,
+        config: PdfConfig | None = None,
     ) -> str | None:
         """Render pages, recording errors. Returns a human-readable error
         message on failure or partial success, or ``None`` on full success."""
         try:
             pages_prefix = layout.file_pages_prefix(file_id)
             with self.ws.blobs.staged_write(pages_prefix) as pages_dir:
-                rendered = render_pages(pdf_path, pages_dir, dpi=dpi)
-        except PageRenderFailed as exc:
+                rendered = render_pages(pdf_path, pages_dir, dpi=dpi, config=config)
+        # EngineNotAvailable is caught with PageRenderFailed, not left to
+        # escape: the source blob is already uploaded by this point, so an
+        # uncaught raise strands it with no file.json and `dgml check` reports
+        # the workspace broken. A misconfigured renderer is a soft, recorded
+        # per-file failure — the same shape consistency.py already uses.
+        except (EngineNotAvailable, PageRenderFailed) as exc:
             append_recorded_error(
                 self.ws,
                 file_id,

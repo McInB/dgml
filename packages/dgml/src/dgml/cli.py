@@ -57,7 +57,7 @@ from dgml_core.migrations import (
     stamp_schema_version,
 )
 from dgml_core.models import DocSet
-from dgml_core.pages import DEFAULT_DPI
+from dgml_core.pages import DEFAULT_DPI, load_pdf_config
 from dgml_core.storage import (
     ENV_VAR as WORKSPACE_ENV_VAR,
 )
@@ -3608,6 +3608,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                     workspace=ws,
                     dgml_header=build_header(ws.organization, ds.name),
                     converters=load_conversion_config(ws),
+                    pdf_config=load_pdf_config(ws),
                     roster_seed=roster_seed,
                     schema_seed=schema_seed,
                     parent_map=parent_map_seed or None,

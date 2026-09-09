@@ -64,7 +64,16 @@ class InvalidPDF(DgmlError):
     code = "INVALID_PDF"
 
 
-class GhostscriptNotFound(DgmlError):
+class EngineNotAvailable(DgmlError):
+    """The configured PDF engine cannot run — its binary or Python package is
+    not installed. Raised for either capability (rendering or slicing), since
+    both come from one engine. Subclassed by :class:`GhostscriptNotFound`;
+    catch this base to handle "engine missing" uniformly across providers."""
+
+    code = "ENGINE_NOT_AVAILABLE"
+
+
+class GhostscriptNotFound(EngineNotAvailable):
     code = "GHOSTSCRIPT_NOT_FOUND"
 
 
@@ -179,6 +188,10 @@ class WorkspaceMigrationFailed(DgmlError):
     empty — and a wrong answer is worse than a refusal."""
 
     code = "WORKSPACE_MIGRATION_FAILED"
+
+
+class PdfConfigInvalid(DgmlError):
+    code = "PDF_CONFIG_INVALID"
 
 
 class OcrConfigInvalid(DgmlError):

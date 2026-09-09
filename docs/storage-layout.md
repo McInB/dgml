@@ -110,14 +110,15 @@ with `secrets.choice` ([packages/dgml/src/dgml/ids.py](../packages/dgml/src/dgml
 
 ## Page-image render cache (`$DGML_PAGE_CACHE`, optional)
 
-Rendering `page_images/` shells out to ghostscript, which dominates the cost
-of `dgml file add`. The render is a pure function of the PDF bytes, the
-renderer, and the dpi, so when the **`DGML_PAGE_CACHE`** environment variable
-names a directory, the renderer keys each render by a hash of all three and
-reuses it:
+Rendering `page_images/` runs the configured renderer (the system
+ghostscript binary by default, or PDFium via `[pdf] provider =
+"pypdfium2"`), which dominates the cost of `dgml file add`. The render is a
+pure function of the PDF bytes, the renderer, and the dpi, so when the
+**`DGML_PAGE_CACHE`** environment variable names a directory, the renderer
+keys each render by a hash of all three and reuses it:
 
 - **Hit** — an identical PDF rendered before is copied from the cache and
-  ghostscript is not invoked (it need not even be installed).
+  the render backend is not invoked (it need not even be installed).
 - **Miss** — the PDF is rendered normally, then copied into the cache. A
   `.complete` marker is written last, so an interrupted write reads as a miss
   rather than a partial hit.
@@ -978,13 +979,16 @@ each contain one file per page.
 overlap, OCR wins on conflict).
 
 `page_image_dpi` and `page_image_renderer` record how `page_images/` were
-rendered — the renderer is currently always `"ghostscript"`; the dpi is `300`
+rendered — the renderer is `"ghostscript"` (the default) or `"pypdfium2"`,
+per the workspace's `[pdf] provider` config at add time; the dpi is `300`
 unless `dgml file add --dpi N` set otherwise. They are stored per file both so
 a later renderer change is detectable and because they are load-bearing: the
 dpi is the scale of every `page_text/` word box (see below), and `dgml check
---retry-errors` re-renders and re-extracts at the *recorded* value so a repair
-reproduces the file's existing geometry instead of today's default. They are
-`null` if a non-PDF source failed to convert (no page images were produced).
+--retry-errors` re-renders and re-extracts at the *recorded* dpi **with the
+recorded renderer**, so a repair reproduces the file's existing pixels
+instead of today's config (backends differ subtly in anti-aliasing and ±1 px
+dimension rounding). They are `null` if a non-PDF source failed to convert
+(no page images were produced).
 
 `pdf_converter` names the converter that turned a non-PDF source into the
 PDF the pipeline ran on (the converter's name with any trailing

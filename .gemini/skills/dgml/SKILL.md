@@ -822,7 +822,7 @@ Check the response payload's `conflict_kind` (`"hash"` or `"path"`), `created`, 
 
 ## Things to remember
 
-- Ghostscript must be installed system-wide (`brew install ghostscript` / `apt-get install ghostscript`). Without it, page rendering fails and `dgml check` will flag it.
+- Ghostscript is the default PDF engine and must be installed system-wide (`brew install ghostscript` / `apt-get install ghostscript`) unless you switch engines. Without it, page rendering fails and `dgml check` will flag it. To avoid it entirely, set `[pdf] provider = "pypdfium2"` in the config (`pip install dgml[pdfium]`): PDFium then handles **both** page-image rendering and the page slicing `docset generate` needs, so no system binary is required.
 - A `docset delete` does **not** delete the underlying Files — they may belong to other DocSets. Use `file delete` to remove a File entirely.
 - IDs are 12-char base-36 strings. Don't try to derive them; always pull them from JSON output.
 - The JSON output schema is part of the public API. If a command's output shape looks wrong, the implementation is probably the source of truth — read [packages/dgml/src/dgml/cli.py](../../../packages/dgml/src/dgml/cli.py).

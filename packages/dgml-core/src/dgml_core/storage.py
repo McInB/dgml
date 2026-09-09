@@ -528,6 +528,14 @@ _OCR_GUIDANCE = """\
 # api_key_env = "AZURE_DOCINTEL_KEY"
 """
 
+_PDF_GUIDANCE = """\
+# PDF work — rendering page images and slicing page ranges — defaults to the
+# system ghostscript binary. To use PDFium in-process instead (no system
+# binary; `pip install dgml[pdfium]`), uncomment:
+# [pdf]
+# provider = "pypdfium2"
+"""
+
 # Both features are off unless `enabled = true`. They ship as real (rather than
 # commented-out) sections so `dgml init` advertises that they exist and the user
 # only has to flip the flag — a section on its own switches nothing on.
@@ -600,14 +608,16 @@ def render_config_toml(provider: str | None) -> str:
             '# standard = "..."\n'
             '# advanced = "..."\n'
             '# expert   = "..."\n'
-            "\n" + _OCR_GUIDANCE + "\n" + _FEATURE_GUIDANCE
+            "\n" + _OCR_GUIDANCE + "\n" + _PDF_GUIDANCE + "\n" + _FEATURE_GUIDANCE
         )
     tiers = PROVIDER_MODELS[provider]
     width = max(len(t) for t in tiers)
     lines = ["[models]"]
     for tier in ("light", "standard", "advanced", "expert"):
         lines.append(f'{tier.ljust(width)} = "{tiers[tier]}"')
-    return "\n".join(lines) + "\n\n" + _OCR_GUIDANCE + "\n" + _FEATURE_GUIDANCE
+    return (
+        "\n".join(lines) + "\n\n" + _OCR_GUIDANCE + "\n" + _PDF_GUIDANCE + "\n" + _FEATURE_GUIDANCE
+    )
 
 
 def write_user_config(provider: str | None, *, overwrite: bool) -> tuple[bool, Path | None]:

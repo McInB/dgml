@@ -30,11 +30,13 @@ from .errors import (
     CorruptMetadata,
     DgmlError,
     DocSetNotFound,
+    EngineNotAvailable,
     FileNotFound,
     GhostscriptNotFound,
     InvalidArgument,
     InvalidPDF,
     PageRenderFailed,
+    PdfConfigInvalid,
     UnsupportedFileType,
     WorkspaceMigrationFailed,
     WorkspaceNotInitialized,
@@ -70,6 +72,7 @@ from .migrations import (
     workspace_schema_version,
 )
 from .models import DocSet, FileRecord
+from .pages import EngineName, PdfConfig, PdfSlicer, load_pdf_config, slice_pages
 from .storage import Workspace
 from .storage_local import LocalStore
 from .storage_resolve import (
@@ -126,6 +129,8 @@ __all__ = [
     "DocSetNotFound",
     "DocSetStore",
     "DocStore",
+    "EngineName",
+    "EngineNotAvailable",
     "FileAttestation",
     "FileNotFound",
     "FileRecord",
@@ -140,6 +145,9 @@ __all__ = [
     "Migration",
     "MigrationResult",
     "PageRenderFailed",
+    "PdfConfig",
+    "PdfConfigInvalid",
+    "PdfSlicer",
     "StorageConfig",
     "UnsupportedFileType",
     "VerifyResult",
@@ -162,6 +170,7 @@ __all__ = [
     "is_workspace_id",
     "layout",
     "load_conversion_config",
+    "load_pdf_config",
     "load_store_configs",
     "load_workspaces_config",
     "make_blob_store",
@@ -174,6 +183,7 @@ __all__ = [
     "pending_migrations",
     "read_attestation",
     "resolve_store_configs",
+    "slice_pages",
     "stamp_schema_version",
     "storage_fingerprint",
     "verify_attestation_dir",
