@@ -1741,7 +1741,7 @@ def _workspace_import(args: argparse.Namespace, fmt: str) -> int:
     return 0 if not payload["failed"] else 2
 
 
-def _requested_workspace_id(args: argparse.Namespace, ws: Workspace) -> str | None:
+def _requested_workspace_id(args: argparse.Namespace, ws: Workspace, *, listed: bool) -> str | None:
     """``workspace create --id``, validated against the workspace being created.
 
     Returns the id to use, or ``None`` when the caller passed none and one should be
@@ -1754,6 +1754,10 @@ def _requested_workspace_id(args: argparse.Namespace, ws: Workspace) -> str | No
     workspace, which ``create`` never does, and is also the caller's mistake; an id
     another workspace already holds is a genuine collision (``CONFLICT``), because
     proceeding would overwrite that workspace's config in the store.
+
+    ``listed`` says a **new** store-listed workspace is being created, in which case
+    ``ws`` is not it — it is whatever ``Workspace.resolve`` fell back to, and the caller
+    discards it. See the comment on ``known`` below.
     """
     from dgml_core import workspace_config as wsconfig
 
@@ -1774,14 +1778,41 @@ def _requested_workspace_id(args: argparse.Namespace, ws: Workspace) -> str | No
     # detached workspace that has since been imported into the store, where the naive
     # `store.exists` check below would otherwise report the workspace colliding with
     # itself.
-    known = ws.workspaces_id or wsconfig.read_identity(ws).workspace_id
+    #
+    # Except when a new listed workspace is being created: then `ws` is only what
+    # `Workspace.resolve` fell back to — `./dgml-workspace` in the working directory —
+    # and the caller replaces it wholesale with one rooted at the new id. Reading an
+    # identity off it would make `create --id` fail wherever a `./dgml-workspace`
+    # happens to sit, complaining that "this workspace" has a different id, while the
+    # same command without `--id` cheerfully mints one and ignores that directory.
+    if listed and ws.workspaces_id is None:
+        known = None
+    else:
+        known = ws.workspaces_id or wsconfig.read_identity(ws).workspace_id
     if known is not None:
         if known != requested:
+            # Name *how* this workspace came to be addressed. Someone passing --id has
+            # almost always come to create a new workspace and not realized something is
+            # pointing at an existing one — easy when $DGML_HOME is set once and then
+            # forgotten — so the message names that thing rather than describing "this
+            # workspace" and leaving them to guess what to change.
+            if args.path is not None:
+                addressed = f"the path {str(args.path)!r} you gave"
+                stop = "drop that path argument"
+            elif getattr(args, "workspace", None) is not None:
+                addressed = f"--workspace {str(args.workspace)!r}"
+                stop = "drop --workspace"
+            elif os.environ.get(WORKSPACE_ENV_VAR, "").strip():
+                addressed = f"${WORKSPACE_ENV_VAR}"
+                stop = f"unset {WORKSPACE_ENV_VAR}"
+            else:  # pragma: no cover - defensive; one of the three is always set here
+                addressed = "the workspace this command resolved"
+                stop = "stop addressing it"
             raise InvalidArgument(
-                f"--id {requested!r} does not match {known!r}, the id this workspace "
-                f"already has. 'workspace create' never re-identifies an existing "
-                f"workspace: its id is how every other record refers to it. Re-run with "
-                f"--id {known!r}, or without --id at all."
+                f"--id {requested!r} does not match {known!r}, the id of the workspace "
+                f"addressed by {addressed}.\n\n"
+                f"To create a *new* workspace called {requested!r}, {stop} — it is what "
+                f"points this command at the existing one."
             )
         return requested
 
@@ -1826,7 +1857,7 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         # --id, settled before anything is written. A rejected id must not leave a
         # half-built workspace behind, and for a listed workspace the id decides the
         # root, so there is no later point at which this could be checked.
-        requested_id = _requested_workspace_id(args, ws)
+        requested_id = _requested_workspace_id(args, ws, listed=listed)
 
         seed = _read_seed_config(args)
 

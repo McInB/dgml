@@ -32,6 +32,7 @@ from dgml_core.migrations import (
     workspace_schema_version,
 )
 from dgml_core.run_clustering import DocPrediction
+from dgml_core.storage import ENV_VAR as WORKSPACE_ENV_VAR
 from dgml_core.storage import Workspace
 from dgml_core.workspaces_resolve import default_workspaces_store
 
@@ -344,6 +345,34 @@ def test_a_leading_dot_slash_addresses_the_directory_not_the_listed_id(
     assert Path(_read_stdout(capsys)["workspace"]) == listed
 
 
+def test_create_with_an_id_ignores_an_unrelated_workspace_in_the_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A new listed workspace has nothing to do with whatever `Workspace.resolve` fell
+    back to, so a `./dgml-workspace` sitting in the working directory must not be read as
+    "the workspace this --id is renaming".
+
+    The regression: `create --id x` failed with INVALID_ARGUMENT wherever such a
+    directory existed, complaining that "this workspace" already had a different id —
+    while the identical command *without* `--id` minted one and ignored the directory."""
+    monkeypatch.chdir(tmp_path)
+    assert main(["workspace", "create", "./dgml-workspace", "--organization", "Old"]) == 0
+    bystander = _read_stdout(capsys)["workspace_id"]
+
+    assert main(["workspace", "create", "--id", "my-workspace", "--organization", "New"]) == 0
+    created = _read_stdout(capsys)
+    assert created["workspace_id"] == "my-workspace"
+    assert created["listed"] is True
+
+    # The directory that was merely in the way is untouched, and not listed.
+    store = default_workspaces_store()
+    assert store.list_ids() == ["my-workspace"]
+    assert bystander != "my-workspace"
+    assert f'workspace_id = "{bystander}"' in (
+        tmp_path / "dgml-workspace" / "config.toml"
+    ).read_text(encoding="utf-8")
+
+
 def test_create_refuses_an_id_the_store_already_holds(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -427,6 +456,29 @@ def test_create_will_not_re_identify_an_existing_workspace(
     assert error["code"] == "INVALID_ARGUMENT"
     assert "my-workspace" in error["message"]
     assert 'workspace_id = "my-workspace"' in (ws / "config.toml").read_text(encoding="utf-8")
+
+    # Someone passing --id meant to create a *new* workspace, so the message has to name
+    # what is pointing this command at the existing one — otherwise it reads as a flat
+    # refusal with nothing to act on.
+    assert "drop that path argument" in error["message"]
+
+
+def test_the_re_identify_error_names_how_the_workspace_was_addressed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Whatever pointed the command at the existing workspace is the thing the caller has
+    to stop doing, so the message names it rather than describing "this workspace"."""
+    assert main(["workspace", "create", "--organization", "Acme", "--id", "my-workspace"]) == 0
+    _read_stdout(capsys)
+
+    assert main(["--workspace", "my-workspace", "workspace", "create", "--id", "other"]) == 1
+    assert "--workspace 'my-workspace'" in _read_stderr(capsys)["error"]["message"]
+
+    monkeypatch.setenv(WORKSPACE_ENV_VAR, "my-workspace")
+    assert main(["workspace", "create", "--id", "other"]) == 1
+    message = _read_stderr(capsys)["error"]["message"]
+    assert f"${WORKSPACE_ENV_VAR}" in message
+    assert f"unset {WORKSPACE_ENV_VAR}" in message
 
 
 def test_workspace_list(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

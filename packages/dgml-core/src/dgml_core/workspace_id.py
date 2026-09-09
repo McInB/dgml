@@ -12,17 +12,16 @@
 
 """Workspace ids: what makes one valid, and minting them.
 
-A ``workspace_id`` is a workspace's stable name: 3-40 characters from
-``[a-z0-9_-]``, starting with a letter or digit. It survives a directory rename, and
-is how ``--workspace`` addresses a workspace held in the machine's store of
-workspaces. Minted ids are ``ws_`` + 16 lowercase base32 characters (80 bits from
-:func:`secrets`); a caller-supplied one (``workspace create --id``) may be any valid
-id, so ``my-workspace`` is as legitimate as ``ws_qf7imkc7f6oqzfwt``.
+A ``workspace_id`` is a workspace's stable name — 3-40 characters from ``[a-z0-9_-]``,
+starting with a letter or digit — and is how ``--workspace`` addresses a workspace in
+the machine's store of workspaces. :func:`new_workspace_id` mints ``ws_`` + 16 base32
+characters, but the prefix is not required: ``workspace create --id my-workspace`` is
+just as valid.
 
-Validity is all this module decides. Whether a given ``--workspace`` argument means an
-id or a filesystem path is :meth:`dgml_core.storage.Workspace._from_workspaces_store`'s
-question, because — ids no longer carrying a distinguishing prefix — answering it needs
-the store of workspaces, which this module deliberately does not know about.
+Validity is all this module decides. Whether a ``--workspace`` argument is an id or a
+path is :meth:`dgml_core.storage.Workspace._from_workspaces_store`'s question — without
+a distinguishing prefix, answering it takes the store of workspaces, which this module
+deliberately knows nothing about.
 
 Its own module, depending on nothing, deliberately: id minting is needed by the
 workspaces store, by the CLI, *and* by :mod:`dgml_core.migrations` (which backfills
