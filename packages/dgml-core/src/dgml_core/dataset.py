@@ -22,12 +22,73 @@ job.
 from __future__ import annotations
 
 import io
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 from clustering.data.datasets import DocumentDataset, DocumentRecord
 from PIL import Image
 
 from . import layout
 from .storage import Workspace
+
+
+@contextmanager
+def _file_text_dir(workspace: Workspace, file_id: str, text_view: str) -> Iterator[Path]:
+    """A local directory holding one file's ``page_text/``, for ``_build_text``.
+
+    ``_build_text`` takes a *file* directory and opens only
+    ``<file_dir>/page_text/page_*.json`` (``clustering.example._load_pages``), so
+    that subtree is all that has to exist locally. ``files/<id>/`` also holds the
+    source document and every rendered page image — the bulk of a workspace, and
+    nothing this reader opens. Materializing the whole prefix is free on
+    ``LocalStore`` and a full per-record download on every other backend; the page
+    images in it would also duplicate the ones ``__getitem__`` already fetched
+    individually.
+
+    ``text_view`` narrows it further. The default view — ``page1`` — reads only
+    the first page (``_text_from_pages`` takes ``pages[0]`` and discards the
+    rest), so only ``page_1.json`` is fetched. Every other view (``full``,
+    ``headers``, ``salient_boost``, or any multi-view spec naming them) reads all
+    pages, so all are fetched.
+
+    This is :func:`dgml_core.clustering._corpus_dir`'s narrowing applied to a
+    single file; the two differ only in output shape (that one builds
+    ``<root>/<file_id>/page_text/`` for a whole corpus) and cannot share a helper
+    without a circular import, since ``clustering`` imports this module.
+    """
+    from .storage_local import LocalStore
+
+    # Exact type, not ``isinstance``: the passthrough is only valid because
+    # ``LocalStore``'s keys *are* paths under the workspace root. A subclass has
+    # changed something — ``DefaultBridgeStore`` in the test suite subclasses it
+    # precisely to keep the primitives but take the download bridge — so the
+    # assumption no longer holds. Materializing for an unknown subclass is slower
+    # and correct; short-circuiting it would be fast and wrong.
+    if type(workspace.blobs) is LocalStore:
+        yield workspace.files_dir / file_id
+        return
+
+    from clustering.example import split_view_spec
+
+    prefix = layout.file_text_prefix(file_id)
+    keys = workspace.blobs.list_blobs(prefix)
+    if all(name == "page1" for name in split_view_spec(text_view)):
+        # Filtered from the listing rather than probed with blob_exists, so a
+        # file with no page text still costs one round trip.
+        wanted = layout.file_page_text_key(file_id, 1)
+        keys = [key for key in keys if key == wanted]
+
+    with tempfile.TemporaryDirectory(prefix="dgml-file-text-") as tmp:
+        root = Path(tmp)
+        # Created even when nothing matches, so ``_load_pages`` sees the same
+        # shape it sees on local disk (an empty dir, not a missing one).
+        page_text = root / layout.PAGE_TEXT_DIR
+        page_text.mkdir()
+        for key in keys:
+            workspace.blobs.download_blob(key, page_text / key[len(prefix) :])
+        yield root
 
 
 class WorkspaceFileDataset(DocumentDataset):
@@ -91,9 +152,9 @@ class WorkspaceFileDataset(DocumentDataset):
             Image.open(io.BytesIO(ws.blobs.get_blob(k))).convert("RGB")
             for k in page_keys[: self.max_pages]
         )
-        # `_build_text` reads `<file_dir>/page_text/*.json`; hand it a materialized
-        # copy of the file's artifacts (the real dir on LocalStore, zero-copy).
-        with ws.blobs.materialize_dir(layout.file_prefix(file_id)) as file_dir:
+        # `_build_text` reads `<file_dir>/page_text/*.json` and nothing else, so
+        # hand it just that (the real dir on LocalStore, zero-copy).
+        with _file_text_dir(ws, file_id, self.text_view) as file_dir:
             text = _build_text(file_dir, view=self.text_view)
         return DocumentRecord(
             doc_id=file_id,

@@ -844,6 +844,11 @@ def _corpus_dir(workspace: Workspace, file_ids: Sequence[str], text_view: str) -
     The directory lives only for the duration of the ``with`` block; the encoder
     reads it while being constructed inside ``run_clustering_detailed``, so the
     block has to span that call.
+
+    :func:`dgml_core.dataset._file_text_dir` is the same narrowing for a single
+    file (the per-record text the dataset builds). The two differ only in output
+    shape, and cannot share a helper without a circular import — keep their
+    filtering rules in step.
     """
     from .storage_local import LocalStore
 
