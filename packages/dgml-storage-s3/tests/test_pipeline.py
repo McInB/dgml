@@ -39,9 +39,8 @@ def _record_object_reads(ws: Workspace) -> list[tuple[str, str]]:
     fetching — and not about which helper we happened to call.
 
     Object keys are mapped back through the store's own ``_key`` so the recorded
-    keys are workspace-relative. That is a no-op for a store configured with no
-    ``prefix`` (what this suite's fixtures build today), and keeps the assertions
-    readable — and correct — for one that has one.
+    keys are workspace-relative: the fixtures give each test its own ``prefix``
+    inside the shared session bucket, which is not part of what is asserted here.
     """
     seen: list[tuple[str, str]] = []
     store: Any = ws.blobs
