@@ -47,16 +47,10 @@ def _file_text_dir(workspace: Workspace, file_id: str, text_view: str) -> Iterat
     images in it would also duplicate the ones ``__getitem__`` already fetched
     individually.
 
-    ``text_view`` narrows it further. The default view — ``page1`` — reads only
-    the first page (``_text_from_pages`` takes ``pages[0]`` and discards the
-    rest), so only ``page_1.json`` is fetched. Every other view (``full``,
-    ``headers``, ``salient_boost``, or any multi-view spec naming them) reads all
-    pages, so all are fetched.
-
-    This is :func:`dgml_core.clustering._corpus_dir`'s narrowing applied to a
-    single file; the two differ only in output shape (that one builds
-    ``<root>/<file_id>/page_text/`` for a whole corpus) and cannot share a helper
-    without a circular import, since ``clustering`` imports this module.
+    Which pages ``text_view`` needs is :func:`dgml_core.utils.page_text_keys`'s
+    call — shared with :func:`dgml_core.clustering._corpus_dir`, which does the
+    same job for a whole corpus. Only the directory shape differs, and that is
+    what stays here.
     """
     from .storage_local import LocalStore
 
@@ -70,15 +64,7 @@ def _file_text_dir(workspace: Workspace, file_id: str, text_view: str) -> Iterat
         yield workspace.files_dir / file_id
         return
 
-    from clustering.example import split_view_spec
-
-    prefix = layout.file_text_prefix(file_id)
-    keys = workspace.blobs.list_blobs(prefix)
-    if all(name == "page1" for name in split_view_spec(text_view)):
-        # Filtered from the listing rather than probed with blob_exists, so a
-        # file with no page text still costs one round trip.
-        wanted = layout.file_page_text_key(file_id, 1)
-        keys = [key for key in keys if key == wanted]
+    from .utils import page_text_keys
 
     with tempfile.TemporaryDirectory(prefix="dgml-file-text-") as tmp:
         root = Path(tmp)
@@ -86,7 +72,8 @@ def _file_text_dir(workspace: Workspace, file_id: str, text_view: str) -> Iterat
         # shape it sees on local disk (an empty dir, not a missing one).
         page_text = root / layout.PAGE_TEXT_DIR
         page_text.mkdir()
-        for key in keys:
+        prefix = layout.file_text_prefix(file_id)
+        for key in page_text_keys(workspace, file_id, text_view):
             workspace.blobs.download_blob(key, page_text / key[len(prefix) :])
         yield root
 
