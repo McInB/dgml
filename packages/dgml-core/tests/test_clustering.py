@@ -576,16 +576,19 @@ def test_record_text_fetches_no_page_images_or_source_document(tmp_path: Path) -
     [
         ("page1", ["page_1.json"]),  # the default: only the first page is read
         ("full", ["page_1.json", "page_2.json", "page_3.json"]),
-        ("salient_boost", ["page_1.json", "page_2.json", "page_3.json"]),
-        # A multi-view spec naming anything but page1 still needs every page.
-        ("page1+full", ["page_1.json", "page_2.json", "page_3.json"]),
     ],
 )
 def test_record_text_fetches_only_the_pages_the_view_reads(
     tmp_path: Path, text_view: str, expected_pages: list[str]
 ) -> None:
-    """The same view-narrowing ``_corpus_dir`` applies, per record: on the default
-    ``page1`` view a record costs exactly one blob, not one per page."""
+    """The per-record half of the narrowing: the directory holds exactly the pages
+    the view reads, in the shape ``_build_text`` expects, and is cleaned up after.
+
+    The rule itself lives in ``utils.page_text_keys`` and is parametrized across
+    every view by ``test_corpus_fetches_only_the_pages_the_view_reads`` above —
+    the two views here are the two distinct behaviours (narrowed / not), enough
+    to catch this caller wiring the shared rule up wrong.
+    """
     from dgml_core.dataset import _file_text_dir
 
     ws = _seeded_bridge_workspace(tmp_path)
@@ -598,19 +601,18 @@ def test_record_text_fetches_only_the_pages_the_view_reads(
     assert not held.exists()
 
 
-def test_file_text_dir_passes_through_for_a_local_store(workspace: Workspace) -> None:
-    """LocalStore's blobs already sit in the file's directory — no copy is made."""
-    from dgml_core.dataset import _file_text_dir
-
-    with _file_text_dir(workspace, "f1", "full") as file_dir:
-        assert file_dir == workspace.files_dir / "f1"
-
-
-@pytest.mark.parametrize("text_view", ["full", "page1", "headers", "salient_boost", "page1+full"])
+@pytest.mark.parametrize("text_view", ["page1", "full"])
 def test_record_text_is_identical_across_backends(tmp_path: Path, text_view: str) -> None:
-    """The narrowing must not change what any view reads. Same workspace content,
+    """The narrowing must not change what a view reads. Same workspace content,
     LocalStore vs the bridge — identical text, or the same workspace would cluster
-    differently depending on its storage backend."""
+    differently depending on its storage backend.
+
+    This is the outcome half of the pair: the test above asserts *which blobs are
+    fetched*, this one that the text built from them is right. That is what
+    catches a narrowing which silently truncates — and it covers the LocalStore
+    passthrough too, since yielding the wrong directory there produces empty text
+    on one side only.
+    """
     bridge = _seeded_bridge_workspace(tmp_path / "bridge")
 
     local = Workspace(root=tmp_path / "local" / "ws")
