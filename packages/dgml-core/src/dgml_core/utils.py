@@ -86,6 +86,35 @@ def gather_file_pages(workspace: Workspace, file_id: str, max_pages: int) -> lis
     return [workspace.blobs.get_blob(k) for k in keys]
 
 
+def page_text_keys(workspace: Workspace, file_id: str, text_view: str) -> list[str]:
+    """The ``page_text`` blob keys that ``text_view`` actually reads for ``file_id``.
+
+    The text a clustering record carries is assembled from ``page_text/*.json``
+    by ``clustering.example._build_text``, and which pages it opens depends on
+    the view: ``page1`` takes ``pages[0]`` and discards the rest, so only
+    ``page_1.json`` is worth fetching. Every other view (``full``, ``headers``,
+    ``salient_boost``, or any multi-view spec naming them) reads all pages.
+
+    Two callers materialize page text for that reader — ``_corpus_dir`` for a
+    whole corpus, ``_file_text_dir`` for one record — into different directory
+    shapes. This is the part they must agree on: narrowing for a view that turns
+    out to read more pages would silently truncate the text, and the two would
+    truncate it differently. Returning *keys* rather than writing files leaves
+    the shape entirely to the caller.
+
+    Page 1 is filtered out of the listing rather than probed with ``blob_exists``
+    so a file with no page text still costs exactly one round trip.
+    """
+    from clustering.example import split_view_spec
+
+    prefix = layout.file_text_prefix(file_id)
+    keys = workspace.blobs.list_blobs(prefix)
+    if all(name == "page1" for name in split_view_spec(text_view)):
+        wanted = layout.file_page_text_key(file_id, 1)
+        return [key for key in keys if key == wanted]
+    return keys
+
+
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _JPEG_MAGIC = b"\xff\xd8\xff"
 
