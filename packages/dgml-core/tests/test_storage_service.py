@@ -402,11 +402,26 @@ def test_workspace_path_in_a_shared_layer_is_rejected(tmp_path: Path) -> None:
 
 def test_workspace_path_in_the_workspaces_own_config_is_honoured(tmp_path: Path) -> None:
     """The counterpart: the same key in the workspace's *own* config is exactly what
-    ``dgml workspace import`` writes, and must keep working."""
+    ``dgml workspace import`` writes, and must keep working — even when the user config
+    also carries a template of the same name that the guard would reject."""
+    from dgml_core.storage import user_config_path
     from dgml_core.storage_resolve import resolve_store_configs
 
-    from .conftest import write_config
+    from .conftest import dump_toml, write_config
 
+    user = user_config_path()
+    user.parent.mkdir(parents=True, exist_ok=True)
+    user.write_text(
+        dump_toml(
+            {
+                "storage": {
+                    "provider": DEFAULT_STORAGE_PROVIDER,
+                    "workspace_path": str(tmp_path / "shared"),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     elsewhere = tmp_path / "corpus"
     ws = Workspace.resolve(tmp_path / "ws")
     write_config(
@@ -722,8 +737,9 @@ def test_default_bridge_stages_under_the_configured_temp_dir(
     """Every bridge method a third-party store inherits stages in the ordinary
     ``tempfile`` location, so an operator redirects all of them at once.
 
-    This is what #129 asked for: staging must be *redirectable*, because ``$TMPDIR`` is
-    a RAM-backed tmpfs on many container images. Exercised through ``tempfile.tempdir``
+    Pins the behaviour the storage docs promise operators: ``TMPDIR`` redirects all
+    four methods, which matters because it is a RAM-backed tmpfs on many container
+    images. Exercised through ``tempfile.tempdir``
     rather than the environment because Python memoizes ``gettempdir()`` on first call —
     which is exactly why an operator has to set ``TMPDIR`` before the process starts."""
     scratch = tmp_path / "scratch"
