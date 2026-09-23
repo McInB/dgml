@@ -25,7 +25,7 @@ from io import BytesIO
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from .errors import AuthError, OcrConfigInvalid, OcrFailed
-from .ocr import OcrConfig, OcrProvider, OcrProviderName
+from .ocr import OcrConfig, OcrPageResult, OcrProvider, OcrProviderName
 from .text_extraction import split_word_into_tokens
 
 if TYPE_CHECKING:  # pragma: no cover - import-time-only types
@@ -74,7 +74,7 @@ class AzureProvider(OcrProvider):
         image_bytes: bytes,
         image_dims_px: tuple[int, int],
         page_num: int,
-    ) -> list[dict[str, Any]]:
+    ) -> OcrPageResult:
         try:
             poller = self._client.begin_analyze_document("prebuilt-read", body=BytesIO(image_bytes))
             result = poller.result()
@@ -86,8 +86,13 @@ class AzureProvider(OcrProvider):
 
         pages = getattr(result, "pages", None) or []
         if not pages:
-            return []
+            return OcrPageResult(words=[], angle=0.0)
         page = pages[0]
+        # page.angle is the clockwise orientation of the content in degrees,
+        # in (-180, 180]; may be absent/None. The shared OCR loop deskews the
+        # page image + boxes when this is significant.
+        angle = getattr(page, "angle", None)
+        page_angle = float(angle) if isinstance(angle, (int, float)) else 0.0
         # We always send image input, so Azure should always report
         # unit='pixel' with polygon coordinates already in the input
         # image's pixel space. Anything else is a service contract
@@ -114,7 +119,7 @@ class AzureProvider(OcrProvider):
             # LTChar level using true coordinates.
             for tk_text, tk_box in split_word_into_tokens(text, box):
                 words.append({"t": tk_text, "l": list(tk_box)})
-        return words
+        return OcrPageResult(words=words, angle=page_angle)
 
 
 def _azure_credential(config: OcrConfig) -> AzureKeyCredential | TokenCredential:

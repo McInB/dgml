@@ -42,6 +42,60 @@ from .conftest import make_fake_png, write_ocr_config
 # ---------------------------------------------------------------------------
 
 
+def _write_page(dir_: Path, page: int, payload: dict[str, Any]) -> None:
+    dir_.mkdir(parents=True, exist_ok=True)
+    (dir_ / f"page_{page}.json").write_text(json.dumps(payload))
+
+
+def test_merge_rotates_digital_into_deskewed_frame(tmp_path: Path) -> None:
+    """On a deskewed OCR page, the digital boxes (still in the original render's
+    frame) are rotated by the same transform and then merged normally — so
+    high-fidelity digital text survives on rotated pages instead of being
+    dropped. Here a 180° rotation maps the digital box onto the matching OCR
+    box, so digital wins on agreement and its (rotated) box is what's emitted."""
+    from dgml_core.hybrid import _merge_into
+
+    digital_dir = tmp_path / "digital"
+    ocr_dir = tmp_path / "ocr"
+    out_dir = tmp_path / "out"
+
+    # Digital saw the word in the ORIGINAL (pre-rotation) frame.
+    _write_page(
+        digital_dir,
+        1,
+        {
+            "file_id": "fid",
+            "page": 1,
+            "width": 100,
+            "height": 60,
+            "words": [{"t": "hello", "l": [10, 10, 30, 20]}],
+        },
+    )
+    # OCR deskewed the page 180°; its word sits where the digital word lands
+    # after the same 180° rotation about the page centre: [70, 40, 90, 50].
+    _write_page(
+        ocr_dir,
+        1,
+        {
+            "file_id": "fid",
+            "page": 1,
+            "width": 100,
+            "height": 60,
+            "words": [{"t": "hello", "l": [70, 40, 90, 50]}],
+            "rotation": 180.0,
+        },
+    )
+
+    _merge_into(digital_dir, ocr_dir, out_dir, file_id="fid")
+
+    payload = json.loads((out_dir / "page_1.json").read_text())
+    # Digital was rotated to [70, 40, 90, 50], overlaps the identical-text OCR
+    # word, so digital wins on agreement — one word, at the rotated position.
+    assert payload["words"] == [{"t": "hello", "l": [70, 40, 90, 50]}]
+    assert payload["rotation"] == 180.0
+    assert (payload["width"], payload["height"]) == (100, 60)
+
+
 def test_iou_identical_boxes_is_one() -> None:
     assert _iou([0, 0, 10, 10], [0, 0, 10, 10]) == pytest.approx(1.0)
 

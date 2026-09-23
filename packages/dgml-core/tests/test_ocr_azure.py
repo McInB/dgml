@@ -18,6 +18,7 @@ import json
 import sys
 import threading
 import types
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -61,15 +62,34 @@ def _azure_word(text: str, polygon: list[float]) -> types.SimpleNamespace:
     return types.SimpleNamespace(content=text, polygon=polygon)
 
 
-def _azure_page_pixel(width_px: int, height_px: int, words: list[Any]) -> Any:
+def _azure_page_pixel(
+    width_px: int, height_px: int, words: list[Any], angle: float | None = None
+) -> Any:
     """Build a fake page like the SDK returns for image input (unit='pixel')."""
     return types.SimpleNamespace(
         page_number=1,
         width=float(width_px),
         height=float(height_px),
         unit="pixel",
+        angle=angle,
         words=words,
     )
+
+
+class _FixedAzureClient:
+    """Fake client that returns one fixed result regardless of input bytes —
+    for single-page tests where marker-routing (which needs the marker to be a
+    substring of the input) would fight a real, PIL-decodable PNG."""
+
+    def __init__(self, result: Any) -> None:
+        self._result = result
+        self.call_count = 0
+
+    def begin_analyze_document(self, model_id: str, *, body: Any) -> _FakePoller:
+        if hasattr(body, "read"):
+            body.read()
+        self.call_count += 1
+        return _FakePoller(self._result)
 
 
 def _azure_result(page: Any) -> Any:
@@ -285,3 +305,102 @@ def test_azure_extract_requires_page_images(
             page_images_dir=tmp_path / "page_images",  # does not exist
             config=cfg,
         )
+
+
+def _real_png(width: int, height: int) -> bytes:
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", (width, height), (255, 255, 255)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_azure_significant_angle_deskews_page(
+    azure_config: Workspace,
+    text_pdf: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When Azure reports a significant page angle, the page image is rewritten
+    deskewed, the JSON records the rotation, and dims match the new image."""
+    monkeypatch.setenv("TEST_AZURE_KEY", "fake-key")
+    pages_dir = tmp_path / "page_images"
+    pages_dir.mkdir()
+    original_png = _real_png(400, 200)
+    (pages_dir / "page_1.png").write_bytes(original_png)
+
+    word = _azure_word("skewed", [200.0, 50.0, 300.0, 50.0, 300.0, 90.0, 200.0, 90.0])
+    result = _azure_result(_azure_page_pixel(400, 200, words=[word], angle=11.0))
+    client = _FixedAzureClient(result)
+
+    def fake_ctor(endpoint: str, credential: Any, **kwargs: Any) -> _FixedAzureClient:
+        return client
+
+    import azure.ai.documentintelligence as adi
+
+    monkeypatch.setattr(adi, "DocumentIntelligenceClient", fake_ctor)
+
+    out_dir = tmp_path / "page_text"
+    cfg = OcrConfig(
+        provider=OcrProviderName.AZURE,
+        endpoint="https://example.cognitiveservices.azure.com/",
+        api_key_env="TEST_AZURE_KEY",
+    )
+    extract_text_ocr(text_pdf, out_dir, file_id="fid", page_images_dir=pages_dir, config=cfg)
+
+    # The canonical page image was rewritten (deskewed) in place.
+    from PIL import Image
+
+    rewritten = (pages_dir / "page_1.png").read_bytes()
+    assert rewritten != original_png
+    with Image.open(BytesIO(rewritten)) as im:
+        img_w, img_h = im.width, im.height
+    assert (img_w, img_h) != (400, 200)  # expand for |angle| >= 5
+
+    payload = json.loads((out_dir / "page_1.json").read_text())
+    assert payload["rotation"] == 11.0
+    assert (payload["width"], payload["height"]) == (img_w, img_h)  # dims match image
+    assert payload["words"], "the word should survive deskew"
+    box = payload["words"][0]["l"]
+    assert 0 <= box[0] < box[2] <= img_w
+    assert 0 <= box[1] < box[3] <= img_h
+
+
+def test_azure_small_angle_leaves_page_untouched(
+    azure_config: Workspace,
+    text_pdf: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A sub-threshold angle (<1°) is treated as upright: image untouched, no
+    rotation key, dims unchanged."""
+    monkeypatch.setenv("TEST_AZURE_KEY", "fake-key")
+    pages_dir = tmp_path / "page_images"
+    pages_dir.mkdir()
+    original_png = _real_png(400, 200)
+    (pages_dir / "page_1.png").write_bytes(original_png)
+
+    word = _azure_word("flat", [10.0, 20.0, 60.0, 20.0, 60.0, 40.0, 10.0, 40.0])
+    result = _azure_result(_azure_page_pixel(400, 200, words=[word], angle=0.4))
+    client = _FixedAzureClient(result)
+
+    def fake_ctor(endpoint: str, credential: Any, **kwargs: Any) -> _FixedAzureClient:
+        return client
+
+    import azure.ai.documentintelligence as adi
+
+    monkeypatch.setattr(adi, "DocumentIntelligenceClient", fake_ctor)
+
+    out_dir = tmp_path / "page_text"
+    cfg = OcrConfig(
+        provider=OcrProviderName.AZURE,
+        endpoint="https://example.cognitiveservices.azure.com/",
+        api_key_env="TEST_AZURE_KEY",
+    )
+    extract_text_ocr(text_pdf, out_dir, file_id="fid", page_images_dir=pages_dir, config=cfg)
+
+    assert (pages_dir / "page_1.png").read_bytes() == original_png  # untouched
+    payload = json.loads((out_dir / "page_1.json").read_text())
+    assert "rotation" not in payload
+    assert (payload["width"], payload["height"]) == (400, 200)
+    assert payload["words"][0]["l"] == [10, 20, 60, 40]  # box unchanged

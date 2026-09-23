@@ -89,6 +89,7 @@ from .ocr import OcrConfig, _write_page_json, extract_text_ocr
 from .pages import DEFAULT_DPI
 from .prompts import PromptKey
 from .prompts import get as prompt
+from .rotation import rotate_word_boxes
 from .storage import Workspace
 from .text_extraction import (
     PAGE_TEXT_GLOB,
@@ -240,9 +241,11 @@ def _merge_into(
         # Prefer OCR's reported dimensions — the PNG IHDR is the source of
         # truth they were measured against. Digital fills in only when OCR
         # didn't process this page.
+        rotation: float | None = None
         if o_payload is not None:
             width = int(o_payload["width"])
             height = int(o_payload["height"])
+            rotation = o_payload.get("rotation")
         else:
             assert d_payload is not None  # at least one side processed this page
             width = int(d_payload["width"])
@@ -250,6 +253,19 @@ def _merge_into(
 
         digital_words = list(d_payload["words"]) if d_payload is not None else []
         ocr_words = list(o_payload["words"]) if o_payload is not None else []
+
+        # If OCR deskewed this page, its image + boxes moved to a new (upright)
+        # frame while the digital boxes are still in the original render's frame
+        # (digital and the pre-rotation page image share a frame — that's the
+        # invariant the whole overlap merge relies on). Rotate the digital boxes
+        # by the *same* transform so they line up again, then merge normally.
+        # This keeps high-fidelity digital text on rotated pages (e.g. a 90°
+        # landscape page) instead of discarding it and falling back to OCR.
+        if rotation and d_payload is not None and digital_words:
+            old_dims = (int(d_payload["width"]), int(d_payload["height"]))
+            digital_words = rotate_word_boxes(
+                digital_words, float(rotation), old_dims, (width, height)
+            )
         merged = _merge_words(
             digital_words,
             ocr_words,
@@ -261,7 +277,7 @@ def _merge_into(
             debug=debug,
         )
 
-        _write_page_json(output_dir, page_num, file_id, width, height, merged)
+        _write_page_json(output_dir, page_num, file_id, width, height, merged, rotation=rotation)
         pages_written += 1
         if merged:
             pages_with_words += 1
