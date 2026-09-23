@@ -217,10 +217,10 @@ def test_workspace_blobs_is_resolved_once(tmp_path: Path, monkeypatch: pytest.Mo
     built = 0
     real_make = storage_resolve.make_blob_store
 
-    def counting_make(config: object) -> object:
+    def counting_make(config: object, **kwargs: object) -> object:
         nonlocal built
         built += 1
-        return real_make(config)  # type: ignore[arg-type]
+        return real_make(config, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(storage_resolve, "make_blob_store", counting_make)
 

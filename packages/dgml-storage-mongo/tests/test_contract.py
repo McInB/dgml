@@ -30,21 +30,19 @@ from .conftest import PROVIDER
 
 def test_requires_a_database(tmp_path: Path) -> None:
     with pytest.raises(StorageConfigInvalid):
-        MongoDocStore.parse_config(StorageConfig(provider=PROVIDER, root=tmp_path))
+        MongoDocStore.parse_config(StorageConfig(provider=PROVIDER))
 
 
 def test_rejects_unknown_and_credential_fields(tmp_path: Path) -> None:
     for bad in ({"mongo_database": "d", "typo": 1}, {"mongo_database": "d", "mongo_password": "x"}):
         with pytest.raises(StorageConfigInvalid):
-            MongoDocStore.parse_config(StorageConfig(provider=PROVIDER, root=tmp_path, options=bad))
+            MongoDocStore.parse_config(StorageConfig(provider=PROVIDER, options=bad))
 
 
 def test_bad_port_rejected(tmp_path: Path) -> None:
     with pytest.raises(StorageConfigInvalid):
         MongoDocStore.parse_config(
-            StorageConfig(
-                provider=PROVIDER, root=tmp_path, options={"mongo_database": "d", "mongo_port": "x"}
-            )
+            StorageConfig(provider=PROVIDER, options={"mongo_database": "d", "mongo_port": "x"})
         )
 
 

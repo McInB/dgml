@@ -65,12 +65,19 @@ class ProviderConfigFields:
 
     @classmethod
     def _check_no_extra_fields(cls, options: Mapping[str, Any]) -> None:
-        """Raise ``cls.config_error`` for any option key not in ``cls.config_fields``."""
+        """Raise ``cls.config_error`` for any option key not in ``cls.config_fields``.
+
+        Underscore-prefixed entries are accepted but never *advertised*: they are keys
+        the resolver injects rather than ones a user writes (see
+        :data:`~dgml_core.storage_service.WORKSPACE_ROOT_OPTION`), so listing them in the
+        "Allowed:" hint would invite someone to set one in ``config.toml``, where it is
+        stripped on read and would silently do nothing."""
         unknown = set(options) - cls.config_fields
         if unknown:
+            allowed = sorted(k for k in cls.config_fields if not k.startswith("_"))
             raise cls.config_error(
                 f"unknown fields in {cls.config_section!r} for provider {cls.name!r}: "
-                f"{sorted(unknown)}. Allowed: {sorted(cls.config_fields)}"
+                f"{sorted(unknown)}. Allowed: {allowed}"
             )
 
 

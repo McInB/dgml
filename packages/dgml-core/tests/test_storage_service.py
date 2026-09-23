@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -38,8 +39,9 @@ from dgml_core.errors import (
     StorageProviderUnresolvable,
 )
 from dgml_core.hashing import CHUNK_SIZE
+from dgml_core.storage_service import WORKSPACE_ROOT_OPTION
 
-from .conftest import DefaultBridgeStore, default_bridge_store, local_store
+from .conftest import DefaultBridgeStore, default_bridge_store, local_config, local_store
 
 # --------------------------------------------------------------------------- blobs
 
@@ -339,9 +341,9 @@ def test_usage_tolerates_corrupt_tail(tmp_path: Path) -> None:
 
 
 def test_make_store_default_is_local(tmp_path: Path) -> None:
-    cfg = StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=tmp_path)
-    blobs = make_blob_store(cfg)
-    docs = make_doc_store(cfg)
+    cfg = StorageConfig(provider=DEFAULT_STORAGE_PROVIDER)
+    blobs = make_blob_store(cfg, workspace_root=tmp_path)
+    docs = make_doc_store(cfg, workspace_root=tmp_path)
     assert isinstance(blobs, LocalStore) and isinstance(blobs, BlobStore)
     assert isinstance(docs, LocalStore) and isinstance(docs, DocStore)
 
@@ -349,22 +351,156 @@ def test_make_store_default_is_local(tmp_path: Path) -> None:
 def test_make_store_bad_provider() -> None:
     for bad in ["noColon", "no.module.here.at.all:Class", "json:Nonexistent"]:
         with pytest.raises(StorageProviderUnresolvable):
-            make_blob_store(StorageConfig(provider=bad, root=Path(".")))
+            make_blob_store(StorageConfig(provider=bad), workspace_root=Path("."))
 
 
 def test_make_store_not_a_storage_subclass() -> None:
     # importable + resolvable, but not a BlobStore / DocStore
     with pytest.raises(StorageProviderUnresolvable):
-        make_blob_store(StorageConfig(provider="json:JSONDecoder", root=Path(".")))
+        make_blob_store(StorageConfig(provider="json:JSONDecoder"), workspace_root=Path("."))
     with pytest.raises(StorageProviderUnresolvable):
-        make_doc_store(StorageConfig(provider="json:JSONDecoder", root=Path(".")))
+        make_doc_store(StorageConfig(provider="json:JSONDecoder"), workspace_root=Path("."))
 
 
 def test_local_store_rejects_unknown_options(tmp_path: Path) -> None:
     with pytest.raises(StorageConfigInvalid):
         LocalStore.parse_config(
-            StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=tmp_path, options={"bucket": "x"})
+            StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, options={"bucket": "x"})
         )
+
+
+def test_remote_provider_never_receives_the_workspace_root(tmp_path: Path) -> None:
+    """The point of #129: a store whose data is not on this machine is handed no local
+    path at all, rather than one it is documented to ignore.
+
+    One declaration governs it: a store asks for the root by listing it in
+    ``config_fields``, the same set ``_check_no_extra_fields`` enforces. So "is it
+    handed over" and "is it accepted" cannot drift — a store that did not ask for it
+    would reject it anyway."""
+    from dgml_core.storage_resolve import _with_workspace_root
+
+    # Never instantiated, so the abstract blob methods need no stubs — what is under
+    # test is how the class declares what it accepts.
+    class _Remote(BlobStore):
+        name = "remote"
+        config_fields = frozenset({"bucket"})
+
+    cfg = StorageConfig(provider="x:Y", options={"bucket": "b"})
+    handed = _with_workspace_root(_Remote, cfg, tmp_path)
+    assert handed.options == {"bucket": "b"}
+    assert WORKSPACE_ROOT_OPTION not in handed.options
+    # …and had it been handed over, the same set would have rejected it.
+    _Remote._check_no_extra_fields(handed.options)
+    with pytest.raises(StorageConfigInvalid):
+        _Remote._check_no_extra_fields({**handed.options, WORKSPACE_ROOT_OPTION: "/x"})
+
+
+def test_a_store_asks_for_the_root_through_config_fields(tmp_path: Path) -> None:
+    """The converse, and the whole of option B: listing the key is what gets it, with
+    no second flag to keep in step."""
+    from dgml_core.storage_resolve import _with_workspace_root
+
+    class _Local(BlobStore):
+        name = "wants-it"
+        config_fields = frozenset({WORKSPACE_ROOT_OPTION})
+
+    handed = _with_workspace_root(_Local, StorageConfig(provider="x:Y"), tmp_path)
+    assert handed.options == {WORKSPACE_ROOT_OPTION: str(tmp_path.resolve())}
+    _Local._check_no_extra_fields(handed.options)  # asking implies accepting
+
+
+def test_injected_keys_are_not_advertised_to_users(tmp_path: Path) -> None:
+    """A typo under a local ``[storage]`` table must not suggest ``_workspace_root`` as
+    something to set: config reads strip underscore keys, so setting one does nothing."""
+    with pytest.raises(StorageConfigInvalid) as excinfo:
+        LocalStore.parse_config(
+            StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, options={"workspacepath": "/x"})
+        )
+    assert "workspace_path" in str(excinfo.value)
+    assert WORKSPACE_ROOT_OPTION not in str(excinfo.value)
+
+
+def test_local_store_without_a_location_says_so(tmp_path: Path) -> None:
+    """Constructed outside the factories and given no root, the message names the
+    factories rather than failing later with a KeyError."""
+    with pytest.raises(StorageConfigInvalid, match="no location"):
+        LocalStore.parse_config(StorageConfig(provider=DEFAULT_STORAGE_PROVIDER))
+
+
+def test_declared_workspace_path_wins_over_the_injected_root(tmp_path: Path) -> None:
+    """User-authored config beats runtime state — today's "fold workspace_path over
+    root" precedence, preserved now that the two arrive under separate keys."""
+    elsewhere = tmp_path / "corpus"
+    cfg = StorageConfig(
+        provider=DEFAULT_STORAGE_PROVIDER,
+        options={WORKSPACE_ROOT_OPTION: str(tmp_path / "ws"), "workspace_path": str(elsewhere)},
+    )
+    store = LocalStore(LocalStore.parse_config(cfg))
+    store.put_blob("files/a/report.pdf", b"x")
+    assert (elsewhere / "files" / "a" / "report.pdf").exists()
+
+
+def test_workspace_path_in_a_shared_layer_is_rejected(tmp_path: Path) -> None:
+    """``workspace_path`` pins *one* workspace's data to one directory, so it cannot
+    live in a user-level ``[storage.<name>]`` template shared by many.
+
+    Honouring it would point every workspace on the template at the same directory, and
+    it would reach only ``LocalStore`` — not the store of workspaces, which reads each
+    workspace's own config — so ``Workspace.root`` and the directory actually written
+    would disagree."""
+    from dgml_core.storage import user_config_path
+
+    from .conftest import dump_toml
+
+    user = user_config_path()
+    user.parent.mkdir(parents=True, exist_ok=True)
+    user.write_text(
+        dump_toml(
+            {
+                "storage": {
+                    "acme": {
+                        "provider": DEFAULT_STORAGE_PROVIDER,
+                        "workspace_path": str(tmp_path / "elsewhere"),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    ws = Workspace.resolve(tmp_path / "ws")
+    with pytest.raises(StorageConfigInvalid, match="pins one workspace"):
+        load_store_configs(ws, "acme")
+
+
+def test_workspace_path_in_the_workspaces_own_config_is_honoured(tmp_path: Path) -> None:
+    """The counterpart: the same key in the workspace's *own* config is exactly what
+    ``dgml workspace import`` writes, and must keep working."""
+    from dgml_core.storage_resolve import resolve_store_configs
+
+    from .conftest import write_config
+
+    elsewhere = tmp_path / "corpus"
+    ws = Workspace.resolve(tmp_path / "ws")
+    write_config(
+        ws,
+        {
+            "storage": {
+                "provider": DEFAULT_STORAGE_PROVIDER,
+                "workspace_path": str(elsewhere),
+            }
+        },
+    )
+    blob_cfg, _ = resolve_store_configs(ws)
+    assert blob_cfg.options["workspace_path"] == str(elsewhere)
+
+
+def test_config_cannot_spoof_the_injected_root(tmp_path: Path) -> None:
+    """The injection channel is underscore-prefixed and stripped when config is read,
+    so a config.toml cannot hand a store a root by writing the internal key itself."""
+    from dgml_core.storage_resolve import _config_from
+
+    cfg = _config_from({"provider": "x:Y", WORKSPACE_ROOT_OPTION: "/etc", "bucket": "b"})
+    assert cfg.options == {"bucket": "b"}
 
 
 def test_load_store_configs_defaults_to_local(tmp_path: Path) -> None:
@@ -372,7 +508,6 @@ def test_load_store_configs_defaults_to_local(tmp_path: Path) -> None:
     ws = Workspace.resolve(tmp_path)
     blob_cfg, doc_cfg = load_store_configs(ws)
     assert blob_cfg.provider == doc_cfg.provider == DEFAULT_STORAGE_PROVIDER
-    assert blob_cfg.root == doc_cfg.root == ws.root
     assert blob_cfg.options == doc_cfg.options == {}
 
 
@@ -461,10 +596,9 @@ def test_fingerprint_drops_secrets() -> None:
     """Secret-hinted options are outside the identity hash, so rotating a credential
     never reads as "the store moved"."""
     base = {"bucket": "b", "region": "us-east-1"}
-    plain = StorageConfig(provider="p:C", root=Path("/tmp/ws"), options=base)
+    plain = StorageConfig(provider="p:C", options=base)
     with_secrets = StorageConfig(
         provider="p:C",
-        root=Path("/tmp/ws"),
         options={**base, "secret_key": "SHH", "api_token": "T"},
     )
     assert storage_fingerprint(plain) == storage_fingerprint(with_secrets)
@@ -473,21 +607,41 @@ def test_fingerprint_drops_secrets() -> None:
 def test_storage_fingerprint_pair_is_order_sensitive() -> None:
     from dgml_core.storage_resolve import storage_fingerprint_pair
 
-    blob = StorageConfig(provider="pkg:S3", root=Path("/w"), options={"bucket": "b"})
-    doc = StorageConfig(provider="pkg:Mongo", root=Path("/w"), options={"mongo_database": "d"})
+    blob = StorageConfig(provider="pkg:S3", options={"bucket": "b"})
+    doc = StorageConfig(provider="pkg:Mongo", options={"mongo_database": "d"})
     assert storage_fingerprint_pair(blob, doc).startswith("sha256:")
     # Which backend holds which role is part of the identity.
     assert storage_fingerprint_pair(blob, doc) != storage_fingerprint_pair(doc, blob)
 
 
-def test_storage_fingerprint_pair_ignores_root() -> None:
-    """A workspace copied or moved keeps its seal: where the config lives is not where
-    the data lives."""
+def test_storage_fingerprint_pair_ignores_where_the_data_lives() -> None:
+    """A workspace copied or moved keeps its seal: where the data sits on this machine
+    is an address, not an identity.
+
+    ``StorageConfig`` no longer carries a root at all — it reaches a live store only at
+    construction — so the only location left to vary here is ``workspace_path``, which
+    ``_LOCATION_HINTS`` excludes."""
     from dgml_core.storage_resolve import storage_fingerprint_pair
 
-    here = StorageConfig(provider="pkg:S3", root=Path("/a"), options={"bucket": "b"})
-    there = StorageConfig(provider="pkg:S3", root=Path("/b"), options={"bucket": "b"})
+    here = StorageConfig(provider="pkg:S3", options={"bucket": "b", "workspace_path": "/a"})
+    there = StorageConfig(provider="pkg:S3", options={"bucket": "b", "workspace_path": "/b"})
     assert storage_fingerprint_pair(here, here) == storage_fingerprint_pair(there, there)
+
+
+def test_injected_workspace_root_never_reaches_the_fingerprint(tmp_path: Path) -> None:
+    """The root is added at construction, after the seal is computed from the resolved
+    config, so two machines holding one workspace at different paths agree on its seal."""
+    from dgml_core.storage_resolve import storage_fingerprint
+
+    cfg = StorageConfig(provider=DEFAULT_STORAGE_PROVIDER)
+    built = LocalStore.parse_config(
+        StorageConfig(
+            provider=DEFAULT_STORAGE_PROVIDER, options={WORKSPACE_ROOT_OPTION: str(tmp_path)}
+        )
+    )
+    assert storage_fingerprint(cfg) == storage_fingerprint(StorageConfig(cfg.provider))
+    assert WORKSPACE_ROOT_OPTION in built.options  # it is present on the built config…
+    assert storage_fingerprint(built) == storage_fingerprint(cfg)  # …but not in the hash
 
 
 def test_store_configs_default_to_local_with_no_config(tmp_path: Path) -> None:
@@ -496,7 +650,6 @@ def test_store_configs_default_to_local_with_no_config(tmp_path: Path) -> None:
     ws = Workspace.resolve(tmp_path)  # no config.toml at all
     blob_cfg, doc_cfg = resolve_store_configs(ws)
     assert blob_cfg.provider == doc_cfg.provider == DEFAULT_STORAGE_PROVIDER
-    assert blob_cfg.root == doc_cfg.root == ws.root
 
 
 def _same_instance(blobs: object, docs: object) -> bool:
@@ -563,10 +716,10 @@ def test_split_backends_stay_distinct_and_lazy(
     built = 0
     real_make = storage_resolve.make_blob_store
 
-    def counting_make(config: object) -> object:
+    def counting_make(config: object, **kwargs: object) -> object:
         nonlocal built
         built += 1
-        return real_make(config)  # type: ignore[arg-type]
+        return real_make(config, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(storage_resolve, "make_blob_store", counting_make)
 
@@ -606,29 +759,27 @@ def test_store_configs_resolve_once_for_both_roles(
 
 
 def test_fingerprint_stable_and_location_sensitive() -> None:
-    root = Path("/tmp/ws")
-    a = StorageConfig(provider="p:C", root=root, options={"bucket": "b", "prefix": "x"})
-    a2 = StorageConfig(provider="p:C", root=Path("/other"), options={"prefix": "x", "bucket": "b"})
-    b = StorageConfig(provider="p:C", root=root, options={"bucket": "OTHER", "prefix": "x"})
-    # stable across option order and independent of the local root
+    a = StorageConfig(provider="p:C", options={"bucket": "b", "prefix": "x"})
+    a2 = StorageConfig(provider="p:C", options={"prefix": "x", "bucket": "b"})
+    b = StorageConfig(provider="p:C", options={"bucket": "OTHER", "prefix": "x"})
+    # stable across option order
     assert storage_fingerprint(a) == storage_fingerprint(a2)
     # trips when the location changes
     assert storage_fingerprint(a) != storage_fingerprint(b)
 
 
 def test_fingerprint_ignores_credential_rotation() -> None:
-    root = Path("/tmp/ws")
-    a = StorageConfig(provider="p:C", root=root, options={"bucket": "b", "api_key": "OLD"})
-    b = StorageConfig(provider="p:C", root=root, options={"bucket": "b", "api_key": "NEW"})
+    a = StorageConfig(provider="p:C", options={"bucket": "b", "api_key": "OLD"})
+    b = StorageConfig(provider="p:C", options={"bucket": "b", "api_key": "NEW"})
     assert storage_fingerprint(a) == storage_fingerprint(b)
 
 
 def test_third_party_plugin_resolves_by_dotted_path() -> None:
     # dgml_core.storage_local:LocalStore is resolved exactly like a third party's
     # own dotted path — proving the plug-in mechanism end to end.
-    cfg = StorageConfig(provider="dgml_core.storage_local:LocalStore", root=Path("."))
-    assert isinstance(make_blob_store(cfg), LocalStore)
-    assert isinstance(make_doc_store(cfg), LocalStore)
+    cfg = StorageConfig(provider="dgml_core.storage_local:LocalStore")
+    assert isinstance(make_blob_store(cfg, workspace_root=Path(".")), LocalStore)
+    assert isinstance(make_doc_store(cfg, workspace_root=Path(".")), LocalStore)
 
 
 # --------------------------------------------------------------------------- path bridge
@@ -659,6 +810,39 @@ def test_materialize_default_downloads_to_temp_and_cleans_up(tmp_path: Path) -> 
         assert path.read_bytes() == b"%PDF-1.7"
         held = path
     assert not held.exists()  # cleaned up on exit
+
+
+def test_default_bridge_stages_under_the_configured_temp_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every bridge method a third-party store inherits stages in the ordinary
+    ``tempfile`` location, so an operator redirects all of them at once.
+
+    This is what #129 asked for: staging must be *redirectable*, because ``$TMPDIR`` is
+    a RAM-backed tmpfs on many container images. Exercised through ``tempfile.tempdir``
+    rather than the environment because Python memoizes ``gettempdir()`` on first call —
+    which is exactly why an operator has to set ``TMPDIR`` before the process starts."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    store = default_bridge_store(tmp_path / "ws")
+    store.put_blob("files/a/report.pdf", b"%PDF-1.7")
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    seen: list[Path] = []
+    with store.materialize("files/a/report.pdf") as path:
+        seen.append(path)
+    with store.staged_write(_PAGES) as staging:
+        seen.append(staging)
+        (staging / "page_1.png").write_bytes(b"png")
+    with store.materialize_dir("files/a") as out:
+        seen.append(out)
+    with store.working_dir("docsets/d1/cache") as work:
+        seen.append(work)
+
+    assert seen, "no bridge method yielded a path"
+    for path in seen:
+        assert scratch in path.parents, f"{path} did not stage under the configured temp dir"
+    assert not list(scratch.iterdir())  # every method cleaned up after itself
 
 
 _PAGES = "files/a/page_images"
@@ -916,7 +1100,7 @@ def test_sha256_blob_does_not_load_the_blob_whole(tmp_path: Path, bridge: type[L
         def get_blob(self, key: str) -> bytes:
             raise AssertionError(f"get_blob called for {key!r}")
 
-    store = _NoGetBlob(LocalStore.parse_config(StorageConfig(DEFAULT_STORAGE_PROVIDER, tmp_path)))
+    store = _NoGetBlob(LocalStore.parse_config(local_config(tmp_path)))
     store.put_blob("files/a/report.pdf", _MULTI_CHUNK)
     assert store.sha256_blob("files/a/report.pdf") == hashlib.sha256(_MULTI_CHUNK).hexdigest()
 

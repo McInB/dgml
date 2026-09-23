@@ -192,13 +192,13 @@ def test_a_cascade_resolves_the_backend_once(
     real_blob = storage_resolve.make_blob_store
     real_doc = storage_resolve.make_doc_store
 
-    def counting_blob(config: object) -> object:
+    def counting_blob(config: object, **kwargs: object) -> object:
         built["blobs"] += 1
-        return real_blob(config)  # type: ignore[arg-type]
+        return real_blob(config, **kwargs)  # type: ignore[arg-type]
 
-    def counting_doc(config: object) -> object:
+    def counting_doc(config: object, **kwargs: object) -> object:
         built["docs"] += 1
-        return real_doc(config)  # type: ignore[arg-type]
+        return real_doc(config, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(storage_resolve, "make_blob_store", counting_blob)
     monkeypatch.setattr(storage_resolve, "make_doc_store", counting_doc)

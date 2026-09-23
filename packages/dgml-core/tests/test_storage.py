@@ -29,6 +29,7 @@ from dgml_core.storage import (
     write_json_atomic,
     write_user_config,
 )
+from dgml_core.storage_service import WORKSPACE_ROOT_OPTION
 from dgml_core.workspace_id import new_workspace_id
 from dgml_core.workspaces_resolve import default_workspaces_store
 
@@ -203,7 +204,11 @@ def test_local_store_creates_its_directories_on_write(tmp_path: Path) -> None:
 
     root = tmp_path / "ws"
     root.mkdir()
-    store = LocalStore(LocalStore.parse_config(StorageConfig(provider="x", root=root)))
+    store = LocalStore(
+        LocalStore.parse_config(
+            StorageConfig(provider="x", options={WORKSPACE_ROOT_OPTION: str(root)})
+        )
+    )
     assert not (root / layout.FILES_DIR).exists()
 
     store.put_blob(layout.file_source_key("f1", "a.pdf"), b"bytes")

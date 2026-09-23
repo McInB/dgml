@@ -65,7 +65,7 @@ from .layout import (
     is_blob_key,
 )
 from .storage import read_json
-from .storage_service import BlobStore, DocStore, StorageConfig
+from .storage_service import WORKSPACE_ROOT_OPTION, BlobStore, DocStore, StorageConfig
 
 # The layout — collections, key shapes, document placement and blob
 # classification — lives in ``layout.py``, shared with ``Workspace`` and the
@@ -132,24 +132,42 @@ class LocalStore(BlobStore, DocStore):
     ``[storage]`` key on purpose: where files sit is a local-disk concern, so a
     ``workspace_path`` under an S3 or Mongo table is rejected automatically by
     :meth:`~dgml_core.provider.ProviderConfigFields._check_no_extra_fields`, with no
-    "only applies when the provider is local" special case anywhere. See issue #129 for
-    where this is heading — ``StorageConfig.root`` is required of every provider and read
-    only by this one.
+    "only applies when the provider is local" special case anywhere.
+
+    Without it, the location is the workspace root, which this store receives because it
+    is the only in-tree one to list :data:`~dgml_core.storage_service.WORKSPACE_ROOT_OPTION`
+    in ``config_fields`` above — asking for it exactly as it asks for any other option,
+    rather than through a channel of its own. The two are different
+    kinds of thing despite sharing a type: ``workspace_path`` is user-authored and
+    persisted ("the data stays here"), while the injected root is runtime state derived
+    per invocation, which is why they arrive under separate keys and only the former is
+    ever written to a config file.
     """
 
     name = "local"
-    config_fields = frozenset({"workspace_path"})
+    config_fields = frozenset({"workspace_path", WORKSPACE_ROOT_OPTION})
 
     @classmethod
     def parse_config(cls, config: StorageConfig) -> StorageConfig:
-        """Validate and, when ``workspace_path`` is set, fold it into ``config.root``.
+        """Validate, then settle the store's location into
+        :data:`~dgml_core.storage_service.WORKSPACE_ROOT_OPTION`.
 
+        A user-declared ``workspace_path`` wins over the injected workspace root.
         Normalizing here rather than in ``__init__`` is what keeps this the store's only
-        notion of location: ``__init__`` still reads nothing but ``config.root``, so
-        there is no second code path in which the two could disagree."""
+        notion of location: ``__init__`` reads nothing but that one settled key, so there
+        is no second code path in which the two could disagree.
+
+        Only ``workspace_path`` is validated as user input, because only it is: the
+        injected root is already an absolute, resolved path, and reporting a fault in it
+        against a config key the user never wrote would be misleading."""
         cls._check_no_extra_fields(config.options)
         declared = config.options.get("workspace_path")
         if declared is None:
+            if config.options.get(WORKSPACE_ROOT_OPTION) is None:
+                raise StorageConfigInvalid(
+                    f"provider {cls.name!r} has no location: no workspace root was "
+                    f"supplied and its config declares no 'storage.workspace_path'"
+                )
             return config
         if not isinstance(declared, str) or not declared.strip():
             raise StorageConfigInvalid(
@@ -163,10 +181,12 @@ class LocalStore(BlobStore, DocStore):
                 f"listed in a store of workspaces has no config directory to resolve it "
                 f"against"
             )
-        return dataclasses.replace(config, root=path)
+        return dataclasses.replace(
+            config, options={**config.options, WORKSPACE_ROOT_OPTION: str(path)}
+        )
 
     def __init__(self, config: StorageConfig) -> None:
-        self._root = Path(config.root)
+        self._root = Path(config.options[WORKSPACE_ROOT_OPTION])
 
     # ---- Blobs (S3-shaped): the key *is* the on-disk relative path ----
 

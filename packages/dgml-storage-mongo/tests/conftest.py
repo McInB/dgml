@@ -92,7 +92,6 @@ def _fake_mongo(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def mongo_config(tmp_path: Path) -> StorageConfig:
     return StorageConfig(
         provider=PROVIDER,
-        root=tmp_path / "ws",
         options={"mongo_database": f"dgml_test_{uuid.uuid4().hex[:12]}"},
     )
 

@@ -68,6 +68,16 @@ from . import layout
 from .hashing import sha256_file
 from .provider import ProviderConfigFields
 
+#: Option key under which the resolver hands the workspace root to a store that wants it.
+#: A store asks for it by listing this key in its ``config_fields``, like any other option;
+#: ``LocalStore`` is the only in-tree one that does.
+#:
+#: Underscore-prefixed because it is resolver-injected rather than user config. Config
+#: reads drop underscore-prefixed keys, so it cannot be written or spoofed in
+#: ``config.toml``; the storage seal ignores them; and it is injected at construction, so
+#: it is never persisted into a workspace's config.
+WORKSPACE_ROOT_OPTION = "_workspace_root"
+
 
 @dataclass(frozen=True)
 class StorageConfig:
@@ -75,14 +85,17 @@ class StorageConfig:
 
     ``provider`` is the dotted path identifying the store class. ``options`` holds
     the section's remaining (non-``provider``) fields verbatim — a provider's own
-    settings (``bucket``, ``endpoint_url``, ``mongo_database``, …). ``root`` is the
-    local workspace root, always available as bootstrap (the config names the store,
-    so it cannot live inside it); a ``LocalStore`` writes under it, and a remote
-    store may use it for temp staging.
+    settings (``bucket``, ``endpoint_url``, ``mongo_database``, …).
+
+    Deliberately carries **no workspace root**, matching
+    :class:`~dgml_core.workspaces_store.WorkspacesConfig`. A root is runtime state, not
+    configuration: it is supplied per invocation (a path-addressed workspace) or derived
+    from its folder name (one listed in the store of workspaces). A store that needs it
+    asks via :data:`WORKSPACE_ROOT_OPTION`; every other store never sees a local path it
+    has no use for.
     """
 
     provider: str
-    root: Path
     options: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -95,6 +108,11 @@ class _StoreBase(ProviderConfigFields, ABC):
     (catches typos and stale fields). A concrete class may implement one interface (an
     S3 blob store) or both (``LocalStore``); it provides one ``parse_config`` /
     ``__init__`` either way.
+
+    ``config_fields`` is also how a store asks for the **workspace root**: list
+    :data:`WORKSPACE_ROOT_OPTION` there and the factories in
+    :mod:`dgml_core.storage_resolve` supply it in ``options`` before ``parse_config``
+    runs. A store whose data does not live on this machine simply omits it.
 
     The field machinery itself lives in :class:`~dgml_core.provider.ProviderConfigFields`,
     shared with the ``[workspaces]`` providers; the defaults there already name this
@@ -187,10 +205,20 @@ class BlobStore(_StoreBase):
     # already *is* an on-disk path), keeping local I/O byte-for-byte identical to
     # the pre-store code.
     #
-    # A remote store overriding these should stage under ``StorageConfig.root``
-    # rather than the default ``tempfile`` location: ``TMPDIR`` is a RAM-backed
-    # tmpfs on many container images, which would silently turn a bounded-memory
-    # read back into a whole-blob allocation plus a copy.
+    # These stage through the ordinary ``tempfile`` location — staging is a property of
+    # the deployment, not of a workspace, so there is no dgml-specific setting. Python
+    # picks the directory in this order:
+    #
+    #   1. ``$TMPDIR``   — the one an operator sets
+    #   2. ``$TEMP``, then ``$TMP``
+    #   3. ``/tmp``, ``/var/tmp``, ``/usr/tmp``
+    #   4. the current working directory
+    #
+    # Point ``TMPDIR`` at real disk on a container image: it is RAM-backed tmpfs on Cloud
+    # Run, on ``emptyDir: {medium: Memory}`` and by default on Fedora/RHEL/Arch, and
+    # ``staged_write`` below holds a whole batch before uploading any of it. It must be
+    # set before the process starts — Python memoizes ``gettempdir()`` on first call.
+    # (``LocalStore`` overrides these four and stages in ``<root>/.cache/staging``.)
 
     @contextmanager
     def materialize(self, key: str) -> Iterator[Path]:

@@ -391,6 +391,5 @@ def test_config_override_is_honored(tmp_path: Path) -> None:
 
     blob_cfg, _ = resolve_store_configs(ws)
     assert blob_cfg.options["prefix"] == "external"
-    assert blob_cfg.root == root  # the anchor is still the workspace, not the config
     assert not (root / "config.toml").exists()
     assert wc.read_identity(ws).storage_service == "acme"

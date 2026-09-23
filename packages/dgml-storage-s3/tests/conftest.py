@@ -129,7 +129,7 @@ def make_store_options() -> tuple[str, dict[str, object]]:
 def s3_config(tmp_path: Path) -> StorageConfig:
     """A per-test prefix in the shared bucket, as a resolved blob-store config."""
     _prefix, options = make_store_options()
-    return StorageConfig(provider=PROVIDER, root=tmp_path / "ws", options=options)
+    return StorageConfig(provider=PROVIDER, options=options)
 
 
 @pytest.fixture

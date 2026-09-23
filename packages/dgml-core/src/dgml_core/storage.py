@@ -329,7 +329,7 @@ class Workspace:
         precedence."""
         from .storage_resolve import make_blob_store
 
-        return make_blob_store(self.store_configs[0])
+        return make_blob_store(self.store_configs[0], workspace_root=self.root)
 
     @functools.cached_property
     def docs(self) -> DocStore:
@@ -355,7 +355,7 @@ class Workspace:
                 return store
             # Equal configs naming a blob-only provider: fall through so
             # ``make_doc_store`` raises the usual error rather than a new one.
-        return make_doc_store(doc_cfg)
+        return make_doc_store(doc_cfg, workspace_root=self.root)
 
     def read_meta(self) -> dict[str, Any]:
         """Return the parsed ``workspace.json`` mapping, or ``{}`` when the file

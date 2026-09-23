@@ -61,6 +61,7 @@ from dgml_core.file_attestation import (
 )
 from dgml_core.merkle import merkle_root, merkle_root_from_hashes
 from dgml_core.storage import Workspace
+from dgml_core.storage_service import WORKSPACE_ROOT_OPTION
 from lxml import etree  # type: ignore[import-untyped]
 
 from .conftest import default_bridge_store, local_tree_path
@@ -1204,7 +1205,9 @@ class _NoWholeBlobStore(LocalStore):
 @pytest.fixture
 def no_whole_blob_workspace(workspace: Workspace, monkeypatch: pytest.MonkeyPatch) -> Workspace:
     store = _NoWholeBlobStore(
-        LocalStore.parse_config(StorageConfig(DEFAULT_STORAGE_PROVIDER, workspace.root))
+        LocalStore.parse_config(
+            StorageConfig(DEFAULT_STORAGE_PROVIDER, {WORKSPACE_ROOT_OPTION: str(workspace.root)})
+        )
     )
     monkeypatch.setattr(Workspace, "blobs", property(lambda self: store))
     monkeypatch.setattr(Workspace, "docs", property(lambda self: store))

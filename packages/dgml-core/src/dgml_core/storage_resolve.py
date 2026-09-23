@@ -39,6 +39,7 @@ makes ``[storage.<name>]`` templates shared across workspaces still work.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from collections.abc import Mapping
@@ -50,7 +51,7 @@ from .errors import StorageConfigInvalid
 from .models_config import ConfigSection
 from .provider import import_provider_class
 from .storage import Workspace
-from .storage_service import BlobStore, DocStore, StorageConfig
+from .storage_service import WORKSPACE_ROOT_OPTION, BlobStore, DocStore, StorageConfig
 
 # The bundled default: local disk. Implements both interfaces, so it is the
 # zero-config default for the blob role *and* the document role.
@@ -72,11 +73,13 @@ _ROLE_KEYS = ("blobs", "docs")
 _SECRET_HINTS = ("key", "secret", "token", "password", "credential")
 
 # Option keys that name *where this machine keeps the data* rather than *which store
-# this is*, and so are also outside the identity fingerprint. Same argument as the one
-# that already excludes ``StorageConfig.root``: a workspace moved to another path is
-# the same workspace on the same backend, so relocating it must not read as a storage
-# change and must not require a re-seal. Matched exactly rather than by substring —
-# these are specific option names, not a family like the secret hints.
+# this is*, and so are also outside the identity fingerprint: a workspace moved to
+# another path is the same workspace on the same backend, so relocating it must not read
+# as a storage change and must not require a re-seal. Matched exactly rather than by
+# substring — these are specific option names, not a family like the secret hints.
+#
+# The injected workspace root needs no entry here: it is added at construction, after
+# the fingerprint is computed from the resolved config, so it never reaches the hash.
 _LOCATION_HINTS = frozenset({"workspace_path"})
 
 # ------------------------------------------------------------ building stores
@@ -94,25 +97,53 @@ def _import_store_class(provider: str, base: Any) -> Any:
     )
 
 
-def make_blob_store(config: StorageConfig) -> BlobStore:
+def _with_workspace_root(cls: Any, config: StorageConfig, workspace_root: Path) -> StorageConfig:
+    """``config`` plus the workspace root, for a store that declared it wants one.
+
+    Injected **here**, at construction, rather than in :func:`_config_from` where the
+    config is read. That is the whole point: a root reaching ``options`` during
+    resolution would be stamped into every new workspace's ``config.toml`` by
+    ``_write_workspace_config``, which pins an absolute path into a file that is
+    supposed to travel with a copied or moved workspace directory. Resolution therefore
+    returns exactly what the user wrote, and only the live store ever sees the root.
+
+    A user-supplied ``workspace_path`` still wins: it is spread last, so it overrides
+    nothing here but is the value ``LocalStore.parse_config`` prefers.
+
+    Whether a store wants the root is read off its ``config_fields`` — the same set that
+    declares every other option it accepts, and the same set
+    ``_check_no_extra_fields`` enforces — so the two can never disagree."""
+    if WORKSPACE_ROOT_OPTION not in cls.config_fields:
+        return config
+    return dataclasses.replace(
+        config,
+        options={WORKSPACE_ROOT_OPTION: str(workspace_root.resolve()), **config.options},
+    )
+
+
+def make_blob_store(config: StorageConfig, *, workspace_root: Path) -> BlobStore:
     """Instantiate the :class:`BlobStore` named by ``config`` (resolve provider →
-    ``parse_config`` → construct, where the provider's lazy SDK import happens)."""
+    ``parse_config`` → construct, where the provider's lazy SDK import happens).
+
+    ``workspace_root`` is handed on only to a provider that lists
+    :data:`~dgml_core.storage_service.WORKSPACE_ROOT_OPTION` in its ``config_fields``."""
     cls = _import_store_class(config.provider, BlobStore)
-    store: BlobStore = cls(cls.parse_config(config))
+    store: BlobStore = cls(cls.parse_config(_with_workspace_root(cls, config, workspace_root)))
     return store
 
 
-def make_doc_store(config: StorageConfig) -> DocStore:
-    """Instantiate the :class:`DocStore` named by ``config``."""
+def make_doc_store(config: StorageConfig, *, workspace_root: Path) -> DocStore:
+    """Instantiate the :class:`DocStore` named by ``config``. See
+    :func:`make_blob_store` for ``workspace_root``."""
     cls = _import_store_class(config.provider, DocStore)
-    store: DocStore = cls(cls.parse_config(config))
+    store: DocStore = cls(cls.parse_config(_with_workspace_root(cls, config, workspace_root)))
     return store
 
 
 # ------------------------------------------------------------ reading config
 
 
-def _config_from(section: Mapping[str, Any], root: Path) -> StorageConfig:
+def _config_from(section: Mapping[str, Any]) -> StorageConfig:
     """Build a :class:`StorageConfig` from one role table (``provider`` + the rest
     as ``options``). Raises :class:`StorageConfigInvalid` for a bad shape.
 
@@ -120,16 +151,26 @@ def _config_from(section: Mapping[str, Any], root: Path) -> StorageConfig:
     scalar or a list, so a nested table here is a sibling *service* that shared the
     merged ``[storage]`` namespace, not an option for this provider. Keeping it would
     fail :meth:`~dgml_core.storage_service._StoreBase._check_no_extra_fields` with a
-    confusing "unknown field" naming another workspace's service."""
+    confusing "unknown field" naming another workspace's service.
+
+    Underscore-prefixed keys are dropped for a different reason: that namespace is
+    reserved for values the resolver injects at construction
+    (:data:`~dgml_core.storage_service.WORKSPACE_ROOT_OPTION`). Dropping them here is
+    what makes the channel unspoofable — a config cannot hand a store a root by writing
+    the internal key itself — and it costs nothing, since no provider documents an
+    option starting with ``_``."""
     provider = section.get("provider")
     if not isinstance(provider, str) or not provider.strip():
         raise StorageConfigInvalid("'storage.provider' must be a non-empty string")
     options = {
         k: v
         for k, v in section.items()
-        if k != "provider" and k not in _ROLE_KEYS and not isinstance(v, dict)
+        if k != "provider"
+        and k not in _ROLE_KEYS
+        and not k.startswith("_")
+        and not isinstance(v, dict)
     }
-    return StorageConfig(provider=provider, root=root, options=options)
+    return StorageConfig(provider=provider, options=options)
 
 
 def _select_service_table(section: Mapping[str, Any], service: str) -> Mapping[str, Any] | None:
@@ -154,7 +195,7 @@ def _select_service_table(section: Mapping[str, Any], service: str) -> Mapping[s
     return sub
 
 
-def _role_config(table: Mapping[str, Any] | None, role: str, root: Path) -> StorageConfig:
+def _role_config(table: Mapping[str, Any] | None, role: str) -> StorageConfig:
     """Resolve one role (``"blobs"``/``"docs"``) of a service table to a
     :class:`StorageConfig`. A per-role sub-table wins; else a flat top-level
     ``provider`` serves both roles; else (role omitted / no config) the bundled
@@ -162,10 +203,10 @@ def _role_config(table: Mapping[str, Any] | None, role: str, root: Path) -> Stor
     if table is not None:
         sub = table.get(role)
         if isinstance(sub, dict):
-            return _config_from(sub, root)
+            return _config_from(sub)
         if isinstance(table.get("provider"), str):
-            return _config_from(table, root)  # flat: one provider for both roles
-    return StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=root)
+            return _config_from(table)  # flat: one provider for both roles
+    return StorageConfig(provider=DEFAULT_STORAGE_PROVIDER)
 
 
 def load_store_configs(
@@ -185,7 +226,6 @@ def load_store_configs(
     happen lazily in :func:`make_blob_store` / :func:`make_doc_store`. Raises
     :class:`StorageConfigInvalid` for a malformed shape or an unknown named service.
     """
-    root = workspace.root
     section = load_merged_config(workspace).get(ConfigSection.STORAGE) or {}
     if not isinstance(section, dict):
         raise StorageConfigInvalid("'storage' must be a table")
@@ -194,7 +234,34 @@ def load_store_configs(
         raise StorageConfigInvalid(f"no [storage.{service}] configured")
     if table is not None:
         _reject_mixed_form(table, service)
-    return _role_config(table, "blobs", root), _role_config(table, "docs", root)
+    blobs, docs = _role_config(table, "blobs"), _role_config(table, "docs")
+    _reject_borrowed_workspace_path(blobs, docs, service, workspace)
+    return blobs, docs
+
+
+def _reject_borrowed_workspace_path(
+    blob_cfg: StorageConfig, doc_cfg: StorageConfig, service: str, workspace: Workspace
+) -> None:
+    """Refuse a ``workspace_path`` that came from a *shared* config layer.
+
+    Only reached from :func:`load_store_configs` — when the workspace does not define the
+    service itself and resolution fell back to the merged config — so the option was
+    written in the user-level ``config.toml``, in a template meant to serve many
+    workspaces. One in a workspace's own config never arrives here.
+
+    Honouring it would point every workspace on that template at the same directory, and
+    it would reach only ``LocalStore``: the store of workspaces reads each workspace's own
+    config, so ``Workspace.root`` and the directory the store writes to would disagree."""
+    if not any("workspace_path" in cfg.options for cfg in (blob_cfg, doc_cfg)):
+        return
+    from .storage import user_config_path
+
+    raise StorageConfigInvalid(
+        f"[storage.{service}] in {user_config_path()} sets 'workspace_path'. That option "
+        f"pins one workspace to one directory, so it cannot live in a config shared by "
+        f"many. Remove it there; to pin this workspace's data where it already is, run "
+        f"'dgml workspace import {workspace.root}'."
+    )
 
 
 def _reject_mixed_form(table: Mapping[str, Any], service: str) -> None:
@@ -230,9 +297,8 @@ def resolve_store_configs(workspace: Workspace) -> tuple[StorageConfig, StorageC
     service = workspace_config.read_identity(workspace).storage_service or DEFAULT_STORAGE_SERVICE
     own = workspace_config.read_storage_table(workspace, service)
     if own is not None:
-        root = workspace.root
         _reject_mixed_form(own, service)
-        return _role_config(own, "blobs", root), _role_config(own, "docs", root)
+        return _role_config(own, "blobs"), _role_config(own, "docs")
     return load_store_configs(workspace, service)
 
 
@@ -269,9 +335,20 @@ def verify_storage_fingerprint(workspace: Workspace) -> None:
 
 
 def _excluded_from_identity(key: str) -> bool:
-    """Whether an option key is outside the store-identity hash."""
+    """Whether an option key is outside the store-identity hash.
+
+    Underscore-prefixed keys are excluded because they are resolver-injected runtime
+    values, never configuration — see
+    :data:`~dgml_core.storage_service.WORKSPACE_ROOT_OPTION`. In the ordinary flow they
+    could not reach here anyway (the seal is computed from the resolved config, before
+    construction adds them), but making it structural means hashing a *built* store's
+    config cannot silently produce a different seal than hashing the resolved one."""
     lowered = key.lower()
-    return any(hint in lowered for hint in _SECRET_HINTS) or lowered in _LOCATION_HINTS
+    return (
+        key.startswith("_")
+        or any(hint in lowered for hint in _SECRET_HINTS)
+        or lowered in _LOCATION_HINTS
+    )
 
 
 def _identity_hash(provider: str, options: Mapping[str, Any]) -> str:
@@ -298,12 +375,13 @@ def storage_fingerprint_pair(blob_cfg: StorageConfig, doc_cfg: StorageConfig) ->
     the seal answers "is this the same store", not "is this the same address on this
     machine":
 
-    - ``root``, so a workspace copied or moved to another path keeps its seal.
+    - The workspace root, which :class:`~dgml_core.storage_service.StorageConfig` does
+      not carry at all and which is injected only into a live store, so a workspace
+      copied or moved to another path keeps its seal with nothing to exclude.
     - Secret-named options (:data:`_SECRET_HINTS`), so rotating a credential never reads
       as "the store moved".
-    - Location options (:data:`_LOCATION_HINTS`), for exactly the ``root`` argument: an
-      option naming where *this machine* keeps the data describes an address, not an
-      identity."""
+    - Location options (:data:`_LOCATION_HINTS`), on the same argument: an option naming
+      where *this machine* keeps the data describes an address, not an identity."""
     body = json.dumps(
         {"blobs": storage_fingerprint(blob_cfg), "docs": storage_fingerprint(doc_cfg)},
         sort_keys=True,

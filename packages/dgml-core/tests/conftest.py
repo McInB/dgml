@@ -22,6 +22,7 @@ import pytest
 from dgml_core import DEFAULT_STORAGE_PROVIDER, BlobStore, LocalStore, StorageConfig
 from dgml_core.pages import GS_BINARIES
 from dgml_core.storage import Workspace
+from dgml_core.storage_service import WORKSPACE_ROOT_OPTION
 from dgml_core.workspaces_resolve import default_workspaces_store
 from dgml_core.workspaces_store import WORKSPACES_ENV_VAR
 
@@ -32,9 +33,21 @@ PAGE_HEIGHT_PTS = 792
 # --- store construction (shared by the storage and attestation suites) -------
 
 
+def local_config(root: Path, **options: Any) -> StorageConfig:
+    """A ``StorageConfig`` for a local store rooted at ``root``.
+
+    Stands in for what ``make_blob_store`` / ``make_doc_store`` do at construction:
+    ``StorageConfig`` carries no root, so the workspace root reaches a store that asked
+    for it under ``WORKSPACE_ROOT_OPTION``. Tests that build a store directly have to
+    supply it the same way."""
+    return StorageConfig(
+        provider=DEFAULT_STORAGE_PROVIDER,
+        options={WORKSPACE_ROOT_OPTION: str(root), **options},
+    )
+
+
 def local_store(root: Path) -> LocalStore:
-    cfg = StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, root=root)
-    return LocalStore(LocalStore.parse_config(cfg))
+    return LocalStore(LocalStore.parse_config(local_config(root)))
 
 
 class DefaultBridgeStore(LocalStore):
@@ -52,8 +65,7 @@ class DefaultBridgeStore(LocalStore):
 
 
 def default_bridge_store(root: Path) -> DefaultBridgeStore:
-    cfg = LocalStore.parse_config(StorageConfig(DEFAULT_STORAGE_PROVIDER, root))
-    return DefaultBridgeStore(cfg)
+    return DefaultBridgeStore(LocalStore.parse_config(local_config(root)))
 
 
 def _toml_scalar(value: Any) -> str:

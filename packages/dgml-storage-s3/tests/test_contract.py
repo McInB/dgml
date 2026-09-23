@@ -30,7 +30,7 @@ def test_requires_a_bucket(tmp_path: Path) -> None:
     from dgml_core.errors import StorageConfigInvalid
 
     with pytest.raises(StorageConfigInvalid):
-        S3BlobStore.parse_config(StorageConfig(provider=PROVIDER, root=tmp_path))
+        S3BlobStore.parse_config(StorageConfig(provider=PROVIDER))
 
 
 def test_rejects_unknown_and_credential_fields(tmp_path: Path) -> None:
@@ -38,7 +38,7 @@ def test_rejects_unknown_and_credential_fields(tmp_path: Path) -> None:
 
     for bad in ({"bucket": "b", "typo": 1}, {"bucket": "b", "secret_key": "x"}):
         with pytest.raises(StorageConfigInvalid):
-            S3BlobStore.parse_config(StorageConfig(provider=PROVIDER, root=tmp_path, options=bad))
+            S3BlobStore.parse_config(StorageConfig(provider=PROVIDER, options=bad))
 
 
 # ------------------------------------------------------------------ blobs
@@ -130,16 +130,12 @@ def test_prefix_isolates_tenants_sharing_a_bucket(tmp_path: Path) -> None:
     base, options = make_store_options()
     a = S3BlobStore(
         S3BlobStore.parse_config(
-            StorageConfig(
-                provider=PROVIDER, root=tmp_path, options={**options, "prefix": f"{base}/wsA"}
-            )
+            StorageConfig(provider=PROVIDER, options={**options, "prefix": f"{base}/wsA"})
         )
     )
     b = S3BlobStore(
         S3BlobStore.parse_config(
-            StorageConfig(
-                provider=PROVIDER, root=tmp_path, options={**options, "prefix": f"{base}/wsB"}
-            )
+            StorageConfig(provider=PROVIDER, options={**options, "prefix": f"{base}/wsB"})
         )
     )
     a.put_blob("files/f/a.pdf", b"from-A")
