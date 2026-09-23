@@ -117,3 +117,25 @@ def test_codes_are_unique_per_class() -> None:
             seen.setdefault(obj.code, []).append(name)
     duplicated = {code: names for code, names in seen.items() if len(names) > 1}
     assert not duplicated, f"error codes declared by more than one class: {duplicated}"
+
+
+def test_every_error_class_is_exported() -> None:
+    """The whole hierarchy is public surface.
+
+    A code is already contract through the CLI, so a library caller branching on
+    the same condition should be able to `except` the type instead of matching
+    the string — which only works if the type is importable from `dgml_core`.
+    Catching this at test time is the difference between adding one line to
+    `__all__` now and a consumer reaching into `dgml_core.errors` forever.
+    """
+    import dgml_core
+
+    exported = set(dgml_core.__all__)
+    unexported = sorted(
+        name
+        for name, obj in vars(errors_module).items()
+        if inspect.isclass(obj) and issubclass(obj, DgmlError) and name not in exported
+    )
+    assert not unexported, (
+        f"these error classes are not exported from dgml_core.__init__: {unexported}"
+    )
