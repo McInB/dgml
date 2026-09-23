@@ -78,9 +78,10 @@ _SECRET_HINTS = ("key", "secret", "token", "password", "credential")
 # as a storage change and must not require a re-seal. Matched exactly rather than by
 # substring — these are specific option names, not a family like the secret hints.
 #
-# The injected workspace root needs no entry here: it is added at construction, after
-# the fingerprint is computed from the resolved config, so it never reaches the hash.
-_LOCATION_HINTS = frozenset({"workspace_path"})
+# ``WORKSPACE_ROOT_OPTION`` belongs here for the same reason, and belt-and-braces: in the
+# ordinary flow it cannot reach the hash anyway, since the seal is computed from the
+# resolved config and the root is only injected afterwards, at construction.
+_LOCATION_HINTS = frozenset({"workspace_path", WORKSPACE_ROOT_OPTION})
 
 # ------------------------------------------------------------ building stores
 
@@ -160,22 +161,24 @@ def _config_from(section: Mapping[str, Any]) -> StorageConfig:
     fail :meth:`~dgml_core.storage_service._StoreBase._check_no_extra_fields` with a
     confusing "unknown field" naming another workspace's service.
 
-    Underscore-prefixed keys are dropped for a different reason: that namespace is
-    reserved for values the resolver injects at construction
-    (:data:`~dgml_core.storage_service.WORKSPACE_ROOT_OPTION`). Dropping them here is
-    what makes the channel unspoofable — a config cannot hand a store a root by writing
-    the internal key itself — and it costs nothing, since no provider documents an
-    option starting with ``_``."""
+    :data:`~dgml_core.storage_service.WORKSPACE_ROOT_OPTION` is rejected outright: the
+    resolver supplies it at construction, so a config setting it is asking for something
+    that cannot work. Refusing keeps the channel unspoofable — a config cannot hand a
+    store a root by writing the key itself — and says so, where silently dropping it
+    would leave the author believing it took effect."""
     provider = section.get("provider")
     if not isinstance(provider, str) or not provider.strip():
         raise StorageConfigInvalid("'storage.provider' must be a non-empty string")
+    if WORKSPACE_ROOT_OPTION in section:
+        raise StorageConfigInvalid(
+            f"'{WORKSPACE_ROOT_OPTION}' is supplied by dgml and cannot be set in config. "
+            f"Where a workspace's data lives is chosen by the path given to "
+            f"'dgml workspace create <path>' or 'dgml workspace import <path>'"
+        )
     options = {
         k: v
         for k, v in section.items()
-        if k != "provider"
-        and k not in _ROLE_KEYS
-        and not k.startswith("_")
-        and not isinstance(v, dict)
+        if k != "provider" and k not in _ROLE_KEYS and not isinstance(v, dict)
     }
     return StorageConfig(provider=provider, options=options)
 
@@ -342,20 +345,9 @@ def verify_storage_fingerprint(workspace: Workspace) -> None:
 
 
 def _excluded_from_identity(key: str) -> bool:
-    """Whether an option key is outside the store-identity hash.
-
-    Underscore-prefixed keys are excluded because they are resolver-injected runtime
-    values, never configuration — see
-    :data:`~dgml_core.storage_service.WORKSPACE_ROOT_OPTION`. In the ordinary flow they
-    could not reach here anyway (the seal is computed from the resolved config, before
-    construction adds them), but making it structural means hashing a *built* store's
-    config cannot silently produce a different seal than hashing the resolved one."""
+    """Whether an option key is outside the store-identity hash."""
     lowered = key.lower()
-    return (
-        key.startswith("_")
-        or any(hint in lowered for hint in _SECRET_HINTS)
-        or lowered in _LOCATION_HINTS
-    )
+    return any(hint in lowered for hint in _SECRET_HINTS) or lowered in _LOCATION_HINTS
 
 
 def _identity_hash(provider: str, options: Mapping[str, Any]) -> str:

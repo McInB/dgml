@@ -72,10 +72,8 @@ from .provider import ProviderConfigFields
 #: A store asks for it by listing this key in its ``config_fields``, like any other option;
 #: ``LocalStore`` is the only in-tree one that does.
 #:
-#: Underscore-prefixed because it is resolver-injected rather than user config. Config
-#: reads drop underscore-prefixed keys, so it cannot be written or spoofed in
-#: ``config.toml``; the storage seal ignores them; and it is injected at construction, so
-#: it is never persisted into a workspace's config.
+#: Supplied at construction, never read from config: setting it in ``config.toml`` is
+#: refused, the storage seal ignores it, and it is never persisted into a workspace.
 WORKSPACE_ROOT_OPTION = "_workspace_root"
 
 

@@ -411,7 +411,7 @@ def test_a_store_asks_for_the_root_through_config_fields(tmp_path: Path) -> None
 
 def test_injected_keys_are_not_advertised_to_users(tmp_path: Path) -> None:
     """A typo under a local ``[storage]`` table must not suggest ``_workspace_root`` as
-    something to set: config reads strip underscore keys, so setting one does nothing."""
+    something to set — the resolver refuses it if you try."""
     with pytest.raises(StorageConfigInvalid) as excinfo:
         LocalStore.parse_config(
             StorageConfig(provider=DEFAULT_STORAGE_PROVIDER, options={"workspacepath": "/x"})
@@ -513,12 +513,27 @@ def test_workspace_path_in_the_workspaces_own_config_is_honoured(tmp_path: Path)
 
 
 def test_config_cannot_spoof_the_injected_root(tmp_path: Path) -> None:
-    """The injection channel is underscore-prefixed and stripped when config is read,
-    so a config.toml cannot hand a store a root by writing the internal key itself."""
+    """A config.toml cannot hand a store a root by writing the internal key itself.
+
+    Rejected rather than dropped: silently ignoring it would leave the author believing
+    it took effect."""
     from dgml_core.storage_resolve import _config_from
 
-    cfg = _config_from({"provider": "x:Y", WORKSPACE_ROOT_OPTION: "/etc", "bucket": "b"})
-    assert cfg.options == {"bucket": "b"}
+    with pytest.raises(StorageConfigInvalid, match="supplied by dgml"):
+        _config_from({"provider": "x:Y", WORKSPACE_ROOT_OPTION: "/etc", "bucket": "b"})
+
+
+def test_only_the_injected_key_is_refused() -> None:
+    """The refusal names one key, not a namespace. A sibling ``[storage.<name>]`` table
+    sharing a bare ``[storage]`` is dropped as before, whatever it is called, and an
+    ordinary option a provider happens to prefix is left to that provider's own
+    ``config_fields`` to accept or reject."""
+    from dgml_core.storage_resolve import _config_from
+
+    cfg = _config_from(
+        {"provider": "x:Y", "bucket": "b", "_private": 1, "_legacy": {"provider": "other:Z"}}
+    )
+    assert cfg.options == {"bucket": "b", "_private": 1}
 
 
 def test_load_store_configs_defaults_to_local(tmp_path: Path) -> None:
