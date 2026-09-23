@@ -97,7 +97,9 @@ def _import_store_class(provider: str, base: Any) -> Any:
     )
 
 
-def _with_workspace_root(cls: Any, config: StorageConfig, workspace_root: Path) -> StorageConfig:
+def _with_workspace_root(
+    cls: Any, config: StorageConfig, workspace_root: Path | None
+) -> StorageConfig:
     """``config`` plus the workspace root, for a store that declared it wants one.
 
     Injected **here**, at construction, rather than in :func:`_config_from` where the
@@ -112,8 +114,12 @@ def _with_workspace_root(cls: Any, config: StorageConfig, workspace_root: Path) 
 
     Whether a store wants the root is read off its ``config_fields`` — the same set that
     declares every other option it accepts, and the same set
-    ``_check_no_extra_fields`` enforces — so the two can never disagree."""
-    if WORKSPACE_ROOT_OPTION not in cls.config_fields:
+    ``_check_no_extra_fields`` enforces — so the two can never disagree.
+
+    ``None`` means the caller has no root to offer, which is the ordinary case for a
+    deployment whose storage is entirely remote. Nothing is injected; a store that wanted
+    one then fails in its own ``parse_config`` with a message naming what is missing."""
+    if workspace_root is None or WORKSPACE_ROOT_OPTION not in cls.config_fields:
         return config
     return dataclasses.replace(
         config,
@@ -121,18 +127,19 @@ def _with_workspace_root(cls: Any, config: StorageConfig, workspace_root: Path) 
     )
 
 
-def make_blob_store(config: StorageConfig, *, workspace_root: Path) -> BlobStore:
+def make_blob_store(config: StorageConfig, *, workspace_root: Path | None = None) -> BlobStore:
     """Instantiate the :class:`BlobStore` named by ``config`` (resolve provider →
     ``parse_config`` → construct, where the provider's lazy SDK import happens).
 
     ``workspace_root`` is handed on only to a provider that lists
-    :data:`~dgml_core.storage_service.WORKSPACE_ROOT_OPTION` in its ``config_fields``."""
+    :data:`~dgml_core.storage_service.WORKSPACE_ROOT_OPTION` in its ``config_fields``, so
+    it is optional: a caller building a remote store has no local root to give."""
     cls = _import_store_class(config.provider, BlobStore)
     store: BlobStore = cls(cls.parse_config(_with_workspace_root(cls, config, workspace_root)))
     return store
 
 
-def make_doc_store(config: StorageConfig, *, workspace_root: Path) -> DocStore:
+def make_doc_store(config: StorageConfig, *, workspace_root: Path | None = None) -> DocStore:
     """Instantiate the :class:`DocStore` named by ``config``. See
     :func:`make_blob_store` for ``workspace_root``."""
     cls = _import_store_class(config.provider, DocStore)

@@ -421,10 +421,28 @@ def test_injected_keys_are_not_advertised_to_users(tmp_path: Path) -> None:
 
 
 def test_local_store_without_a_location_says_so(tmp_path: Path) -> None:
-    """Constructed outside the factories and given no root, the message names the
-    factories rather than failing later with a KeyError."""
+    """Constructed outside the factories and given no root, the message names what is
+    missing rather than failing later with a KeyError."""
     with pytest.raises(StorageConfigInvalid, match="no location"):
         LocalStore.parse_config(StorageConfig(provider=DEFAULT_STORAGE_PROVIDER))
+
+
+def test_workspace_root_is_optional_for_a_remote_store(tmp_path: Path) -> None:
+    """A caller whose storage is entirely remote has no local root, and should not have
+    to invent one to satisfy the factory."""
+    from dgml_core.storage_resolve import _with_workspace_root
+
+    class _Remote(BlobStore):
+        name = "remote"
+        config_fields = frozenset({"bucket"})
+
+    cfg = StorageConfig(provider="x:Y", options={"bucket": "b"})
+    assert _with_workspace_root(_Remote, cfg, None).options == {"bucket": "b"}
+
+    # A store that *does* want one still fails loudly rather than silently rootless.
+    local = StorageConfig(provider=DEFAULT_STORAGE_PROVIDER)
+    with pytest.raises(StorageConfigInvalid, match="no location"):
+        make_blob_store(_with_workspace_root(LocalStore, local, None))
 
 
 def test_declared_workspace_path_wins_over_the_injected_root(tmp_path: Path) -> None:
