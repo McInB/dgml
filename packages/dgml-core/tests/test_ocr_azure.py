@@ -194,9 +194,10 @@ def test_azure_extract_writes_per_page_json(
     captured: dict[str, Any] = {}
     client = _FakeAzureClient(results)
 
-    def fake_ctor(endpoint: str, credential: Any) -> _FakeAzureClient:
+    def fake_ctor(endpoint: str, credential: Any, **kwargs: Any) -> _FakeAzureClient:
         captured["endpoint"] = endpoint
         captured["credential_type"] = type(credential).__name__
+        captured["kwargs"] = kwargs
         return client
 
     import azure.ai.documentintelligence as adi
@@ -263,7 +264,7 @@ def test_azure_rejects_unexpected_unit(
     )
     client = _FakeAzureClient({b"page-1-marker": _azure_result(weird_page)})
 
-    def fake_ctor(endpoint: str, credential: Any) -> _FakeAzureClient:
+    def fake_ctor(endpoint: str, credential: Any, **kwargs: Any) -> _FakeAzureClient:
         return client
 
     import azure.ai.documentintelligence as adi
@@ -283,6 +284,47 @@ def test_azure_rejects_unexpected_unit(
             page_images_dir=pages_dir,
             config=cfg,
         )
+
+
+def test_azure_client_built_with_timeouts_and_retry(
+    azure_config: Workspace,
+    text_pdf: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The Azure client must be constructed with connection/read timeouts and
+    retry — otherwise a wedged connection hangs a whole batch indefinitely."""
+    monkeypatch.setenv("TEST_AZURE_KEY", "fake-key")
+    pages_dir = tmp_path / "page_images"
+    pages_dir.mkdir()
+    (pages_dir / "page_1.png").write_bytes(make_fake_png(100, 100, b"page-1-marker"))
+
+    results: dict[bytes, Any] = {
+        b"page-1-marker": _azure_result(_azure_page_pixel(100, 100, words=[])),
+    }
+    client = _FakeAzureClient(results)
+    captured: dict[str, Any] = {}
+
+    def fake_ctor(endpoint: str, credential: Any, **kwargs: Any) -> _FakeAzureClient:
+        captured.update(kwargs)
+        return client
+
+    import azure.ai.documentintelligence as adi
+
+    monkeypatch.setattr(adi, "DocumentIntelligenceClient", fake_ctor)
+
+    cfg = OcrConfig(
+        provider=OcrProviderName.AZURE,
+        endpoint="https://example.cognitiveservices.azure.com/",
+        api_key_env="TEST_AZURE_KEY",
+    )
+    extract_text_ocr(
+        text_pdf, tmp_path / "page_text", file_id="fid", page_images_dir=pages_dir, config=cfg
+    )
+
+    assert captured.get("connection_timeout") and captured["connection_timeout"] > 0
+    assert captured.get("read_timeout") and captured["read_timeout"] > 0
+    assert captured.get("retry_total", 0) >= 1
 
 
 def test_azure_extract_requires_page_images(

@@ -49,7 +49,7 @@ import struct
 import sys
 import warnings
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar
@@ -67,7 +67,11 @@ from .text_extraction import (
     ExtractDigitalResult,
 )
 
-DEFAULT_OCR_CONCURRENCY = 8
+# Pages within a file are OCR'd concurrently (one provider call per page). This
+# is the default number of in-flight OCR calls; override per workspace with
+# ``ocr.max_concurrency`` in config.json. Kept modest so bulk ingestion stays
+# under cloud-provider rate limits.
+DEFAULT_OCR_CONCURRENCY = 5
 
 
 class OcrProviderName(StrEnum):
@@ -100,6 +104,8 @@ class OcrConfig:
     # AWS
     region: str | None = None
     profile: str | None = None
+    # Universal: number of pages OCR'd concurrently (in-flight provider calls).
+    max_concurrency: int = DEFAULT_OCR_CONCURRENCY
 
 
 def load_ocr_config(workspace: Workspace) -> OcrConfig:
@@ -131,7 +137,19 @@ def load_ocr_config(workspace: Workspace) -> OcrConfig:
         )
     provider_name = OcrProviderName(provider_str)
 
-    return _PROVIDERS[provider_name].parse_config(ocr)
+    cfg = _PROVIDERS[provider_name].parse_config(ocr)
+    return replace(cfg, max_concurrency=_parse_max_concurrency(ocr))
+
+
+def _parse_max_concurrency(ocr: dict[str, Any]) -> int:
+    """Read the optional universal ``ocr.max_concurrency`` (a positive int),
+    defaulting to :data:`DEFAULT_OCR_CONCURRENCY`."""
+    raw = ocr.get("max_concurrency")
+    if raw is None:
+        return DEFAULT_OCR_CONCURRENCY
+    if not isinstance(raw, int) or isinstance(raw, bool) or raw < 1:
+        raise OcrConfigInvalid(f"'ocr.max_concurrency' must be a positive integer (got {raw!r})")
+    return raw
 
 
 def _default_ocr_config() -> OcrConfig:
@@ -219,7 +237,7 @@ class OcrProvider(ABC):
     def _check_no_extra_fields(cls, section: dict[str, Any]) -> None:
         """Raise :class:`OcrConfigInvalid` for any keys in ``section`` not
         in ``cls.config_fields`` (or the universal ``provider``)."""
-        allowed = cls.config_fields | {"provider"}
+        allowed = cls.config_fields | {"provider", "max_concurrency"}
         unknown = set(section.keys()) - allowed
         if unknown:
             raise OcrConfigInvalid(
@@ -289,7 +307,7 @@ def extract_text_ocr(
     file_id: str,
     page_images_dir: Path,
     config: OcrConfig,
-    max_concurrency: int = DEFAULT_OCR_CONCURRENCY,
+    max_concurrency: int | None = None,
 ) -> ExtractDigitalResult:
     """Run OCR using the configured provider and write per-page JSONs.
 
@@ -309,7 +327,9 @@ def extract_text_ocr(
     :func:`extract_text_digital` but is not opened here.
 
     Pages are dispatched via :func:`dgml_core.concurrency.map_concurrent`
-    with up to ``max_concurrency`` workers. The provider's
+    with up to ``max_concurrency`` workers (when ``None``,
+    ``config.max_concurrency`` — set by ``ocr.max_concurrency`` in
+    config.json, default :data:`DEFAULT_OCR_CONCURRENCY`). The provider's
     ``analyze_image`` is therefore called from multiple threads; both
     shipped providers wrap stateless API calls that are safe to invoke
     concurrently against the same underlying SDK client. On the first
@@ -324,6 +344,7 @@ def extract_text_ocr(
     for credential resolution failures.
     """
     provider = make_provider(config)
+    workers = config.max_concurrency if max_concurrency is None else max_concurrency
 
     page_image_paths = sorted(page_images_dir.glob(PAGE_GLOB))
     if not page_image_paths:
@@ -364,7 +385,7 @@ def extract_text_ocr(
     total_words = 0
     # Folded on this thread, in page order; the counters are order-independent
     # sums and each worker has already written its own page JSON.
-    for words in map_concurrent(_process_one_page, page_image_paths, max_workers=max_concurrency):
+    for words in map_concurrent(_process_one_page, page_image_paths, max_workers=workers):
         if words is None:
             continue
         pages_written += 1

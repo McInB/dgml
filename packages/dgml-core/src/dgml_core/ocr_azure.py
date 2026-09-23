@@ -31,6 +31,16 @@ from .text_extraction import split_word_into_tokens
 if TYPE_CHECKING:  # pragma: no cover - import-time-only types
     from azure.core.credentials import AzureKeyCredential, TokenCredential
 
+# Client-side timeouts and retry for the Azure DI HTTP calls. Without these the
+# SDK will block indefinitely on a stalled connection (a hung read never raises),
+# which can freeze a whole batch on a single wedged request. These bound each
+# HTTP call and let azure-core auto-retry transient failures (incl. read
+# timeouts) before we surface an OcrFailed.
+_CONNECT_TIMEOUT_S = 30.0
+_READ_TIMEOUT_S = 120.0
+_RETRY_TOTAL = 3
+_RETRY_BACKOFF_S = 1.0
+
 
 class AzureProvider(OcrProvider):
     name: ClassVar[OcrProviderName] = OcrProviderName.AZURE
@@ -67,7 +77,18 @@ class AzureProvider(OcrProvider):
             ) from exc
 
         assert config.endpoint is not None  # validated by load_ocr_config
-        self._client = DocumentIntelligenceClient(config.endpoint, _azure_credential(config))
+        # connection_timeout / read_timeout bound each HTTP request (the read
+        # timeout is what turns a wedged connection into a prompt error instead
+        # of an indefinite hang); retry_* let azure-core auto-retry transient
+        # failures. All are standard azure-core client kwargs.
+        self._client = DocumentIntelligenceClient(
+            config.endpoint,
+            _azure_credential(config),
+            connection_timeout=_CONNECT_TIMEOUT_S,
+            read_timeout=_READ_TIMEOUT_S,
+            retry_total=_RETRY_TOTAL,
+            retry_backoff_factor=_RETRY_BACKOFF_S,
+        )
 
     def analyze_image(
         self,
