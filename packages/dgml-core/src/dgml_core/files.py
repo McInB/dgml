@@ -44,7 +44,6 @@ from .errors import (
     now_iso,
 )
 from .hashing import sha256_file
-from .hybrid import extract_text_hybrid
 from .ids import RECORD_ID_SHAPE, is_record_id, new_id
 from .models import FileRecord
 from .ocr import extract_text_ocr, load_ocr_config
@@ -653,6 +652,12 @@ class FileStore:
         verbose: bool = False,
         debug: bool = False,
     ) -> tuple[str | None, dict[str, Any] | None]:
+        # Imported HERE, not at module scope: ``.hybrid`` reaches ``.llm`` →
+        # ``litellm``, ~1.4s of the package's ~1.66s import cost, and this is the
+        # only call site. Every consumer that just stores files or reads a
+        # workspace used to pay it. See the note in ``dgml_core/__init__.py``.
+        from .hybrid import extract_text_hybrid
+
         try:
             config = load_ocr_config(self.ws)
             text_extraction_config = load_text_extraction_config(self.ws)

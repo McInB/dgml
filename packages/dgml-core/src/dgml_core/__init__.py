@@ -14,8 +14,9 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from . import layout
-from .consistency import CheckReport, Issue, check_workspace
 from .conversion import (
     ConverterConfig,
     DocConverter,
@@ -107,7 +108,41 @@ from .workspaces_resolve import (
 )
 from .workspaces_store import WorkspacesConfig, WorkspacesStore, default_workspaces_root
 
+if TYPE_CHECKING:
+    from .consistency import CheckReport, Issue, check_workspace
+
 __version__ = "0.1.0"
+
+#: Names re-exported from ``.consistency``, resolved on FIRST ACCESS rather than
+#: at import (PEP 562). That module reaches ``.hybrid`` → ``.llm`` → ``litellm``,
+#: which costs ~1.4s of the package's ~1.66s import — paid by every consumer,
+#: including the ones that only ever touch ``Workspace``/``FileStore`` and never
+#: make an LLM call. Deterministic CLIs that invoke this package thousands of
+#: times per session (bill extraction) spend that entire budget on an unused
+#: client. Importing ``dgml_core.consistency`` directly, or touching any name
+#: below, still loads it exactly as before.
+_LAZY_SUBMODULES = {
+    "CheckReport": ".consistency",
+    "Issue": ".consistency",
+    "check_workspace": ".consistency",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve the deferred re-exports on first access (PEP 562)."""
+    module = _LAZY_SUBMODULES.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    value = getattr(importlib.import_module(module, __name__), name)
+    globals()[name] = value  # cache: subsequent lookups skip __getattr__
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)
+
 
 __all__ = [
     "DEFAULT_STORAGE_PROVIDER",
