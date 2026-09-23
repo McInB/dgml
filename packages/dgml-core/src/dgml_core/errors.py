@@ -10,7 +10,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Custom exceptions and persistent error records."""
+"""Custom exceptions and persistent error records.
+
+Every class carries a stable ``code``, and every code has a row in
+``docs/cli-reference.md``; ``tests/test_error_codes.py`` pins both directions,
+so add the row in the same change as the class.
+
+Two kinds of code here are never raised — worth knowing before deleting one as
+dead:
+
+- *Soft-failure carriers* (:class:`GenerationFailed`,
+  :class:`LabelModelUnreachable`) name a per-item failure that lands in a
+  results payload. Callers read ``TheClass.code``.
+- *CLI-layer codes* have no class at all. ``INTERNAL_ERROR`` is permanently one
+  (it exists for exceptions that are *not* a :class:`DgmlError`).
+  ``EMPTY_DOCSET``, ``NO_FILES`` and ``VALUES_NOT_FOUND`` are domain
+  preconditions that become classes when their operations move out of
+  ``cli.py``.
+"""
 
 from __future__ import annotations
 
@@ -64,6 +81,25 @@ class InvalidPDF(DgmlError):
     code = "INVALID_PDF"
 
 
+class MissingExtra(DgmlError):
+    """An optional dependency group (a ``dgml[<extra>]``) is not installed.
+
+    ``extra`` is the name in ``pip install dgml[<extra>]``; ``distribution`` is
+    the package whose import failed, where known. Fields rather than prose so a
+    caller can offer the install without re-parsing the message.
+
+    Not :class:`EngineNotAvailable`, which is the configured PDF engine failing
+    to run — ghostscript, its default, is a system binary and no extra at all.
+    """
+
+    code = "MISSING_EXTRA"
+
+    def __init__(self, message: str, *, extra: str, distribution: str | None = None) -> None:
+        super().__init__(message)
+        self.extra = extra
+        self.distribution = distribution
+
+
 class EngineNotAvailable(DgmlError):
     """The configured PDF engine cannot run — its binary or Python package is
     not installed. Raised for either capability (rendering or slicing), since
@@ -87,10 +123,6 @@ class PdfSliceFailed(DgmlError):
 
 class TextExtractionFailed(DgmlError):
     code = "TEXT_EXTRACTION_FAILED"
-
-
-class NotImplementedMode(DgmlError):
-    code = "NOT_IMPLEMENTED"
 
 
 class InvalidArgument(DgmlError):
@@ -318,6 +350,10 @@ class SchemaGenerationFailed(DgmlError):
 
 
 class GenerationFailed(DgmlError):
+    # Never raised — a file that produced no output is a per-item `failed` entry
+    # in `docset generate`'s results, not an abort of the whole batch. Exists so
+    # that payload draws its `code` from this registry, exactly as
+    # `LabelModelUnreachable` below does for `label_error`.
     code = "GENERATION_FAILED"
 
 

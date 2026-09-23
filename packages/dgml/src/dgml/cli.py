@@ -45,7 +45,9 @@ from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
     ConflictError,
     DgmlError,
+    GenerationFailed,
     InvalidArgument,
+    MissingExtra,
     NoExistingDocSets,
     StorageBackendMismatch,
     WorkspaceNotInitialized,
@@ -2221,12 +2223,11 @@ def _dispatch(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     if cmd == "cluster":
         try:
             from dgml_core.clustering import clustering
-        except ImportError:
-            return _emit_error(
-                "MISSING_EXTRA",
+        except ImportError as exc:
+            raise MissingExtra(
                 "The 'clustering' extra is not installed. Run: pip install dgml[clustering]",
-                fmt,
-            )
+                extra="clustering",
+            ) from exc
         # `clustering` owns the `skipped` key and the skip-existing no-op
         # short-circuit (which avoids re-scanning the workspace). `config`
         # is passed through raw — it may be a preset name or a path.
@@ -2345,10 +2346,10 @@ def _chain_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     # staking/dgml_chain (broken transitive dep, code bug) must surface as
     # INTERNAL_ERROR rather than be masked as "extra not installed".
     if importlib.util.find_spec("dgml_chain") is None:
-        return _emit_error(
-            "MISSING_EXTRA",
+        raise MissingExtra(
             "The 'chain' extra is not installed. Run: pip install dgml[chain]",
-            fmt,
+            extra="chain",
+            distribution="dgml_chain",
         )
     from dgml_core import staking
 
@@ -3405,7 +3406,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                         fid,
                         name,
                         error={
-                            "code": "GENERATION_FAILED",
+                            "code": GenerationFailed.code,
                             "message": (
                                 f"duplicate filename '{name}' within the docset; the "
                                 "generation pipeline keys documents by filename, so give "
@@ -3891,7 +3892,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                             "failed",
                             fid,
                             name,
-                            error={"code": "GENERATION_FAILED", "message": message},
+                            error={"code": GenerationFailed.code, "message": message},
                         )
                     )
             if cov_report_key is not None and cov_results:
