@@ -142,6 +142,7 @@ from .storage_service import (
 )
 from .text_extraction import TextMode
 from .workspace_config import WorkspaceIdentity
+from .workspace_create import CreateWorkspaceResult, create_workspace
 from .workspace_id import (
     ID_SHAPE,
     generate_unique_workspace_id,
@@ -224,6 +225,7 @@ __all__ = [
     "ConversionFailed",
     "ConverterConfig",
     "CorruptMetadata",
+    "CreateWorkspaceResult",
     "DgmlError",
     "DocConverter",
     "DocSet",
@@ -304,6 +306,7 @@ __all__ = [
     "check_workspace",
     "collect_file_version",
     "collect_from_attestation",
+    "create_workspace",
     "default_workspaces_root",
     "default_workspaces_store",
     "export_attestation",
