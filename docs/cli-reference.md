@@ -1345,7 +1345,10 @@ payloads. Chunking is strictly that escalation: an ordinary run is never
 offered the continuation tool or the `done` flag, so it can't split output
 that fits in one call. `extraction_stats.json` records both under
 `phases.phase1`: `chunk_calls` (1 = ordinary single submission) and
-`truncated_retries`.
+`truncated_retries`. `phases.phase3.pages_out_of_range` counts the pages
+phase 1 cited that the file does not have (outside `1..page_count`, with no
+page image): their items make no phase-3 call and stay unmatched, like any
+other leaf phase 3 could not resolve, and the run still writes the tree.
 
 **Schema-declared invariants.** A field may carry a `## Invariant:` annotation
 naming a checkable relation against the rest of the submission — the
