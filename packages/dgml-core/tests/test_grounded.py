@@ -22,11 +22,15 @@ from dgml_core import layout
 from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
     AuthError,
+    ConversionFailed,
+    FileNotFound,
     GroundedConfigInvalid,
     GroundedConfigMissing,
+    RecordedError,
     SchemaGenerationFailed,
     SchemaNotFound,
     ValuesExtractionFailed,
+    append_recorded_error,
 )
 from dgml_core.extraction_schema import parse_rnc
 from dgml_core.extraction_xml import dgml_xml_to_values
@@ -2320,3 +2324,128 @@ def test_phase3_never_cached(workspace: Workspace) -> None:
     assert len(m.call_args_list) >= 2, "phase 3 did not run; test would be vacuous"
     for call in m.call_args_list[1:]:
         assert _cache_control_paths(call.kwargs["messages"]) == []
+
+
+def test_extract_values_names_the_conversion_error_when_there_is_no_pdf(
+    workspace: Workspace,
+) -> None:
+    """A legacy .xls is accepted at file add: the record is created, the
+    converter's error is recorded against the file, and no PDF exists. The
+    extraction error repeats that error instead of the bare 'has no source
+    PDF' that used to point at the wrong cause."""
+    fid = "f1aaaaaaaaaa"
+    record = FileRecord(
+        id=fid,
+        original_path="/fake/invoice.xls",
+        original_filename="invoice.xls",
+        sha256="0" * 64,
+        added_at="2026-01-01T00:00:00Z",
+        page_count=None,
+        pdf_converter="xlsx-islands",
+    )
+    workspace.docs.put_doc("files", fid, record.to_json())
+    workspace.blobs.put_blob(layout.file_source_key(fid, "invoice.xls"), b"\xd0\xcf\x11\xe0")
+    append_recorded_error(
+        workspace,
+        fid,
+        RecordedError(
+            operation="convert_to_pdf",
+            message=(
+                "could not open workbook invoice.xls: openpyxl does not support the old "
+                ".xls file format, please use xlrd to read this file, or convert it to the "
+                "more recent .xlsx file format."
+            ),
+            occurred_at="2026-01-01T00:00:00Z",
+            permanent=True,
+        ),
+    )
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with pytest.raises(ConversionFailed) as info:
+        extract_values(workspace, ds_id, fid, config=config)
+    message = str(info.value)
+    assert message.startswith(f"file '{fid}' has no source PDF: converting it failed: ")
+    assert "openpyxl does not support the old .xls file format" in message
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        pytest.param({"errors": None}, id="wrong-shape"),
+        pytest.param(
+            {"errors": [{"operation": "convert_to_pdf", "occurred_at": "2026-01-01T00:00:00Z"}]},
+            id="missing-message",
+        ),
+        pytest.param(
+            {
+                "errors": [
+                    {
+                        "operation": "convert_to_pdf",
+                        "message": None,
+                        "occurred_at": "2026-01-01T00:00:00Z",
+                    }
+                ]
+            },
+            id="null-message",
+        ),
+    ],
+)
+def test_extract_values_keeps_file_not_found_when_the_errors_document_is_malformed(
+    workspace: Workspace, doc: dict[str, Any]
+) -> None:
+    """The recorded-errors lookup is a diagnostic; a malformed document, or a
+    conversion record without a usable message, must not turn the missing
+    PDF into an internal error or a `CONVERSION_FAILED: ... None`."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid, filename="doc.docx")
+    workspace.docs.put_doc(layout.Collection.ERRORS, fid, doc)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with pytest.raises(FileNotFound, match=f"file '{fid}' has no source PDF$"):
+        extract_values(workspace, ds_id, fid, config=config)
+
+
+def test_extract_values_keeps_the_bare_message_without_a_conversion_error(
+    workspace: Workspace,
+) -> None:
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid, filename="doc.docx")  # a record, a non-PDF source, no PDF
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with pytest.raises(FileNotFound, match=f"file '{fid}' has no source PDF$"):
+        extract_values(workspace, ds_id, fid, config=config)
+
+
+def _recorded(operation: str, message: str, when: str) -> RecordedError:
+    return RecordedError(operation=operation, message=message, occurred_at=when, permanent=True)
+
+
+def test_extract_values_ignores_a_recorded_error_of_another_operation(
+    workspace: Workspace,
+) -> None:
+    """Only a conversion error explains a missing PDF; a page-render error
+    recorded on the file does not change the bare message."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid, filename="doc.docx")
+    append_recorded_error(
+        workspace, fid, _recorded("render_pages", "ghostscript exited 1", "2026-01-01T00:00:00Z")
+    )
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with pytest.raises(FileNotFound, match=f"file '{fid}' has no source PDF$"):
+        extract_values(workspace, ds_id, fid, config=config)
+
+
+def test_extract_values_repeats_the_latest_conversion_error(workspace: Workspace) -> None:
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid, filename="doc.docx")
+    append_recorded_error(
+        workspace, fid, _recorded("convert_to_pdf", "first attempt", "2026-01-01T00:00:00Z")
+    )
+    append_recorded_error(
+        workspace, fid, _recorded("convert_to_pdf", "second attempt", "2026-01-02T00:00:00Z")
+    )
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with pytest.raises(ConversionFailed, match=r"converting it failed: second attempt$"):
+        extract_values(workspace, ds_id, fid, config=config)
