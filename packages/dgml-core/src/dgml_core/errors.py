@@ -48,6 +48,15 @@ class DgmlError(Exception):
     code: str = "DGML_ERROR"
 
 
+def _reconstruct(cls: Any, message: str, kwargs: dict[str, Any]) -> Any:
+    """Pickle hook for errors whose ``__init__`` takes required keyword arguments.
+
+    ``Exception.__reduce__`` rebuilds via ``cls(*args)`` — the message alone — so
+    such an error raised inside a ``ProcessPoolExecutor`` would arrive as a
+    ``TypeError`` about the missing keyword instead of itself."""
+    return cls(message, **kwargs)
+
+
 class WorkspaceNotInitialized(DgmlError):
     """A workspace was addressed but has no config, so it cannot be opened.
 
@@ -59,6 +68,9 @@ class WorkspaceNotInitialized(DgmlError):
     def __init__(self, message: str, *, workspace: Workspace) -> None:
         super().__init__(message)
         self.workspace = workspace
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (_reconstruct, (type(self), self.args[0], {"workspace": self.workspace}))
 
 
 class NotFoundError(DgmlError):
@@ -80,6 +92,10 @@ class ConflictError(DgmlError):
         super().__init__(message)
         self.kind = kind
         self.existing_id = existing_id
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        kwargs = {"kind": self.kind, "existing_id": self.existing_id}
+        return (_reconstruct, (type(self), self.args[0], kwargs))
 
 
 class UnsupportedFileType(DgmlError):
@@ -107,6 +123,10 @@ class MissingExtra(DgmlError):
         super().__init__(message)
         self.extra = extra
         self.distribution = distribution
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        kwargs = {"extra": self.extra, "distribution": self.distribution}
+        return (_reconstruct, (type(self), self.args[0], kwargs))
 
 
 class EngineNotAvailable(DgmlError):

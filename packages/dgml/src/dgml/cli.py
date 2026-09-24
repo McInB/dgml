@@ -2215,7 +2215,7 @@ def _chain_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         raise MissingExtra(
             "The 'chain' extra is not installed. Run: pip install dgml[chain]",
             extra="chain",
-            distribution="dgml_chain",
+            distribution="dgml-chain",
         )
     from dgml_core import staking
 

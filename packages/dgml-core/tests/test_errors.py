@@ -14,7 +14,19 @@
 
 from __future__ import annotations
 
-from dgml_core.errors import short_error_message
+import copy
+import pickle
+from pathlib import Path
+
+import pytest
+from dgml_core.errors import (
+    ConflictError,
+    DgmlError,
+    MissingExtra,
+    WorkspaceNotInitialized,
+    short_error_message,
+)
+from dgml_core.storage import Workspace
 
 
 def test_short_error_message_includes_type_and_text() -> None:
@@ -42,3 +54,24 @@ def test_short_error_message_respects_custom_limit() -> None:
 
 def test_short_error_message_bare_exception_is_type_name() -> None:
     assert short_error_message(RuntimeError()) == "RuntimeError"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        WorkspaceNotInitialized("no config", workspace=Workspace(root=Path("/w"))),
+        MissingExtra("need it", extra="azure", distribution="azure-identity"),
+        MissingExtra("need it", extra="chain"),
+        ConflictError("taken", kind="workspace", existing_id="acme"),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+def test_keyword_errors_survive_pickle_and_copy(exc: DgmlError) -> None:
+    """These are public and carry required keyword fields. ``Exception.__reduce__``
+    rebuilds via ``cls(*args)``, so without ``__reduce__`` each arrived from a
+    ``ProcessPoolExecutor`` as a ``TypeError`` about the missing keyword."""
+    for clone in (pickle.loads(pickle.dumps(exc)), copy.deepcopy(exc)):
+        assert type(clone) is type(exc)
+        assert str(clone) == str(exc)
+        assert clone.code == exc.code
+        assert {k: v for k, v in vars(clone).items()} == {k: v for k, v in vars(exc).items()}

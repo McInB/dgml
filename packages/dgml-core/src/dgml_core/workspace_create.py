@@ -130,8 +130,12 @@ def create_workspace(
 
     # Every id check runs before anything is written: a rejected id must not leave a
     # half-built workspace behind, and for a listed one the id decides the root.
-    store = default_workspaces_store()
+    #
+    # The store of workspaces is built only on the two paths that consult it. A
+    # detached create with no id never does, and must keep working when the
+    # configured [workspaces] provider cannot even be imported on this machine.
     if workspace is None:
+        store = default_workspaces_store()
         if workspace_id is not None and store.exists(workspace_id):
             raise ConflictError(
                 f"{store.label()} already holds a workspace {workspace_id}.",
@@ -158,12 +162,14 @@ def create_workspace(
                     f"workspace already records. create never re-identifies a workspace; "
                     f"to make a new one called {workspace_id!r}, create it somewhere else."
                 )
-            if known is None and store.exists(workspace_id):
-                raise ConflictError(
-                    f"{store.label()} already holds a workspace {workspace_id}.",
-                    kind="workspace",
-                    existing_id=workspace_id,
-                )
+            if known is None:
+                store = default_workspaces_store()
+                if store.exists(workspace_id):
+                    raise ConflictError(
+                        f"{store.label()} already holds a workspace {workspace_id}.",
+                        kind="workspace",
+                        existing_id=workspace_id,
+                    )
         if seed_toml is not None and not ws.config_present:
             ws.root.mkdir(parents=True, exist_ok=True)
             wsconfig.write_config_text(ws, seed_toml)

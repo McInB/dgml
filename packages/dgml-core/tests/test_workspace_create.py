@@ -197,3 +197,40 @@ def test_seed_that_declares_only_other_services_is_refused() -> None:
             storage_service="default",
             seed_toml=SEED_SVCA,
         )
+
+
+# --------------------------------------- the store is consulted only when needed
+
+
+def _configure_unimportable_workspaces_store() -> None:
+    """Point ``[workspaces]`` at a provider this machine cannot import — the shape of
+    a fresh shell or cron job on a machine whose store lives in an out-of-tree module
+    that ``PYTHONPATH`` does not currently reach."""
+    from dgml_core.storage import user_config_path
+
+    path = user_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[workspaces]\nprovider = "no_such_module:NoSuchStore"\n', encoding="utf-8")
+    default_workspaces_store.cache_clear()
+
+
+def test_detached_create_does_not_need_the_workspaces_store(tmp_path: Path) -> None:
+    """A path-addressed workspace lists nowhere, so a broken ``[workspaces]`` table must
+    not stop it being created. Regressed once when the store was built unconditionally."""
+    _configure_unimportable_workspaces_store()
+
+    result = create_workspace(Workspace(root=tmp_path / "det"), organization="Acme")
+
+    assert result.workspace.is_initialized()
+    assert result.workspace.workspaces_id is None
+
+
+def test_listed_create_does_need_the_workspaces_store() -> None:
+    """The counterpart: the laziness is precise. A listed create has nowhere to put the
+    workspace but the store, so the same broken table must fail it."""
+    from dgml_core import StorageProviderUnresolvable
+
+    _configure_unimportable_workspaces_store()
+
+    with pytest.raises(StorageProviderUnresolvable):
+        create_workspace(organization="Acme")
