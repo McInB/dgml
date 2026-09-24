@@ -28,6 +28,7 @@ import shutil
 import sys
 import tomllib
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -58,8 +59,6 @@ from dgml_core.files import AddFileResult, ConflictPolicy, FileStore
 from dgml_core.ids import RECORD_ID_SHAPE
 from dgml_core.migrations import (
     MigrationResult,
-    migrate_workspace,
-    migrate_workspace_config,
     stamp_schema_version,
 )
 from dgml_core.models import DocSet
@@ -82,7 +81,6 @@ from dgml_core.storage_resolve import (
     DEFAULT_STORAGE_SERVICE,
     load_store_configs,
     storage_fingerprint_pair,
-    verify_storage_fingerprint,
 )
 from dgml_core.text_extraction import TextMode
 from dgml_core.workspace_id import ID_SHAPE, generate_unique_workspace_id, is_workspace_id
@@ -1197,10 +1195,11 @@ def _add_chain_subparsers(
         _chain_config_arg(pv)
 
 
-def _report_migrations(
-    results: list[MigrationResult], ws: Workspace, args: argparse.Namespace
-) -> None:
-    """Announce an applied workspace migration on stderr, under ``--verbose``.
+def _migration_reporter(
+    args: argparse.Namespace,
+) -> Callable[[Workspace, MigrationResult], None] | None:
+    """The ``Workspace.open(on_migration=…)`` callback: announce an applied
+    workspace migration on stderr, under ``--verbose``. ``None`` when quiet.
 
     Verbose-gated on purpose. Migrations are automatic, additive and
     idempotent, so the default-quiet cost is low — whereas stderr carries the
@@ -1210,13 +1209,16 @@ def _report_migrations(
     ``--verbose`` stderr is already non-JSON (that is where the traceback
     goes), so the notice is free there.
 
-    A migration that changed nothing says nothing either way: bumping the
-    version stamp on a workspace that had no work to do is bookkeeping, not an
-    upgrade."""
+    A migration that changed nothing says nothing either way, and never reaches
+    this callback: bumping the version stamp on a workspace that had no work to
+    do is bookkeeping, not an upgrade."""
     if not (getattr(args, "verbose", False) or os.environ.get("DGML_DEBUG")):
-        return
-    for result in (r for r in results if r.changed):
+        return None
+
+    def report(ws: Workspace, result: MigrationResult) -> None:
         sys.stderr.write(f"[dgml] upgraded workspace at {ws.root} — {result.summary()}\n")
+
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1226,40 +1228,26 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         _reject_retired_config_flag(args)
-        ws = Workspace.resolve(args.workspace)
-        # `init` manages only the user-level config; `workspace create`
-        # is what actually builds the workspace — so both run before the
-        # workspace exists.
-        if args.command not in ("init", "workspace"):
-            # Move a pre-upgrade workspace's storage binding out of this machine's
-            # registry and into its own config.toml. Store-free and content-guarded,
-            # so it must run FIRST: everything below reads the store, and until this
-            # has run the store a legacy workspace resolves is the wrong one.
-            migrate_workspace_config(ws)
-            # Then check that binding against the workspace's own seal, still before
-            # any store is built — a drifted [storage] raises here rather than
-            # silently opening an empty backend. `workspace reseal` (exempt above,
-            # under the `workspace` group) is how an intended change is accepted.
-            verify_storage_fingerprint(ws)
-            # One check, not two: `is_initialized()` *is* "has a config". The config
-            # names the backend and cannot be reconstructed from anything else, so an
-            # absent one is indistinguishable from "never a workspace" — and both want
-            # the same answer from the caller. The message covers both readings.
-            if not ws.is_initialized():
+        # `init` manages only the user-level config; `workspace create` is what
+        # actually builds the workspace — so both run before the workspace exists
+        # and get `resolve` (which only answers "which workspace") rather than
+        # `open` (which also migrates it, and requires it to be initialized).
+        if args.command in ("init", "workspace"):
+            ws = Workspace.resolve(args.workspace)
+        else:
+            try:
+                ws = Workspace.open(args.workspace, on_migration=_migration_reporter(args))
+            except WorkspaceNotInitialized as exc:
+                # Re-raised with remedies the library cannot offer: every one of them
+                # is a `dgml` command, and which of them applies depends on how this
+                # invocation addressed the workspace (see `_uninitialized_message`).
                 raise WorkspaceNotInitialized(
-                    _uninitialized_message(ws, from_default=_root_is_the_cwd_default(args))
-                )
+                    _uninitialized_message(
+                        exc.workspace, from_default=_root_is_the_cwd_default(args)
+                    ),
+                    workspace=exc.workspace,
+                ) from exc
             _warn_if_config_declares_workspaces(ws)
-            # Upgrade an older workspace in place before anything reads it. This
-            # is the one point every command passes through, so there is no
-            # separate migrate step to remember. No-op (one document read) when
-            # the workspace is already current.
-            #
-            # Nothing is indexed here any more. The old per-machine index had to be
-            # written on every open to stay current; a workspace's config now lives in
-            # the store of workspaces that lists it, so being listed is not a separate
-            # fact that can fall out of date.
-            _report_migrations(migrate_workspace(ws), ws, args)
         return _dispatch(args, ws, fmt)
     except DgmlError as exc:
         return _emit_error(exc.code, str(exc), fmt)
@@ -2130,7 +2118,8 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             raise WorkspaceNotInitialized(
                 _uninitialized_message(
                     ws, from_default=_root_is_the_cwd_default(args, path=args.path)
-                )
+                ),
+                workspace=ws,
             )
         previous = wsconfig.read_identity(ws).storage_fingerprint
         blob_cfg, doc_cfg = ws.store_configs

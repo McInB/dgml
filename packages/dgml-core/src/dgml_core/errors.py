@@ -49,7 +49,16 @@ class DgmlError(Exception):
 
 
 class WorkspaceNotInitialized(DgmlError):
+    """A workspace was addressed but has no config, so it cannot be opened.
+
+    ``workspace`` is the one that could not be opened — required, so a handler
+    never has to re-resolve it from whatever was addressed."""
+
     code = "WORKSPACE_NOT_INITIALIZED"
+
+    def __init__(self, message: str, *, workspace: Workspace) -> None:
+        super().__init__(message)
+        self.workspace = workspace
 
 
 class NotFoundError(DgmlError):
