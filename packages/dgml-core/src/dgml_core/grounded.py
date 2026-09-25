@@ -56,13 +56,16 @@ from . import layout
 from .config import load_merged_config
 from .docsets import DocSetStore
 from .errors import (
+    CONVERT_TO_PDF_OPERATION,
     AuthError,
+    ConversionFailed,
     FileNotFound,
     GroundedConfigInvalid,
     GroundedConfigMissing,
     SchemaGenerationFailed,
     SchemaInvalid,
     ValuesExtractionFailed,
+    load_recorded_errors,
     now_iso,
 )
 from .extraction_schema import (
@@ -329,10 +332,35 @@ def get_page_words(
 
 
 def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
-    """Return the bytes of the single ``*.pdf`` stored for ``file_id``."""
+    """Return the bytes of the single ``*.pdf`` stored for ``file_id``.
+
+    A convertible source whose conversion failed at ``file add`` has a
+    record but no PDF, and the converter's error is among the file's
+    recorded errors: such a file raises :class:`ConversionFailed` repeating
+    that error. A file with no PDF and no recorded conversion error raises
+    :class:`FileNotFound` as before.
+    """
     keys = workspace.blobs.list_blobs(layout.file_prefix(file_id))
     pdfs = [k for k in keys if k.endswith(".pdf")]
     if not pdfs:
+        try:
+            failed = [
+                err.message.strip()
+                for err in load_recorded_errors(workspace, file_id)
+                if err.operation == CONVERT_TO_PDF_OPERATION
+                and isinstance(err.message, str)
+                and err.message.strip()
+            ]
+        except (TypeError, KeyError, ValueError, AttributeError):
+            # The lookup is a diagnostic: a malformed errors document (a
+            # wrong shape, a missing field) must not turn the missing PDF
+            # into an internal error; a record without a usable message is
+            # skipped the same way.
+            failed = []
+        if failed:
+            raise ConversionFailed(
+                f"file '{file_id}' has no source PDF: converting it failed: {failed[-1]}"
+            )
         raise FileNotFound(f"file '{file_id}' has no source PDF")
     return workspace.blobs.get_blob(pdfs[0])
 

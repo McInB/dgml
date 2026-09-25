@@ -28,6 +28,7 @@ from .conversion import (
     load_conversion_config,
 )
 from .errors import (
+    CONVERT_TO_PDF_OPERATION,
     AuthError,
     ConflictError,
     DgmlError,
@@ -479,7 +480,7 @@ class FileStore:
                     self.ws,
                     file_id,
                     RecordedError(
-                        operation="convert_to_pdf",
+                        operation=CONVERT_TO_PDF_OPERATION,
                         message=message,
                         occurred_at=now_iso(),
                         permanent=True,
