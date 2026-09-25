@@ -47,14 +47,16 @@ class DgmlError(Exception):
 
     code: str = "DGML_ERROR"
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        # ``Exception.__reduce__`` rebuilds via ``cls(*args)`` — the message
+        # alone — so a subclass with required keyword arguments would come back
+        # from a pickle or ``copy.deepcopy`` as a ``TypeError``. Rebuild without
+        # ``__init__`` and restore the instance state instead; nothing per class.
+        return (_blank, (type(self),), {"args": self.args, **vars(self)})
 
-def _reconstruct(cls: Any, message: str, kwargs: dict[str, Any]) -> Any:
-    """Pickle hook for errors whose ``__init__`` takes required keyword arguments.
 
-    ``Exception.__reduce__`` rebuilds via ``cls(*args)`` — the message alone — so
-    such an error raised inside a ``ProcessPoolExecutor`` would arrive as a
-    ``TypeError`` about the missing keyword instead of itself."""
-    return cls(message, **kwargs)
+def _blank(cls: type[DgmlError]) -> DgmlError:
+    return cls.__new__(cls)
 
 
 class WorkspaceNotInitialized(DgmlError):
@@ -68,9 +70,6 @@ class WorkspaceNotInitialized(DgmlError):
     def __init__(self, message: str, *, workspace: Workspace) -> None:
         super().__init__(message)
         self.workspace = workspace
-
-    def __reduce__(self) -> tuple[Any, ...]:
-        return (_reconstruct, (type(self), self.args[0], {"workspace": self.workspace}))
 
 
 class NotFoundError(DgmlError):
@@ -92,10 +91,6 @@ class ConflictError(DgmlError):
         super().__init__(message)
         self.kind = kind
         self.existing_id = existing_id
-
-    def __reduce__(self) -> tuple[Any, ...]:
-        kwargs = {"kind": self.kind, "existing_id": self.existing_id}
-        return (_reconstruct, (type(self), self.args[0], kwargs))
 
 
 class UnsupportedFileType(DgmlError):
@@ -123,10 +118,6 @@ class MissingExtra(DgmlError):
         super().__init__(message)
         self.extra = extra
         self.distribution = distribution
-
-    def __reduce__(self) -> tuple[Any, ...]:
-        kwargs = {"extra": self.extra, "distribution": self.distribution}
-        return (_reconstruct, (type(self), self.args[0], kwargs))
 
 
 class EngineNotAvailable(DgmlError):
