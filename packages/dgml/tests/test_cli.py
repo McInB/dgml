@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -6878,3 +6879,55 @@ def test_file_add_id_duplicate_creates_second(
 
     main(_ws_args(ws) + ["file", "list"])
     assert len(_read_stdout(capsys)["files"]) == 2
+
+
+def test_missing_clustering_extra_reports_missing_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An uninstalled extra still produces the same `MISSING_EXTRA` envelope.
+
+    The handler used to `return _emit_error(...)` and now raises `MissingExtra`,
+    which `main()` turns into the envelope. Code, message and exit status must be
+    byte-identical across that change — the envelope is CLI contract, and an
+    agent branching on it cannot tell (or care) which side of `main()` built it.
+    """
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    # `sys.modules[name] = None` makes importlib treat the name as unimportable.
+    monkeypatch.setitem(sys.modules, "dgml_core.clustering", None)
+
+    rc = main(_ws_args(ws) + ["cluster"])
+
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "MISSING_EXTRA"
+    assert err["message"] == (
+        "The 'clustering' extra is not installed. Run: pip install dgml[clustering]"
+    )
+
+
+def test_missing_chain_extra_reports_missing_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Same for the `chain` extra, which probes with `find_spec` rather than a
+    try/except so a *broken* `dgml_chain` still surfaces as INTERNAL_ERROR rather
+    than being mislabelled "not installed"."""
+    import importlib.util
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a, **k: None if name == "dgml_chain" else real_find_spec(name, *a, **k),
+    )
+
+    rc = main(_ws_args(ws) + ["chain", "list"])
+
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "MISSING_EXTRA"
+    assert err["message"] == "The 'chain' extra is not installed. Run: pip install dgml[chain]"
