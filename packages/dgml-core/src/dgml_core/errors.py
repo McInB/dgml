@@ -270,6 +270,10 @@ class ConversionFailed(DgmlError):
     code = "CONVERSION_FAILED"
 
 
+# The ``operation`` a converter's failure is recorded under at ``file add``.
+CONVERT_TO_PDF_OPERATION = "convert_to_pdf"
+
+
 class AuthError(DgmlError):
     code = "AUTH_ERROR"
 

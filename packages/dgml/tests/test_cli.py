@@ -5404,6 +5404,62 @@ def test_extraction_extract_schema_not_found(
     mock_completion.assert_not_called()
 
 
+def test_extraction_extract_reports_a_failed_conversion(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file whose conversion failed at add has a record, a recorded error and
+    no PDF. The extraction error repeats the converter's message under
+    CONVERSION_FAILED, not the bare FILE_NOT_FOUND that pointed at a missing
+    blob."""
+    from dgml_core.errors import RecordedError, append_recorded_error, now_iso
+    from dgml_core.models import FileRecord
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _write_grounded_config(ws)
+    ds_id = _new_docset(ws, capsys)
+    schema_file = tmp_path / "schema.rnc"
+    schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
+    main(_ws_args(ws) + ["extraction", "set-schema", ds_id, "--schema-file", str(schema_file)])
+    capsys.readouterr()
+
+    fid = "filexls00001"
+    wsx = Workspace(root=ws)
+    record = FileRecord(
+        id=fid,
+        original_path="/fake/invoice.xls",
+        original_filename="invoice.xls",
+        sha256="0" * 64,
+        added_at=now_iso(),
+        page_count=None,
+        pdf_converter="xlsx-islands",
+    )
+    wsx.docs.put_doc("files", fid, record.to_json())
+    wsx.blobs.put_blob(layout.file_source_key(fid, "invoice.xls"), b"\xd0\xcf\x11\xe0")
+    append_recorded_error(
+        wsx,
+        fid,
+        RecordedError(
+            operation="convert_to_pdf",
+            message="could not open workbook invoice.xls: openpyxl does not support the old .xls",
+            occurred_at=now_iso(),
+            permanent=True,
+        ),
+    )
+    assert main(_ws_args(ws) + ["docset", "add-file", fid, "--docset", ds_id]) == 0
+    capsys.readouterr()
+
+    with patch("litellm.completion") as mock_completion:
+        rc = main(_ws_args(ws) + ["extraction", "extract", ds_id, fid])
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "CONVERSION_FAILED"
+    assert err["message"].startswith(f"file '{fid}' has no source PDF: converting it failed: ")
+    assert "openpyxl does not support the old .xls" in err["message"]
+    mock_completion.assert_not_called()
+
+
 def test_extraction_extract_records_usage_under_debug(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
