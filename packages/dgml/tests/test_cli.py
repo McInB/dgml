@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -5306,6 +5307,62 @@ def test_extraction_extract_schema_not_found(
     mock_completion.assert_not_called()
 
 
+def test_extraction_extract_reports_a_failed_conversion(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file whose conversion failed at add has a record, a recorded error and
+    no PDF. The extraction error repeats the converter's message under
+    CONVERSION_FAILED, not the bare FILE_NOT_FOUND that pointed at a missing
+    blob."""
+    from dgml_core.errors import RecordedError, append_recorded_error, now_iso
+    from dgml_core.models import FileRecord
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _write_grounded_config(ws)
+    ds_id = _new_docset(ws, capsys)
+    schema_file = tmp_path / "schema.rnc"
+    schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
+    main(_ws_args(ws) + ["extraction", "set-schema", ds_id, "--schema-file", str(schema_file)])
+    capsys.readouterr()
+
+    fid = "filexls00001"
+    wsx = Workspace(root=ws)
+    record = FileRecord(
+        id=fid,
+        original_path="/fake/invoice.xls",
+        original_filename="invoice.xls",
+        sha256="0" * 64,
+        added_at=now_iso(),
+        page_count=None,
+        pdf_converter="xlsx-islands",
+    )
+    wsx.docs.put_doc("files", fid, record.to_json())
+    wsx.blobs.put_blob(layout.file_source_key(fid, "invoice.xls"), b"\xd0\xcf\x11\xe0")
+    append_recorded_error(
+        wsx,
+        fid,
+        RecordedError(
+            operation="convert_to_pdf",
+            message="could not open workbook invoice.xls: openpyxl does not support the old .xls",
+            occurred_at=now_iso(),
+            permanent=True,
+        ),
+    )
+    assert main(_ws_args(ws) + ["docset", "add-file", fid, "--docset", ds_id]) == 0
+    capsys.readouterr()
+
+    with patch("litellm.completion") as mock_completion:
+        rc = main(_ws_args(ws) + ["extraction", "extract", ds_id, fid])
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "CONVERSION_FAILED"
+    assert err["message"].startswith(f"file '{fid}' has no source PDF: converting it failed: ")
+    assert "openpyxl does not support the old .xls" in err["message"]
+    mock_completion.assert_not_called()
+
+
 def test_extraction_extract_records_usage_under_debug(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -6878,3 +6935,98 @@ def test_file_add_id_duplicate_creates_second(
 
     main(_ws_args(ws) + ["file", "list"])
     assert len(_read_stdout(capsys)["files"]) == 2
+
+
+def test_missing_clustering_extra_reports_missing_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An uninstalled extra still produces the same `MISSING_EXTRA` envelope.
+
+    The handler used to `return _emit_error(...)` and now raises `MissingExtra`,
+    which `main()` turns into the envelope. Code, message and exit status must be
+    byte-identical across that change — the envelope is CLI contract, and an
+    agent branching on it cannot tell (or care) which side of `main()` built it.
+    """
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    # `sys.modules[name] = None` makes importlib treat the name as unimportable.
+    monkeypatch.setitem(sys.modules, "dgml_core.clustering", None)
+
+    rc = main(_ws_args(ws) + ["cluster"])
+
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "MISSING_EXTRA"
+    assert err["message"] == (
+        "The 'clustering' extra is not installed. Run: pip install dgml[clustering]"
+    )
+
+
+def test_missing_chain_extra_reports_missing_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Same for the `chain` extra, which probes with `find_spec` rather than a
+    try/except so a *broken* `dgml_chain` still surfaces as INTERNAL_ERROR rather
+    than being mislabelled "not installed"."""
+    import importlib.util
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a, **k: None if name == "dgml_chain" else real_find_spec(name, *a, **k),
+    )
+
+    rc = main(_ws_args(ws) + ["chain", "list"])
+
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "MISSING_EXTRA"
+    assert err["message"] == "The 'chain' extra is not installed. Run: pip install dgml[chain]"
+
+
+def test_generate_max_tokens_default_matches_the_library() -> None:
+    """The flag default and ConvertOptions.max_tokens are two copies of one
+    number. They have to move together: a CLI run that silently used a lower
+    ceiling than a library run would truncate replies the library completes,
+    and the failure shows up as an under-labeled chunk, not as an error."""
+    from dgml.cli import _build_parser
+    from dgml_core.generation.pipeline import ConvertOptions
+
+    args = _build_parser().parse_args(["docset", "generate", "somedocset"])
+    assert args.max_tokens == ConvertOptions.max_tokens
+
+
+def test_generate_max_tokens_default_clears_the_largest_observed_reply() -> None:
+    """Headroom check. The roster-sized describe_concepts call has been
+    observed at ~29.9K output tokens, so a ceiling near that truncates it on a
+    docset with a large concept vocabulary."""
+    from dgml_core.generation.pipeline import ConvertOptions
+
+    assert ConvertOptions.max_tokens >= 2 * 30_000
+
+
+def test_generate_thinking_flag_defaults_to_none() -> None:
+    """Unset means "defer to [generation] thinking". The flag must not carry a
+    value of its own, or it would silently override the config on every run."""
+    from dgml.cli import _build_parser
+
+    args = _build_parser().parse_args(["docset", "generate", "somedocset"])
+    assert args.thinking is None
+
+
+def test_generate_thinking_flag_accepts_only_known_modes() -> None:
+    """A typo is rejected by argparse rather than reaching the provider as a
+    400 after transcription has already been paid for."""
+    import pytest as _pytest
+    from dgml.cli import _build_parser
+
+    for mode in ("disabled", "adaptive"):
+        args = _build_parser().parse_args(["docset", "generate", "d", "--thinking", mode])
+        assert args.thinking == mode
+    with _pytest.raises(SystemExit):
+        _build_parser().parse_args(["docset", "generate", "d", "--thinking", "sometimes"])
