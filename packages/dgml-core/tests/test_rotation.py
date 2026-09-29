@@ -20,7 +20,6 @@ from io import BytesIO
 from typing import Any
 
 import pytest
-from dgml_core import rotation
 from dgml_core.rotation import (
     ROTATE_MIN_ANGLE_DEG,
     deskew_page,
@@ -143,12 +142,6 @@ def test_deskew_page_small_angle_no_expand_keeps_dims() -> None:
     _new_png, (nw, nh), new_words = deskew_page(png, (w, h), words, 3.0)
     assert (nw, nh) == (w, h)  # expand=False below ROTATE_EXPAND_ANGLE_DEG
     assert new_words and len(new_words[0]["l"]) == 4
-
-
-@pytest.fixture(autouse=True)
-def _reset_pillow_warning_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The Pillow-missing warning fires once per process; reset between tests."""
-    monkeypatch.setattr(rotation, "_WARNED_PILLOW_MISSING", False)
 
 
 def test_deskew_page_pillow_warning_once_per_process(

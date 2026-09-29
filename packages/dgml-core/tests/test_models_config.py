@@ -17,15 +17,7 @@ from __future__ import annotations
 import logging
 
 import pytest
-from dgml_core import models_config
 from dgml_core.models_config import ModelsConfig, Tier
-
-
-@pytest.fixture(autouse=True)
-def _clear_fallback_dedup() -> None:
-    """The fallback warning is deduped per process; reset it so each test starts
-    from a clean slate."""
-    models_config._WARNED_TIER_FALLBACKS.clear()
 
 
 def _warned(caplog: pytest.LogCaptureFixture) -> str:

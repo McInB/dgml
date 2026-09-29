@@ -78,8 +78,10 @@ result, so a flaky local model degrades gracefully. See :func:`_llm_emit_plan`
 for the request/response contract.
 
 Per-page diagnostics and the per-page summary are logged at INFO on this
-module's logger (``dgml_core.hybrid``). The caller decides where they go;
-with no logging configured they go nowhere. Everything is INFO on purpose —
+module's logger (``dgml_core.hybrid``); guard-handled pages — full-page
+scans, unresolved-glyph pages — log their guard notice in place of the
+summary. The caller decides where they go; with no logging configured they
+go nowhere. Everything is INFO on purpose —
 even an unreachable merge LLM, because the heuristic fallback still produces
 complete output, so nothing here demands the caller act (contrast
 ``style_llm``, where an unreachable model leaves the document unstyled and
@@ -947,7 +949,7 @@ def _log_region_decision(
 
     # Split / merge region whose text differs → OCR's tokens win.
     logger.info(
-        "file_id=%s page=%s: tokenization mismatch (%s digital vs %s OCR "
+        "notice: file_id=%s page=%s: tokenization mismatch (%s digital vs %s OCR "
         "words; text differs, levenshtein=%s); digital=%r ocr=%r; "
         "keeping OCR's %s tokens",
         file_id,

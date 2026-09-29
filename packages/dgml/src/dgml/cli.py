@@ -1242,7 +1242,14 @@ def _configure_logging(args: argparse.Namespace) -> None:
     ``--verbose`` stderr is already non-JSON (the traceback goes there too).
 
     Idempotent: ``main()`` runs repeatedly in one process (tests), so a previous
-    run's handler is replaced, not stacked."""
+    run's handler is replaced, not stacked.
+
+    Deliberately process-owning: calling ``main()`` in-process adopts the CLI's
+    routing — levels are set on ``dgml_core``/``dgml`` (clobbering the host's),
+    the stderr handler is added, and ``propagate`` is left on (a host with a
+    root handler sees records twice). ``main()`` is an entry point, not an
+    embedding API; a program that wants dgml in-process with its own logging
+    should call ``dgml_core`` directly."""
     level = logging.INFO if _verbose_enabled(args) else logging.WARNING
     for name in ("dgml_core", "dgml"):
         log = logging.getLogger(name)

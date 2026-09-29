@@ -133,20 +133,6 @@ def _logged(caplog: pytest.LogCaptureFixture) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_merge_default_is_silent(capsys: pytest.CaptureFixture[str]) -> None:
-    """Nothing the merge logs reaches stderr — pytest's own capture keeps the
-    last-resort handler quiet here, so the real default-silence contract (the
-    ``dgml_core`` NullHandler) is proven in ``test_logging_defaults.py``, from
-    a subprocess with no logging configured."""
-    digital = [
-        {"t": "stamp", "l": [200, 200, 260, 220]},  # digital-only, would warn
-        {"t": "Hello", "l": [10, 10, 60, 30]},  # very different from OCR, would warn
-    ]
-    ocr = [{"t": "Greetings", "l": [10, 10, 60, 30]}]
-    _merge_words(digital, ocr, file_id="fid", page_num=1)
-    assert capsys.readouterr().err == ""
-
-
 def test_merge_ocr_only_word_kept_silently(caplog: pytest.LogCaptureFixture) -> None:
     """OCR-only words are always kept — the default outcome, so nothing is
     logged for them beyond the per-page summary."""

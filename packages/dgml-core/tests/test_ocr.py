@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from dgml_core import ocr
 from dgml_core.errors import OcrConfigInvalid, OcrConfigMissing
 from dgml_core.ocr import (
     DEFAULT_OCR_CONCURRENCY,
@@ -45,13 +44,6 @@ from .conftest import make_fake_png, write_ocr_config
 # ---------------------------------------------------------------------------
 # load_ocr_config
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _clear_default_provider_dedup() -> None:
-    """The missing-provider warning is deduped per workspace per process; reset
-    so each test starts from a clean slate."""
-    ocr._WARNED_NO_OCR_PROVIDER.clear()
 
 
 def test_load_ocr_config_default_warning_once_per_workspace(
