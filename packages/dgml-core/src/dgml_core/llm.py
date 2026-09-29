@@ -47,8 +47,9 @@ non-generation call sites share one implementation.
 from __future__ import annotations
 
 import base64
+import io
+import logging
 import re
-import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stdout
@@ -69,6 +70,8 @@ from .usage import (
     extract_cost_and_tokens,
     record_usage,
 )
+
+logger = logging.getLogger(__name__)
 
 # The CLI contract is "stdout = a single JSON object" (see :mod:`dgml.cli`).
 # LiteLLM, by default, prints a "Give Feedback / Get Help" banner to *stdout*
@@ -716,18 +719,54 @@ def _build_completion_kwargs(
     return kwargs
 
 
+class _StdoutToLog(io.TextIOBase):
+    """File-like sink turning a dependency's stray stdout into WARNING records.
+
+    ``write`` buffers until a newline so one log record is one printed line,
+    however the writes were chunked; ``flush`` emits any trailing partial line
+    (called by :func:`_quiet_stdout` on exit, so nothing is dropped)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._buf = ""
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, s: str) -> int:
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                logger.warning("litellm wrote to stdout: %s", line)
+        return len(s)
+
+    def flush(self) -> None:
+        if self._buf.strip():
+            logger.warning("litellm wrote to stdout: %s", self._buf)
+        self._buf = ""
+
+
 @contextmanager
 def _quiet_stdout() -> Iterator[None]:
-    """Redirect anything written to stdout onto stderr for the duration.
+    """Capture anything written to stdout and re-log it at WARNING.
 
     Guards the JSON-on-stdout CLI contract against dependencies (LiteLLM in
-    particular) that ``print`` directly to stdout. ``suppress_debug_info``
-    silences the known LiteLLM banner; this catches the rest. dgml's own
-    output is unaffected — ``_emit`` writes the JSON payload after the
-    completion call returns, outside this block.
+    particular) that ``print`` directly to stdout — raw prints bypass
+    ``logging`` entirely, so a stream-level swap is the only interception.
+    ``suppress_debug_info`` silences the known LiteLLM banner at the source;
+    by the time text lands here it is unclassified dependency output, hence
+    WARNING: visible by default in the CLI, and routed — or silenced — by a
+    library caller like any other ``dgml_core`` record. dgml's own output is
+    unaffected — ``_emit`` writes the JSON payload after the completion call
+    returns, outside this block.
     """
-    with redirect_stdout(sys.stderr):
-        yield
+    sink = _StdoutToLog()
+    try:
+        with redirect_stdout(sink):
+            yield
+    finally:
+        sink.flush()
 
 
 def _completion_with_retry(kwargs: dict[str, Any], *, max_retries: int = 3) -> Any:

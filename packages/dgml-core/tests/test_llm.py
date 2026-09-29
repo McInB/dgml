@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from typing import Any
 
@@ -37,9 +38,14 @@ def test_litellm_debug_banner_suppressed() -> None:
 
 
 def test_completion_with_retry_keeps_stdout_clean(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Anything a completion writes to stdout is redirected to stderr."""
+    """Anything a completion writes to stdout becomes a WARNING record on
+    ``dgml_core.llm`` — stdout stays clean for the JSON payload, and nothing
+    reaches a real stream unless the caller routes it (the CLI shows WARNINGs
+    by default)."""
 
     def chatty_completion(**kwargs: Any) -> dict[str, Any]:
         print("LiteLLM noise on stdout")  # simulating the chatty dependency
@@ -47,12 +53,33 @@ def test_completion_with_retry_keeps_stdout_clean(
 
     monkeypatch.setattr("litellm.completion", chatty_completion)
 
-    result = llm._completion_with_retry({"model": "gpt-4o", "messages": []})
+    with caplog.at_level(logging.WARNING, logger="dgml_core.llm"):
+        result = llm._completion_with_retry({"model": "gpt-4o", "messages": []})
 
     assert result == _resp("OK")
     captured = capsys.readouterr()
     assert captured.out == ""  # stdout stays clean for the JSON payload
-    assert "LiteLLM noise on stdout" in captured.err
+    assert captured.err == ""  # no logging configured -> no stream output
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("LiteLLM noise on stdout" in r.getMessage() for r in warned)
+
+
+def test_stray_stdout_partial_line_is_flushed_as_a_record(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A write with no trailing newline still surfaces: the sink flushes its
+    buffer when the guarded call exits, so nothing a dependency wrote is lost."""
+
+    def chatty_completion(**kwargs: Any) -> dict[str, Any]:
+        sys.stdout.write("partial line, no newline")
+        return _resp("OK")
+
+    monkeypatch.setattr("litellm.completion", chatty_completion)
+
+    with caplog.at_level(logging.WARNING, logger="dgml_core.llm"):
+        llm._completion_with_retry({"model": "gpt-4o", "messages": []})
+
+    assert any("partial line, no newline" in r.getMessage() for r in caplog.records)
 
 
 def test_completion_with_retry_redirects_only_during_call(
