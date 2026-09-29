@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,7 @@ from dgml_core.hybrid import (
     _raster_page_numbers,
     extract_text_hybrid,
 )
-from dgml_core.ocr import OcrConfig, OcrProvider, OcrProviderName
+from dgml_core.ocr import BUILTIN_OCR_PROVIDERS, OcrConfig, OcrProvider, OcrProviderName
 from dgml_core.storage import Workspace
 from dgml_core.text_extraction import TextMode
 
@@ -640,7 +641,7 @@ def test_extract_text_hybrid_scan_guard_end_to_end(
         words_by_page={1: [{"t": "baked!", "l": [100, 70, 190, 100]}]},
     )
     out_dir = tmp_path / "page_text"
-    cfg = OcrConfig(provider=OcrProviderName.AZURE, endpoint="https://x/")
+    cfg = OcrConfig(provider=OcrProviderName.AZURE, options={"endpoint": "https://x/"})
     extract_text_hybrid(pdf, out_dir, file_id="fid", page_images_dir=pages_dir, config=cfg)
     words = json.loads((out_dir / "page_1.json").read_text())["words"]
     assert [w["t"] for w in words] == ["baked!"]
@@ -659,12 +660,14 @@ def _install_fake_provider(
     fail_on_page: int | None = None,
 ) -> None:
     class FakeProvider(OcrProvider):
-        name = OcrProviderName.AZURE
-        config_fields = frozenset[str]()
+        name = OcrProviderName.AZURE.value
+        # Stands in for Azure, so it declares Azure's option: the framework rejects
+        # anything a provider doesn't name, whether or not parse_config checks.
+        config_fields = frozenset({"endpoint"})
 
         @classmethod
-        def parse_config(cls, section: dict[str, Any]) -> OcrConfig:
-            return OcrConfig(provider=cls.name)
+        def parse_config(cls, config: OcrConfig) -> OcrConfig:
+            return config
 
         def __init__(self, config: OcrConfig) -> None:
             self.config = config
@@ -681,9 +684,13 @@ def _install_fake_provider(
                 return []
             return list(words_by_page.get(page_num, []))
 
-    from dgml_core.ocr import _PROVIDERS
-
-    monkeypatch.setitem(_PROVIDERS, OcrProviderName.AZURE, FakeProvider)
+    # Repoint the "azure" alias at the fake rather than reaching into a registry:
+    # these tests drive the workspace config, which says provider = "azure", so the
+    # real resolver still runs end to end.
+    monkeypatch.setattr(sys.modules[__name__], "FakeProvider", FakeProvider, raising=False)
+    monkeypatch.setitem(
+        BUILTIN_OCR_PROVIDERS, OcrProviderName.AZURE.value, f"{__name__}:FakeProvider"
+    )
 
 
 def _seed_page_images(pages_dir: Path, n: int, w: int = 612, h: int = 792) -> None:
@@ -717,7 +724,7 @@ def test_extract_text_hybrid_merges_per_page_and_writes_output(
     )
 
     out_dir = tmp_path / "page_text"
-    cfg = OcrConfig(provider=OcrProviderName.AZURE, endpoint="https://x/")
+    cfg = OcrConfig(provider=OcrProviderName.AZURE, options={"endpoint": "https://x/"})
     result = extract_text_hybrid(
         text_pdf, out_dir, file_id="fid", page_images_dir=pages_dir, config=cfg
     )
@@ -760,7 +767,7 @@ def test_extract_text_hybrid_continues_when_digital_fails(
     )
 
     out_dir = tmp_path / "page_text"
-    cfg = OcrConfig(provider=OcrProviderName.AZURE, endpoint="https://x/")
+    cfg = OcrConfig(provider=OcrProviderName.AZURE, options={"endpoint": "https://x/"})
     result = extract_text_hybrid(
         broken_pdf,
         out_dir,
@@ -782,7 +789,7 @@ def test_extract_text_hybrid_propagates_ocr_failure(
     _seed_page_images(pages_dir, n=2)
     _install_fake_provider(monkeypatch, fail_on_page=1)
 
-    cfg = OcrConfig(provider=OcrProviderName.AZURE, endpoint="https://x/")
+    cfg = OcrConfig(provider=OcrProviderName.AZURE, options={"endpoint": "https://x/"})
     out_dir = tmp_path / "page_text"
     with pytest.raises(OcrFailed):
         extract_text_hybrid(text_pdf, out_dir, file_id="fid", page_images_dir=pages_dir, config=cfg)
