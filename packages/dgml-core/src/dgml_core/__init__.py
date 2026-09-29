@@ -129,7 +129,7 @@ from .ocr import (
     OcrProvider,
     OcrProviderName,
     load_ocr_config,
-    make_provider,
+    make_ocr_provider,
 )
 from .pages import EngineName, PdfConfig, PdfSlicer, load_pdf_config, slice_pages
 from .storage import Workspace
@@ -334,7 +334,7 @@ __all__ = [
     "make_blob_store",
     "make_converter",
     "make_doc_store",
-    "make_provider",
+    "make_ocr_provider",
     "make_workspaces_store",
     "migrate_workspace",
     "new_workspace_id",

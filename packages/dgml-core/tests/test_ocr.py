@@ -33,7 +33,7 @@ from dgml_core.ocr import (
     OcrProviderName,
     extract_text_ocr,
     load_ocr_config,
-    make_provider,
+    make_ocr_provider,
     resolve_provider_class,
 )
 from dgml_core.ocr_aws import AwsProvider
@@ -330,7 +330,7 @@ def test_make_provider_returns_azure_for_azure_config(monkeypatch: pytest.Monkey
             "api_key_env": "TEST_AZURE_KEY",
         },
     )
-    provider = make_provider(cfg)
+    provider = make_ocr_provider(cfg)
     assert isinstance(provider, AzureProvider)
     assert isinstance(provider, OcrProvider)
     assert provider.name == OcrProviderName.AZURE
@@ -338,7 +338,7 @@ def test_make_provider_returns_azure_for_azure_config(monkeypatch: pytest.Monkey
 
 def test_make_provider_returns_aws_for_aws_config() -> None:
     cfg = OcrConfig(provider=OcrProviderName.AWS, options={"region": "us-east-1"})
-    provider = make_provider(cfg)
+    provider = make_ocr_provider(cfg)
     assert isinstance(provider, AwsProvider)
     assert isinstance(provider, OcrProvider)
     assert provider.name == OcrProviderName.AWS
@@ -348,14 +348,14 @@ def test_make_provider_accepts_a_dotted_path(monkeypatch: pytest.MonkeyPatch) ->
     """The built-in short names are aliases, not the namespace: naming the same
     class by its dotted path is equivalent."""
     cfg = OcrConfig(provider="dgml_core.ocr_aws:AwsProvider", options={"region": "us-east-1"})
-    assert isinstance(make_provider(cfg), AwsProvider)
+    assert isinstance(make_ocr_provider(cfg), AwsProvider)
 
 
 def test_make_provider_validates_options(monkeypatch: pytest.MonkeyPatch) -> None:
     """A hand-built config (a library consumer, not load_ocr_config) is still run
     through the provider's own parse_config."""
     with pytest.raises(OcrConfigInvalid, match="region"):
-        make_provider(OcrConfig(provider=OcrProviderName.AWS))
+        make_ocr_provider(OcrConfig(provider=OcrProviderName.AWS))
 
 
 def test_custom_provider_can_drive_extract_text_ocr(
@@ -659,7 +659,7 @@ def test_load_ocr_config_accepts_a_custom_dotted_path(
     cfg = load_ocr_config(workspace)
     assert cfg.provider == path
     assert cfg.options["lang"] == "eng"
-    assert isinstance(make_provider(cfg), TesseractProvider)
+    assert isinstance(make_ocr_provider(cfg), TesseractProvider)
 
 
 def test_universal_fields_are_not_offered_to_a_custom_provider(
@@ -735,6 +735,106 @@ def test_unknown_field_reports_config_error_even_without_a_declared_name(
         load_ocr_config(workspace)
     # Falls back to the class name so the message still identifies the provider.
     assert "NamelessProvider" in str(exc.value)
+
+
+def test_resolve_rejects_the_abstract_base_class() -> None:
+    """`issubclass` is satisfied by the ABC itself, which cannot be instantiated.
+    Caught at resolve time as a config error rather than surfacing later as a
+    TypeError from `replace(None, …)` or from construction — i.e. INTERNAL_ERROR."""
+    with pytest.raises(OcrConfigInvalid, match="abstract class") as exc:
+        resolve_provider_class("dgml_core.ocr:OcrProvider")
+    assert "analyze_image" in str(exc.value)
+
+
+def test_resolve_rejects_a_half_implemented_subclass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same guard covers a third party's subclass that left a method out — the
+    message names which, so the author knows what to finish."""
+
+    class HalfDone(OcrProvider):
+        name = "halfdone"
+        config_fields = frozenset()
+
+        @classmethod
+        def parse_config(cls, config: OcrConfig) -> OcrConfig:
+            return config
+
+        def __init__(self, config: OcrConfig) -> None:
+            pass
+
+        # analyze_image deliberately not implemented
+
+    # Abstract on purpose — that is the thing under test.
+    path = install_provider(monkeypatch, HalfDone)  # type: ignore[type-abstract]
+    with pytest.raises(OcrConfigInvalid, match="abstract class") as exc:
+        resolve_provider_class(path)
+    assert "analyze_image" in str(exc.value)
+
+
+def test_parse_config_that_forgets_to_return_is_a_config_error(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `parse_config` that validates but falls off the end returns None. Without
+    this guard the provider is constructed with None as its config — no exception,
+    just a provider holding nothing — or `replace(None, …)` raises TypeError."""
+
+    class Forgetful(OcrProvider):
+        name = "forgetful"
+        config_fields = frozenset()
+
+        @classmethod
+        def parse_config(cls, config: OcrConfig) -> OcrConfig:
+            return None  # type: ignore[return-value]
+
+        def __init__(self, config: OcrConfig) -> None:
+            pass
+
+        def analyze_image(
+            self,
+            image_bytes: bytes,
+            image_dims_px: tuple[int, int],
+            page_num: int,
+        ) -> list[dict[str, Any]]:
+            return []
+
+    path = install_provider(monkeypatch, Forgetful)
+    write_ocr_config(workspace, {"provider": path})
+    with pytest.raises(OcrConfigInvalid, match="must return an OcrConfig"):
+        load_ocr_config(workspace)
+    # Same guard on the construction path, which runs parse_config independently.
+    with pytest.raises(OcrConfigInvalid, match="must return an OcrConfig"):
+        make_ocr_provider(OcrConfig(provider=path))
+
+
+def test_unknown_fields_rejected_even_if_the_provider_never_checks(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Typo rejection is the framework's job, not opt-in on whether a third party
+    remembered to call a private helper — a provider that never checks still gets
+    its user's misspelled option rejected."""
+
+    class Trusting(OcrProvider):
+        name = "trusting"
+        config_fields = frozenset({"lang"})
+
+        @classmethod
+        def parse_config(cls, config: OcrConfig) -> OcrConfig:
+            return config  # never calls _check_no_extra_fields
+
+        def __init__(self, config: OcrConfig) -> None:
+            pass
+
+        def analyze_image(
+            self,
+            image_bytes: bytes,
+            image_dims_px: tuple[int, int],
+            page_num: int,
+        ) -> list[dict[str, Any]]:
+            return []
+
+    path = install_provider(monkeypatch, Trusting)
+    write_ocr_config(workspace, {"provider": path, "languag": "eng"})
+    with pytest.raises(OcrConfigInvalid, match="unknown fields"):
+        load_ocr_config(workspace)
 
 
 def test_load_ocr_config_runs_custom_provider_validation(

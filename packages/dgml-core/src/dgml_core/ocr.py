@@ -214,8 +214,33 @@ def _parse_section(provider: str, section: Mapping[str, Any]) -> OcrConfig:
     fields, then attach the universal ones DGML parses itself."""
     cls = resolve_provider_class(provider)
     options = {k: v for k, v in section.items() if k not in UNIVERSAL_OCR_FIELDS}
-    cfg = cls.parse_config(OcrConfig(provider=provider, options=options))
+    cfg = _run_parse_config(cls, OcrConfig(provider=provider, options=options))
     return replace(cfg, max_concurrency=_parse_max_concurrency(section))
+
+
+def _run_parse_config(cls: type[OcrProvider], config: OcrConfig) -> OcrConfig:
+    """Reject unknown option keys, run ``cls.parse_config``, and check what it gave back.
+
+    The unknown-key check runs **here** rather than only inside each provider, so
+    rejecting a user's typo is guaranteed by the framework instead of being opt-in on
+    whether a third party remembered to call it. Bundled providers still call it
+    themselves; it is idempotent, and leaving it there keeps ``parse_config`` correct
+    for anyone invoking it directly.
+
+    Validating the return matters because the failure is otherwise silent: a
+    ``parse_config`` that ends without ``return config`` yields ``None``, and the
+    provider is then constructed with ``None`` as its config — no error, just a
+    provider holding nothing.
+    """
+    cls._check_no_extra_fields(config.options)
+    parsed = cls.parse_config(config)
+    if not isinstance(parsed, OcrConfig):
+        raise OcrConfigInvalid(
+            f"{cls._describe()!r}.parse_config must return an OcrConfig, got "
+            f"{type(parsed).__name__} — a parse_config that validates but forgets to "
+            f"`return config` lands here."
+        )
+    return parsed
 
 
 def _parse_max_concurrency(ocr: Mapping[str, Any]) -> int:
@@ -367,15 +392,16 @@ class OcrProvider(ProviderConfigFields, ABC):
         """
 
 
-def make_provider(config: OcrConfig) -> OcrProvider:
+def make_ocr_provider(config: OcrConfig) -> OcrProvider:
     """Instantiate the :class:`OcrProvider` named by ``config`` (resolve provider →
     ``parse_config`` → construct, where the provider's lazy SDK import happens).
 
-    Re-runs ``parse_config`` rather than trusting the caller: it is idempotent for a
-    config that came from :func:`load_ocr_config`, and it is what validates one built
-    by hand (a library consumer, a test)."""
+    Re-runs ``parse_config`` rather than trusting the caller: it is what validates a
+    config built by hand (a library consumer, a test), and for one that came from
+    :func:`load_ocr_config` it is a no-op — which is why ``parse_config`` is required
+    to be pure and idempotent."""
     cls = resolve_provider_class(config.provider)
-    return cls(cls.parse_config(config))
+    return cls(_run_parse_config(cls, config))
 
 
 def extract_text_ocr(
@@ -421,7 +447,7 @@ def extract_text_ocr(
     Raises :class:`OcrFailed` for provider/API errors, :class:`AuthError`
     for credential resolution failures.
     """
-    provider = make_provider(config)
+    provider = make_ocr_provider(config)
     workers = config.max_concurrency if max_concurrency is None else max_concurrency
 
     page_image_paths = sorted(page_images_dir.glob(PAGE_GLOB))

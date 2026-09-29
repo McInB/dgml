@@ -34,6 +34,7 @@ import it without a cycle.
 from __future__ import annotations
 
 import importlib
+import inspect
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
@@ -141,5 +142,15 @@ def import_provider_class(
     if not (isinstance(obj, type) and issubclass(obj, base)):
         raise error(
             f"provider {provider!r} resolved to {obj!r}, which is not a {base.__name__} subclass"
+        )
+    # `issubclass` is satisfied by the ABC itself and by any half-finished subclass,
+    # neither of which can be instantiated. Rejecting them here keeps the failure a
+    # config error naming the provider, rather than a TypeError from deep in
+    # construction that surfaces as INTERNAL_ERROR.
+    if inspect.isabstract(obj):
+        missing = sorted(getattr(obj, "__abstractmethods__", ()))
+        raise error(
+            f"provider {provider!r} resolved to abstract class {obj.__name__!r} "
+            f"(missing implementations: {missing}). Name a concrete subclass."
         )
     return obj

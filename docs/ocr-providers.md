@@ -90,10 +90,9 @@ from its dotted path.
 
        @classmethod
        def parse_config(cls, config: OcrConfig) -> OcrConfig:
-           cls._check_no_extra_fields(config.options)
            if not isinstance(config.options.get("lang"), str):
                raise OcrConfigInvalid("tesseract OCR requires 'ocr.lang'")
-           return config
+           return config          # must return it — see the contract below
 
        def __init__(self, config: OcrConfig) -> None:
            ...   # lazy-import your SDK; raise MissingExtra if it isn't installed
@@ -112,6 +111,18 @@ from its dotted path.
    file on `PYTHONPATH`, referenced by module name (the filename without `.py`).
 4. Point `ocr.provider` at the dotted path, with your options alongside it.
 
+### The contract your `parse_config` must honor
+
+- **Return the config.** Validate, then `return config` (or a normalized copy).
+  A `parse_config` that validates and falls off the end returns `None`, which is
+  rejected with `OCR_CONFIG_INVALID` rather than handing your provider nothing.
+- **Be pure and idempotent.** It runs twice — once when the config is loaded
+  (the up-front gate `file add` relies on) and again when the provider is
+  constructed. Don't open connections, read files, or mutate state in it; do
+  that in `__init__`.
+- **Raise `OcrConfigInvalid`** for a missing or malformed option of your own.
+  Unknown keys are already handled for you.
+
 ### The contract your `analyze_image` must honor
 
 - **Return shape** is a list of `{"t": <text>, "l": [left, top, right, bottom]}`,
@@ -128,11 +139,12 @@ from its dotted path.
   (default 5).
 - **Failures** raise `OcrFailed` (or `AuthError` from `__init__`). The loop does
   not retry; the first failure cancels pending pages.
-- `config_fields` lists every option key you accept. Anything else in the
-  section is rejected for the user with a "unknown fields" error, which is what
-  catches typos and fields left behind after switching provider. The universal
-  keys — `provider` and `max_concurrency` — are DGML's own and never reach you,
-  so leave them out of `config_fields`.
+- `config_fields` lists every option key you accept. DGML rejects anything else
+  before calling you, with an "unknown fields" error naming the allowed keys —
+  that is what catches typos and options left behind after switching provider,
+  and you don't have to implement it. The universal keys — `provider` and
+  `max_concurrency` — are DGML's own and never reach you, so leave them out of
+  `config_fields`.
 
 **Note on trust:** a dotted `provider` path runs arbitrary code from your
 config, as you — the same trust model as `[conversion]` and `[storage]`. Keep
@@ -160,4 +172,6 @@ your `config.toml` under your own control.
 | `could not import ocr module …` | The module isn't importable by the interpreter running `dgml` — check the venv and `PYTHONPATH`. |
 | `module … has no attribute …` | The class name after `:` is wrong. |
 | `… is not a OcrProvider subclass` | The path resolved to something else (a storage backend, a function). |
+| `… resolved to abstract class …` | The path names the base class, or a subclass that doesn't implement every abstract method (the message lists which). |
+| `….parse_config must return an OcrConfig` | Your `parse_config` validated but didn't `return config`. |
 | `unknown fields in 'ocr' for provider …` | An option the provider doesn't declare in `config_fields` — a typo, or left over from a previous provider. |

@@ -649,7 +649,9 @@ def _install_fake_provider(
 ) -> None:
     class FakeProvider(OcrProvider):
         name = OcrProviderName.AZURE.value
-        config_fields = frozenset[str]()
+        # Stands in for Azure, so it declares Azure's option: the framework rejects
+        # anything a provider doesn't name, whether or not parse_config checks.
+        config_fields = frozenset({"endpoint"})
 
         @classmethod
         def parse_config(cls, config: OcrConfig) -> OcrConfig:
