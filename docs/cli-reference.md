@@ -1450,7 +1450,7 @@ existing record that does not carry the requested id.
 | `--text-mode` | Behavior |
 |---|---|
 | `digital` (default) | Extract digital text from the PDF with `pdfminer.six`. A permanent text-extraction error is recorded for files with no digital text — the File record is still created (soft fail). |
-| `ocr` | Send each rendered page image to the cloud provider configured in `<workspace>/config.toml`. Requires the `azure` or `aws` extra (`uv sync --extra azure` / `uv sync --extra aws` from a repo checkout; `pip install dgml[azure]`/`dgml[aws]` once DGML is published to PyPI). See "OCR configuration" below. |
+| `ocr` | Send each rendered page image to the provider configured in `<workspace>/config.toml` (a bundled one, or your own — see [ocr-providers.md](ocr-providers.md)). The bundled cloud providers require the `azure` or `aws` extra (`uv sync --extra azure` / `uv sync --extra aws` from a repo checkout; `pip install dgml[azure]`/`dgml[aws]` once DGML is published to PyPI). See "OCR configuration" below. |
 | `hybrid` | Run `digital` then `ocr` and merge the two per-page results by grouping words covering the same area into overlap regions (boxes overlap on IoU > 0.5 *or* one mostly contained in the other, so split/merge tokenization is resolved as a unit). Each region is resolved as a whole: OCR-only regions are kept; digital-only regions (no overlapping OCR) are assumed invisible to the human eye and dropped; mixed regions compare both sides' concatenated text by dash-normalized Levenshtein distance — if they agree (distance ≤ 2) digital wins (its characters come straight from the PDF font, more reliable than OCR even when OCR's tokenization is finer), and if they disagree OCR wins. A page whose digital text is mostly unresolved glyphs (pdfminer `(cid:N)` sentinels) falls back to OCR entirely. Default is silent — pass the global `--verbose` flag to surface per-page warnings and the merge summary on stderr. Requires the same `ocr` workspace config as `--text-mode ocr`. Optionally, an LLM can make the per-region decision instead of this heuristic — declare a `text_extraction` section in `config.toml` (e.g. a local Ollama model); see [storage-layout.md](storage-layout.md#text_extraction-optional). Any LLM failure falls back to the heuristic for that page. |
 
 `--dpi N` sets the resolution page images are rasterized at, in dots per
@@ -1506,7 +1506,7 @@ Error codes that can come back on `file add`:
 | Code | Cause |
 |---|---|
 | `OCR_CONFIG_MISSING` | `--text-mode ocr` or `--text-mode hybrid` but `<workspace>/config.toml` is missing or has no `ocr` section. No record is created. |
-| `OCR_CONFIG_INVALID` | `<workspace>/config.toml` has an `ocr` section with invalid fields. No record is created. |
+| `OCR_CONFIG_INVALID` | `<workspace>/config.toml` has an `ocr` section with invalid fields, or names a provider that cannot be imported / is not an `OcrProvider`. No record is created. |
 | `TEXT_EXTRACTION_CONFIG_INVALID` | `--text-mode hybrid` but the optional `text_extraction` section in `<workspace>/config.toml` is malformed. No record is created. |
 | `UNSUPPORTED_FILE_TYPE` | Path is not a `.pdf` and is not a convertible source with a converter configured for its format family. |
 | `INVALID_PDF` | File does not start with the `%PDF-` magic. |
@@ -1762,6 +1762,23 @@ When `--text-mode ocr` is used, the provider and its settings come from
 into source control, so secrets *may* live directly in `config.toml`
 (`api_key`) — but the safer default is to use `api_key_env` and keep
 the key in an environment variable.
+
+`ocr.provider` accepts a bundled short name (`azure`, `aws`, `macos`) **or** a
+dotted `"module.path:ClassName"` naming your own `OcrProvider` subclass, with
+its options alongside it in the same table:
+
+```json
+{
+  "ocr": {
+    "provider": "my_pkg.tesseract:TesseractProvider",
+    "lang": "eng"
+  }
+}
+```
+
+The short names are aliases for the bundled classes' own dotted paths — there
+is no privileged built-in set. See [ocr-providers.md](ocr-providers.md) for the
+provider contract and a worked example.
 
 ### Azure Document Intelligence
 
@@ -2373,7 +2390,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `CONVERSION_CONFIG_INVALID` | hard | The `conversion` config section is malformed. |
 | `CONVERSION_FAILED` | hard / soft | A docx/xlsx→PDF conversion failed (soft as `conversion_error` on a bulk add entry); also raised by `extraction generate-schema` and `extraction extract` for a file that has no PDF because its conversion failed. |
 | `OCR_CONFIG_MISSING` | hard | `--text-mode ocr`/`hybrid` with no `ocr` config section. |
-| `OCR_CONFIG_INVALID` | hard | The `ocr` config section has invalid fields. |
+| `OCR_CONFIG_INVALID` | hard | The `ocr` config section has invalid fields, or names a provider that cannot be resolved. |
 | `OCR_FAILED` | soft | Provider API failure during `--text-mode ocr`/`hybrid`; recorded on the File (`text_extraction_error`). |
 | `TEXT_EXTRACTION_CONFIG_INVALID` | hard | The optional `text_extraction` (hybrid-merge) config is malformed. |
 | `STYLE_CONFIG_INVALID` | hard | The optional `style` (image-based `dg:style` for OCR files) config section is malformed; fails `generate` up front. |

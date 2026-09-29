@@ -123,6 +123,14 @@ from .migrations import (
     workspace_schema_version,
 )
 from .models import DocSet, FileRecord
+from .ocr import (
+    BUILTIN_OCR_PROVIDERS,
+    OcrConfig,
+    OcrProvider,
+    OcrProviderName,
+    load_ocr_config,
+    make_ocr_provider,
+)
 from .pages import EngineName, PdfConfig, PdfSlicer, load_pdf_config, slice_pages
 from .storage import Workspace
 from .storage_local import LocalStore
@@ -196,6 +204,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "BUILTIN_OCR_PROVIDERS",
     "DEFAULT_STORAGE_PROVIDER",
     "DEFAULT_STORAGE_SERVICE",
     "DEFAULT_WORKSPACES_PROVIDER",
@@ -264,9 +273,12 @@ __all__ = [
     "ModelsConfigInvalid",
     "NoExistingDocSets",
     "NotFoundError",
+    "OcrConfig",
     "OcrConfigInvalid",
     "OcrConfigMissing",
     "OcrFailed",
+    "OcrProvider",
+    "OcrProviderName",
     "PageRenderFailed",
     "PdfConfig",
     "PdfConfigInvalid",
@@ -315,12 +327,14 @@ __all__ = [
     "is_workspace_id",
     "layout",
     "load_conversion_config",
+    "load_ocr_config",
     "load_pdf_config",
     "load_store_configs",
     "load_workspaces_config",
     "make_blob_store",
     "make_converter",
     "make_doc_store",
+    "make_ocr_provider",
     "make_workspaces_store",
     "migrate_workspace",
     "new_workspace_id",

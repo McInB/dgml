@@ -37,19 +37,29 @@ rename one.
 ## OCR providers
 
 `--text-mode ocr` dispatches through an `OcrProvider` ABC defined in
-[src/dgml_core/ocr.py](src/dgml_core/ocr.py). Concrete providers live in sibling
-modules — `src/dgml_core/ocr_aws.py`, `src/dgml_core/ocr_azure.py`,
-`src/dgml_core/ocr_macos.py` — and register themselves via the `_PROVIDERS`
-dict at the bottom of `ocr.py`.
+[src/dgml_core/ocr.py](src/dgml_core/ocr.py). Like `[conversion]` and
+`[storage]`, `ocr.provider` is a dotted `"module.path:ClassName"` resolved at
+use time via `dgml_core.provider.import_provider_class` — **there is no registry
+of privileged classes.** The providers DGML bundles
+(`src/dgml_core/ocr_aws.py`, `src/dgml_core/ocr_azure.py`,
+`src/dgml_core/ocr_macos.py`) are named by exactly the same kind of path a third
+party's would be; `BUILTIN_OCR_PROVIDERS` maps the short names `aws` / `azure` /
+`macos` onto them so existing configs keep working.
 
 Each provider owns three things: its SDK lazy-import (in `__init__`),
-its config-section validation (`parse_config` classmethod), and its
-per-page API call (`analyze_image`). The shared loop in
-`extract_text_ocr` handles filesystem I/O and result aggregation —
-providers never touch the disk.
+its config-option validation (`parse_config` classmethod, which receives the
+`[ocr]` table minus `provider` as `config.options`), and its per-page API call
+(`analyze_image`). The shared loop in `extract_text_ocr` handles filesystem I/O
+and result aggregation — providers never touch the disk.
 
-To add a new provider: see the "Adding a new provider" section in the
-[src/dgml_core/ocr.py](src/dgml_core/ocr.py) module docstring.
+Unlike `load_conversion_config`, `load_ocr_config` resolves the provider class
+and runs its validation **eagerly**: `file add` validates OCR config before it
+touches the filesystem, so a bad `[ocr]` table is rejected with no record
+created. A workspace names exactly one OCR provider, so there is no fan-out cost.
+
+To write a new provider: see the "Writing your own provider" section in the
+[src/dgml_core/ocr.py](src/dgml_core/ocr.py) module docstring, and
+[docs/ocr-providers.md](../../docs/ocr-providers.md).
 
 ## PDF engines
 
