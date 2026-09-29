@@ -13,10 +13,11 @@
 """Resolving a dotted ``"module.path:ClassName"`` provider string to its class.
 
 DGML lets a third party name an implementation by dotted path in ``config.toml`` —
-a workspace's blob store and document store (:mod:`dgml_core.storage_resolve`), and
-the machine's store of workspaces (:mod:`dgml_core.workspaces_resolve`). All of them
-need the same import-then-check-the-base-class step, with the same actionable
-messages, so it lives here once.
+a workspace's blob store and document store (:mod:`dgml_core.storage_resolve`), the
+machine's store of workspaces (:mod:`dgml_core.workspaces_resolve`), and the
+workspace's OCR backend (:mod:`dgml_core.ocr`). All of them need the same
+import-then-check-the-base-class step, with the same actionable messages, so it lives
+here once.
 
 The base-class check is load-bearing beyond catching typos: it is what keeps the
 provider namespaces from bleeding into each other. A ``[storage]`` table naming a
@@ -80,45 +81,50 @@ def import_provider_class(
     *,
     kind: str = "storage",
     default_hint: str | None = None,
+    error: type[DgmlError] = StorageProviderUnresolvable,
 ) -> Any:
     """Import the dotted ``"module.path:ClassName"`` ``provider`` and check it is a
     subclass of ``base``.
 
-    ``kind`` names the config section in failure messages ("storage", "workspaces");
-    ``default_hint`` is the bundled provider to suggest when the string is malformed,
-    omitted when the section has no default worth naming.
+    ``kind`` names the config section in failure messages ("storage", "workspaces",
+    "ocr"); ``default_hint`` is the bundled provider to suggest when the string is
+    malformed, omitted when the section has no default worth naming.
 
-    Raises :class:`~dgml_core.errors.StorageProviderUnresolvable` if the string is
-    malformed, the module/attribute can't be imported, or the target is not a ``base``
-    subclass — the last catches "a doc provider used where a blob provider is
-    required", and equally "a store used where a workspaces store is required".
+    ``error`` is the exception raised for every failure here, so a section keeps its
+    own documented error code rather than borrowing storage's: the ``[ocr]`` table
+    reports :class:`~dgml_core.errors.OcrConfigInvalid` (``OCR_CONFIG_INVALID``), the
+    same way :attr:`ProviderConfigFields.config_error` already lets a section own the
+    unknown-field failure.
+
+    Raises ``error`` if the string is malformed, the module/attribute can't be
+    imported, or the target is not a ``base`` subclass — the last catches "a doc
+    provider used where a blob provider is required", and equally "a store used where
+    a workspaces store is required".
     Returns the class (``Any``: it is a concrete subclass only known at runtime)."""
     if ":" not in provider:
         hint = f"; the bundled default is {default_hint!r}" if default_hint else ""
-        raise StorageProviderUnresolvable(
+        raise error(
             f"{kind} provider must be a dotted path 'module.path:ClassName' "
             f"(got {provider!r}){hint}"
         )
     module_path, _, class_name = provider.partition(":")
     if not module_path or not class_name:
-        raise StorageProviderUnresolvable(
-            f"{kind} provider {provider!r} must have the form 'module.path:ClassName'"
-        )
+        raise error(f"{kind} provider {provider!r} must have the form 'module.path:ClassName'")
     try:
         module = importlib.import_module(module_path)
     except ImportError as exc:
-        raise StorageProviderUnresolvable(
+        raise error(
             f"could not import {kind} module {module_path!r} for provider {provider!r}: "
             f"{exc}. Is the package installed in this environment?"
         ) from exc
     try:
         obj = getattr(module, class_name)
     except AttributeError as exc:
-        raise StorageProviderUnresolvable(
+        raise error(
             f"module {module_path!r} has no attribute {class_name!r} (provider {provider!r})"
         ) from exc
     if not (isinstance(obj, type) and issubclass(obj, base)):
-        raise StorageProviderUnresolvable(
+        raise error(
             f"provider {provider!r} resolved to {obj!r}, which is not a {base.__name__} subclass"
         )
     return obj
