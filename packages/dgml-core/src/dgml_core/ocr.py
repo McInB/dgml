@@ -58,9 +58,9 @@ an actionable message.
 from __future__ import annotations
 
 import json
+import logging
 import struct
 import sys
-import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -81,6 +81,15 @@ from .text_extraction import (
     PAGE_TEXT_GLOB,
     ExtractDigitalResult,
 )
+
+logger = logging.getLogger(__name__)
+
+# Workspace roots whose missing-OCR-provider fallback was already announced this
+# process. A bulk add validates and then extracts — two `load_ocr_config` calls
+# per file — so without dedup the same line would repeat ~2N times. Keyed by
+# workspace root because the missing section is per-workspace state: a process
+# that opens a second, equally unconfigured workspace still hears about it.
+_WARNED_NO_OCR_PROVIDER: set[Path] = set()
 
 # Pages within a file are OCR'd concurrently (one provider call per page). This
 # is the default number of in-flight OCR calls; override per workspace with
@@ -189,7 +198,7 @@ def load_ocr_config(workspace: Workspace) -> OcrConfig:
         # Absent or empty. Unlike `style` / `text_extraction`, this section's mere
         # presence carries no meaning — `provider` is what selects a backend — so
         # a bare `[ocr]` is the same as none at all rather than a misconfiguration.
-        return _default_ocr_config()
+        return _default_ocr_config(workspace)
     if not isinstance(ocr, dict):
         raise OcrConfigInvalid("'ocr' must be a table")
 
@@ -254,11 +263,12 @@ def _parse_max_concurrency(ocr: Mapping[str, Any]) -> int:
     return raw
 
 
-def _default_ocr_config() -> OcrConfig:
+def _default_ocr_config(workspace: Workspace) -> OcrConfig:
     """Config used when the workspace declares no OCR provider.
 
     macOS ships a built-in on-device engine (Apple Vision), so we default
-    to it — emitting a warning that we're doing so. Other platforms have no
+    to it — warning that we're doing so, once per workspace per process
+    (see :data:`_WARNED_NO_OCR_PROVIDER`). Other platforms have no
     built-in OCR, so a missing config is an error the user must fix by
     declaring a provider.
 
@@ -271,11 +281,16 @@ def _default_ocr_config() -> OcrConfig:
             "with provider 'aws' or 'azure' — or your own 'module.path:ClassName' "
             "(on-device OCR is only available on macOS)"
         )
-    warnings.warn(
-        "no OCR provider configured; defaulting to the on-device macOS provider "
-        "(Apple Vision). Set ocr.provider in config.toml to silence this warning.",
-        stacklevel=2,
-    )
+    if workspace.root not in _WARNED_NO_OCR_PROVIDER:
+        _WARNED_NO_OCR_PROVIDER.add(workspace.root)
+        # Names the workspace because the dedup is per workspace: a process
+        # holding several must be able to tell the resulting lines apart.
+        logger.warning(
+            "no OCR provider configured for workspace (%s); defaulting to the "
+            "on-device macOS provider (Apple Vision). Set ocr.provider in "
+            "config.toml to silence this warning.",
+            workspace.root,
+        )
     return _parse_section(DEFAULT_OCR_PROVIDER.value, {})
 
 
