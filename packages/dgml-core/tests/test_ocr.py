@@ -701,6 +701,42 @@ def test_universal_fields_are_not_offered_to_a_custom_provider(
     assert cfg.max_concurrency == 3
 
 
+def test_unknown_field_reports_config_error_even_without_a_declared_name(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``name`` is a plain ClassVar, so an ABC cannot force a third party to declare
+    it. A provider that omits it must still produce OCR_CONFIG_INVALID for a user's
+    typo — not an AttributeError surfacing as INTERNAL_ERROR and blaming DGML for
+    what is the provider author's omission."""
+
+    class NamelessProvider(OcrProvider):
+        config_fields = frozenset({"lang"})
+
+        @classmethod
+        def parse_config(cls, config: OcrConfig) -> OcrConfig:
+            cls._check_no_extra_fields(config.options)
+            return config
+
+        def __init__(self, config: OcrConfig) -> None:
+            pass
+
+        def analyze_image(
+            self,
+            image_bytes: bytes,
+            image_dims_px: tuple[int, int],
+            page_num: int,
+        ) -> list[dict[str, Any]]:
+            return []
+
+    path = install_provider(monkeypatch, NamelessProvider)
+    write_ocr_config(workspace, {"provider": path, "languag": "eng"})
+
+    with pytest.raises(OcrConfigInvalid, match="unknown fields") as exc:
+        load_ocr_config(workspace)
+    # Falls back to the class name so the message still identifies the provider.
+    assert "NamelessProvider" in str(exc.value)
+
+
 def test_load_ocr_config_runs_custom_provider_validation(
     workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

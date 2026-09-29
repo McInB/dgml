@@ -52,7 +52,11 @@ class ProviderConfigFields:
     Shared rather than copied so the two sections cannot drift apart in wording, and
     so a third provider kind gets the same behaviour by inheriting it."""
 
-    #: The provider's short name, used in failure messages.
+    #: The provider's short name, used in failure messages. Annotated rather than
+    #: defaulted because every bundled provider sets it — but an ABC cannot enforce
+    #: a ClassVar the way it enforces an abstract method, so a third party's class
+    #: may omit it. :meth:`_describe` falls back to the class name rather than
+    #: letting an AttributeError escape from the error path.
     name: ClassVar[str]
 
     #: Option keys this provider accepts. Empty means "no options at all".
@@ -65,12 +69,23 @@ class ProviderConfigFields:
     config_error: ClassVar[type[DgmlError]] = StorageConfigInvalid
 
     @classmethod
+    def _describe(cls) -> str:
+        """The provider's name for failure messages, falling back to the class name.
+
+        A third party's provider that forgot to declare ``name`` is a config error
+        waiting to be *reported*, not a reason for the reporting itself to raise —
+        without this, a user's typo'd option surfaces as ``INTERNAL_ERROR`` from an
+        AttributeError instead of the section's own actionable code.
+        """
+        return getattr(cls, "name", cls.__name__)
+
+    @classmethod
     def _check_no_extra_fields(cls, options: Mapping[str, Any]) -> None:
         """Raise ``cls.config_error`` for any option key not in ``cls.config_fields``."""
         unknown = set(options) - cls.config_fields
         if unknown:
             raise cls.config_error(
-                f"unknown fields in {cls.config_section!r} for provider {cls.name!r}: "
+                f"unknown fields in {cls.config_section!r} for provider {cls._describe()!r}: "
                 f"{sorted(unknown)}. Allowed: {sorted(cls.config_fields)}"
             )
 
