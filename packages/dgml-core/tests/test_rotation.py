@@ -14,11 +14,13 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from io import BytesIO
 from typing import Any
 
 import pytest
+from dgml_core import rotation
 from dgml_core.rotation import (
     ROTATE_MIN_ANGLE_DEG,
     deskew_page,
@@ -143,16 +145,36 @@ def test_deskew_page_small_angle_no_expand_keeps_dims() -> None:
     assert new_words and len(new_words[0]["l"]) == 4
 
 
+@pytest.fixture(autouse=True)
+def _reset_pillow_warning_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Pillow-missing warning fires once per process; reset between tests."""
+    monkeypatch.setattr(rotation, "_WARNED_PILLOW_MISSING", False)
+
+
+def test_deskew_page_pillow_warning_once_per_process(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Pillow availability is process-global, so a multi-page skewed scan logs
+    the install hint once — not once per page, whatever the angles."""
+    monkeypatch.setitem(sys.modules, "PIL", None)
+    words = [{"t": "x", "l": [1, 2, 3, 4]}]
+    with caplog.at_level(logging.WARNING, logger="dgml_core.rotation"):
+        for angle in (3.17, 2.94, 1.5):
+            deskew_page(b"not-a-real-png", (10, 10), words, angle)
+    assert caplog.text.count("Pillow is not installed") == 1
+
+
 def test_deskew_page_without_pillow_noops_with_warning(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """If Pillow is unavailable, deskew returns inputs unchanged and warns —
     OCR text is still usable, just not deskewed."""
     monkeypatch.setitem(sys.modules, "PIL", None)
     words = [{"t": "x", "l": [1, 2, 3, 4]}]
     original = b"not-a-real-png"
-    with pytest.warns(UserWarning, match="Pillow is not installed"):
+    with caplog.at_level(logging.WARNING, logger="dgml_core.rotation"):
         out_bytes, out_dims, out_words = deskew_page(original, (10, 10), words, 15.0)
+    assert "Pillow is not installed" in caplog.text
     assert out_bytes is original
     assert out_dims == (10, 10)
     assert out_words == words

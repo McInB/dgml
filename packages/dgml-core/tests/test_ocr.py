@@ -19,11 +19,13 @@ Provider-specific tests (Azure, AWS) live in ``test_ocr_azure.py`` and
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+from dgml_core import ocr
 from dgml_core.errors import OcrConfigInvalid, OcrConfigMissing
 from dgml_core.ocr import (
     DEFAULT_OCR_CONCURRENCY,
@@ -45,14 +47,47 @@ from .conftest import make_fake_png, write_ocr_config
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _clear_default_provider_dedup() -> None:
+    """The missing-provider warning is deduped per workspace per process; reset
+    so each test starts from a clean slate."""
+    ocr._WARNED_NO_OCR_PROVIDER.clear()
+
+
+def test_load_ocr_config_default_warning_once_per_workspace(
+    workspace: Workspace,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The fallback line is deduped per workspace: a bulk add validates and then
+    extracts (two ``load_ocr_config`` calls per file), which must not repeat it —
+    while a *different* unconfigured workspace in the same process still gets
+    its own line."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    with caplog.at_level(logging.WARNING, logger="dgml_core.ocr"):
+        load_ocr_config(workspace)
+        load_ocr_config(workspace)  # a file add: validate, then extract
+        assert caplog.text.count("defaulting to the on-device macOS") == 1
+
+        other = Workspace(root=tmp_path / "ws2")
+        other.root.mkdir(parents=True, exist_ok=True)
+        load_ocr_config(other)
+    assert caplog.text.count("defaulting to the on-device macOS") == 2
+    # Each line names its workspace — that is what makes two lines useful.
+    assert str(workspace.root) in caplog.text
+    assert str(other.root) in caplog.text
+
+
 def test_load_ocr_config_defaults_to_macos_on_darwin(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """On macOS, a missing config defaults to the on-device provider and
     warns that it's doing so."""
     monkeypatch.setattr(sys, "platform", "darwin")
-    with pytest.warns(UserWarning, match="defaulting to the on-device macOS"):
+    with caplog.at_level(logging.WARNING, logger="dgml_core.ocr"):
         cfg = load_ocr_config(workspace)
+    assert "defaulting to the on-device macOS" in caplog.text
     assert cfg.provider is OcrProviderName.MACOS
 
 
@@ -67,15 +102,16 @@ def test_load_ocr_config_no_config_raises_off_darwin(
 
 
 def test_load_ocr_config_no_ocr_section_defaults_to_macos_on_darwin(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # `[other]` is an *unknown* section, dropped by `extra="ignore"` before it
     # reaches the merged mapping — distinct from a bare `[ocr]` (covered below),
     # which now arrives as an empty table.
     monkeypatch.setattr(sys, "platform", "darwin")
     workspace.config_path.write_text("[other]\n", encoding="utf-8")
-    with pytest.warns(UserWarning, match="defaulting to the on-device macOS"):
+    with caplog.at_level(logging.WARNING, logger="dgml_core.ocr"):
         cfg = load_ocr_config(workspace)
+    assert "defaulting to the on-device macOS" in caplog.text
     assert cfg.provider is OcrProviderName.MACOS
 
 
@@ -89,7 +125,7 @@ def test_load_ocr_config_no_ocr_section_raises_off_darwin(
 
 
 def test_load_ocr_config_bare_section_defaults_to_macos_on_darwin(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A bare `[ocr]` is the same as no section at all, not a misconfiguration.
 
@@ -99,8 +135,9 @@ def test_load_ocr_config_bare_section_defaults_to_macos_on_darwin(
     """
     monkeypatch.setattr(sys, "platform", "darwin")
     workspace.config_path.write_text("[ocr]\n", encoding="utf-8")
-    with pytest.warns(UserWarning, match="defaulting to the on-device macOS"):
+    with caplog.at_level(logging.WARNING, logger="dgml_core.ocr"):
         cfg = load_ocr_config(workspace)
+    assert "defaulting to the on-device macOS" in caplog.text
     assert cfg.provider is OcrProviderName.MACOS
 
 

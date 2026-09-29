@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from dgml_core import models_config
 from dgml_core.models_config import ModelsConfig, Tier
@@ -26,40 +28,48 @@ def _clear_fallback_dedup() -> None:
     models_config._WARNED_TIER_FALLBACKS.clear()
 
 
-def test_resolve_exact_tier_no_warning(capsys: pytest.CaptureFixture[str]) -> None:
+def _warned(caplog: pytest.LogCaptureFixture) -> str:
+    """WARNING-and-above messages logged so far, then forget them (like
+    ``capsys.readouterr``)."""
+    text = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    caplog.clear()
+    return text
+
+
+def test_resolve_exact_tier_no_warning(caplog: pytest.LogCaptureFixture) -> None:
     m = ModelsConfig(light="a", standard="b", advanced="c", expert="d")
     assert m.resolve(Tier.ADVANCED) == "c"
-    assert capsys.readouterr().err == ""
+    assert _warned(caplog) == ""
 
 
-def test_resolve_prefers_nearest_lower_tier(capsys: pytest.CaptureFixture[str]) -> None:
+def test_resolve_prefers_nearest_lower_tier(caplog: pytest.LogCaptureFixture) -> None:
     # expert unset; both standard and light set → nearest lower is standard.
     m = ModelsConfig(light="l", standard="s")
     assert m.resolve(Tier.EXPERT) == "s"
-    assert "falling back to 'standard'" in capsys.readouterr().err
+    assert "falling back to 'standard'" in _warned(caplog)
 
 
 def test_resolve_falls_back_upward_when_nothing_below(
-    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Only standard set; light has no lower neighbour → nearest higher is standard.
     m = ModelsConfig(standard="only-standard")
     assert m.resolve(Tier.LIGHT) == "only-standard"
-    err = capsys.readouterr().err
+    err = _warned(caplog)
     assert "tier 'light' is not set" in err
     assert "falling back to 'standard'" in err
 
 
-def test_fallback_warning_is_deduped(capsys: pytest.CaptureFixture[str]) -> None:
+def test_fallback_warning_is_deduped(caplog: pytest.LogCaptureFixture) -> None:
     m = ModelsConfig(standard="only-standard")
     m.resolve(Tier.LIGHT)
-    first = capsys.readouterr().err
+    first = _warned(caplog)
     m.resolve(Tier.LIGHT)
-    second = capsys.readouterr().err
+    second = _warned(caplog)
     assert first.count("falling back") == 1
     assert second == ""  # same (tier, used) pair — not repeated
 
 
-def test_resolve_none_when_no_tier_set(capsys: pytest.CaptureFixture[str]) -> None:
+def test_resolve_none_when_no_tier_set(caplog: pytest.LogCaptureFixture) -> None:
     assert ModelsConfig().resolve(Tier.STANDARD) is None
-    assert capsys.readouterr().err == ""  # nothing to fall back to → no warning
+    assert _warned(caplog) == ""  # nothing to fall back to → no warning

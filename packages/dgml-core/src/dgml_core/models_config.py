@@ -31,12 +31,14 @@ then higher), emitting a warning — so a minimal config that sets only, say,
 
 from __future__ import annotations
 
-import sys
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 from .errors import DgmlError, ModelsConfigInvalid
+
+logger = logging.getLogger(__name__)
 
 
 class Tier(StrEnum):
@@ -79,7 +81,7 @@ class ConfigSection(StrEnum):
 TIERS: tuple[Tier, ...] = tuple(Tier)
 
 # Tier fallbacks already reported this process, so a per-file loop (e.g. bulk
-# extract) doesn't flood stderr with the same line. Keyed by (requested, used).
+# extract) doesn't repeat the same warning. Keyed by (requested, used).
 _WARNED_TIER_FALLBACKS: set[tuple[Tier, Tier]] = set()
 
 # Same idea for "configured but not enabled" advisories (see `section_enabled`):
@@ -101,8 +103,8 @@ class ModelsConfig:
         """Resolve ``tier`` to its model string.
 
         If ``tier`` has no model, fall back to the nearest set tier — lower
-        (cheaper) neighbours first, then higher — and write a warning to stderr
-        (always, independent of ``--verbose``). Returns ``None`` when no tier is
+        (cheaper) neighbours first, then higher — and log a WARNING (once per
+        process per fallback). Returns ``None`` when no tier is
         set at all (the caller then surfaces the appropriate config error)."""
         if tier not in TIERS:
             raise ValueError(f"unknown model tier {tier!r}")
@@ -111,9 +113,9 @@ class ModelsConfig:
             return None
         if actual != tier and (tier, actual) not in _WARNED_TIER_FALLBACKS:
             _WARNED_TIER_FALLBACKS.add((tier, actual))
-            sys.stderr.write(
+            logger.warning(
                 f"[dgml] model tier '{tier}' is not set; falling back to '{actual}' "
-                f"('{getattr(self, actual)}'). Set [models].{tier} to silence this.\n"
+                f"('{getattr(self, actual)}'). Set [models].{tier} to silence this."
             )
         model: str | None = getattr(self, actual)
         return model
@@ -179,9 +181,9 @@ def section_enabled(
         raise invalid(f"'{section_name}.enabled' must be true or false")
     if not enabled and set(section) - {"enabled"} and section_name not in _WARNED_DISABLED:
         _WARNED_DISABLED.add(section_name)
-        sys.stderr.write(
+        logger.warning(
             f"[dgml] the [{section_name}] config section is configured but not enabled; "
-            f"it will be ignored. Set {section_name}.enabled = true to use it.\n"
+            f"it will be ignored. Set {section_name}.enabled = true to use it."
         )
     return enabled
 

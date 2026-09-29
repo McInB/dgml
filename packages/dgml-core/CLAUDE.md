@@ -27,6 +27,34 @@ a workspace calls; `Workspace.resolve(...)` only answers "which workspace" and
 is for the handful of operations that run before one exists. Creating one is
 `create_workspace(...)`, not a `Workspace` constructor.
 
+## Logging
+
+Library code logs through `logger = logging.getLogger(__name__)`, so every
+record lands under `dgml_core.*`. Never `print`, never write to `sys.stderr`,
+never use `warnings.warn` for runtime events, and never configure handlers,
+levels or formats. The caller routes. `__init__.py` attaches a `NullHandler`
+to `dgml_core`, so a caller that configures nothing sees nothing. The `dgml`
+CLI is one such caller (`_configure_logging` in `cli.py`). Levels:
+
+- **WARNING**: the user must act, or the output is degraded (a tier fallback,
+  an unreachable model, a missing OCR provider). The CLI shows these by default.
+- **INFO**: what `dgml --verbose` shows (hybrid merge decisions, per-page
+  failures, workspace-upgrade notices).
+- **DEBUG**: detail beyond `--verbose`. No CLI switch maps to it (`DGML_DEBUG=1`
+  is just an env-var alias for `--verbose`); library callers opt in with
+  `logging.getLogger("dgml_core").setLevel(DEBUG)`.
+
+A warning that a per-file or per-page loop would repeat is deduped through
+module-level `_WARNED_*` state (`models_config.py`, `ocr.py`, `rotation.py`),
+keyed by whatever makes a recurrence informative — a `(tier, fallback)` pair, a
+workspace root, or nothing (a bool) when the condition is process-global. Tests
+reset that state in an autouse fixture.
+
+Structured events a caller may act on belong in return values or a typed
+callback (`on_migration`), not in log text. `debug=` controls telemetry and
+intermediate files, never log output. Tests assert with pytest's `caplog`, not
+`capsys`.
+
 ## Optional extras
 
 `aws`, `azure`, `macos`, `pdfium`, `clustering`, and `chain` are declared

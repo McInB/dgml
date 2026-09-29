@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from . import layout
@@ -163,6 +164,12 @@ if TYPE_CHECKING:
     from .consistency import CheckReport, Issue, check_workspace
 
 __version__ = "0.1.0"
+
+# Logging: every module logs through ``logging.getLogger(__name__)`` (so under
+# ``dgml_core.*``) and configures nothing — the caller decides where records go.
+# The NullHandler keeps a caller who configured nothing silent, rather than
+# falling through to Python's last-resort stderr handler.
+logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 #: Names re-exported from ``.consistency``, resolved on FIRST ACCESS rather than
 #: at import (PEP 562). That module reaches ``.hybrid`` → ``.llm`` → ``litellm``,
