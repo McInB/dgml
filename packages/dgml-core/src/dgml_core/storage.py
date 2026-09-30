@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
     from .storage_service import BlobStore, DocStore, StorageConfig
 
 from .default_config import PROVIDER_MODELS
+
+logger = logging.getLogger(__name__)
 
 ENV_VAR = "DGML_HOME"
 DEFAULT_DIR_NAME = "dgml-workspace"
@@ -124,8 +127,13 @@ class Workspace:
         3. ``is_initialized()`` — which *is* "has a config".
         4. ``migrate_workspace`` — upgrades the layout; a no-op read when current.
 
-        ``on_migration`` fires per migration that **changed** something, with the
-        workspace it changed. Ignoring it is a reasonable default.
+        Each migration that **changed** something is logged at INFO (a
+        human-readable notice) and, when given, passed to ``on_migration`` with
+        the workspace it changed — the structured hook, for a caller that wants
+        to record the upgrade rather than read about it. Ignoring it is a
+        reasonable default. A migration that changed nothing says nothing:
+        bumping the version stamp on a workspace with no work to do is
+        bookkeeping, not an upgrade.
         """
         # Imported here, not at module scope: both modules import this one.
         from .errors import WorkspaceNotInitialized
@@ -147,7 +155,10 @@ class Workspace:
                 workspace=ws,
             )
         for result in migrate_workspace(ws):
-            if result.changed and on_migration is not None:
+            if not result.changed:
+                continue
+            logger.info("[dgml] upgraded workspace at %s — %s", ws.root, result.summary())
+            if on_migration is not None:
                 on_migration(ws, result)
         return ws
 

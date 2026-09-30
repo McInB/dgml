@@ -3289,6 +3289,59 @@ def test_uncaught_error_full_traceback_on_stderr_with_verbose(
     assert "INTERNAL_ERROR" in err  # the envelope is still emitted
 
 
+@pytest.mark.parametrize("value", ["1", "true", "True", "TRUE", " 1 "])
+def test_dgml_debug_one_enables_traceback_without_verbose(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    """DGML_DEBUG=1 (documented) or true/True (``str(True)``, as a Python caller
+    writes it) is an env-var alias for --verbose: traceback on stderr, and the
+    log level at INFO — exactly --verbose's level, not DEBUG."""
+    import logging
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    monkeypatch.setenv("DGML_DEBUG", value)
+    capsys.readouterr()
+
+    with patch("dgml.cli._dispatch", side_effect=RuntimeError("kaboom detail")):
+        rc = main(_ws_args(ws) + ["status"])
+    assert rc != 0
+    assert logging.getLogger("dgml_core").level == logging.INFO
+    err = capsys.readouterr().err
+    assert "Traceback (most recent call last)" in err
+
+
+@pytest.mark.parametrize("value", ["0", "false", "False", "yes", "on", "", "  ", "2"])
+def test_dgml_debug_other_values_mean_off(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    """Anything but ``1``/``true`` is off — including ``0``.
+
+    A CI line like ``DGML_DEBUG=0`` intends to disable debug output; a plain
+    truthiness check on the env var would enable it instead. Off means the
+    default behaviour exactly: no traceback, stderr holding only the JSON
+    envelope, and the log level at WARNING rather than DEBUG."""
+    import logging
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    monkeypatch.setenv("DGML_DEBUG", value)
+    capsys.readouterr()
+
+    with patch("dgml.cli._dispatch", side_effect=RuntimeError("kaboom detail")):
+        rc = main(_ws_args(ws) + ["status"])
+    assert rc != 0
+    assert logging.getLogger("dgml_core").level == logging.WARNING
+    err = _read_stderr(capsys)  # parses cleanly → stderr held only the envelope
+    assert err["error"]["code"] == "INTERNAL_ERROR"
+
+
 @needs_gs
 def test_docset_generate_duplicate_filename_fails(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -6987,3 +7040,46 @@ def test_missing_chain_extra_reports_missing_extra(
     err = _read_stderr(capsys)["error"]
     assert err["code"] == "MISSING_EXTRA"
     assert err["message"] == "The 'chain' extra is not installed. Run: pip install dgml[chain]"
+
+
+def test_generate_max_tokens_default_matches_the_library() -> None:
+    """The flag default and ConvertOptions.max_tokens are two copies of one
+    number. They have to move together: a CLI run that silently used a lower
+    ceiling than a library run would truncate replies the library completes,
+    and the failure shows up as an under-labeled chunk, not as an error."""
+    from dgml.cli import _build_parser
+    from dgml_core.generation.pipeline import ConvertOptions
+
+    args = _build_parser().parse_args(["docset", "generate", "somedocset"])
+    assert args.max_tokens == ConvertOptions.max_tokens
+
+
+def test_generate_max_tokens_default_clears_the_largest_observed_reply() -> None:
+    """Headroom check. The roster-sized describe_concepts call has been
+    observed at ~29.9K output tokens, so a ceiling near that truncates it on a
+    docset with a large concept vocabulary."""
+    from dgml_core.generation.pipeline import ConvertOptions
+
+    assert ConvertOptions.max_tokens >= 2 * 30_000
+
+
+def test_generate_thinking_flag_defaults_to_none() -> None:
+    """Unset means "defer to [generation] thinking". The flag must not carry a
+    value of its own, or it would silently override the config on every run."""
+    from dgml.cli import _build_parser
+
+    args = _build_parser().parse_args(["docset", "generate", "somedocset"])
+    assert args.thinking is None
+
+
+def test_generate_thinking_flag_accepts_only_known_modes() -> None:
+    """A typo is rejected by argparse rather than reaching the provider as a
+    400 after transcription has already been paid for."""
+    import pytest as _pytest
+    from dgml.cli import _build_parser
+
+    for mode in ("disabled", "adaptive"):
+        args = _build_parser().parse_args(["docset", "generate", "d", "--thinking", mode])
+        assert args.thinking == mode
+    with _pytest.raises(SystemExit):
+        _build_parser().parse_args(["docset", "generate", "d", "--thinking", "sometimes"])
