@@ -28,6 +28,7 @@ from .conversion import (
     load_conversion_config,
 )
 from .errors import (
+    CONVERT_TO_PDF_OPERATION,
     AuthError,
     ConflictError,
     DgmlError,
@@ -35,6 +36,7 @@ from .errors import (
     FileNotFound,
     InvalidArgument,
     InvalidPDF,
+    MissingExtra,
     OcrFailed,
     PageRenderFailed,
     RecordedError,
@@ -148,7 +150,6 @@ class FileStore:
         on_conflict: ConflictPolicy = ConflictPolicy.ERROR,
         text_mode: TextMode = TextMode.DIGITAL,
         dpi: int = DEFAULT_DPI,
-        verbose: bool = False,
         debug: bool = False,
     ) -> AddFileResult:
         # Validated here, alongside the OCR-config check below, so a rejected
@@ -276,7 +277,6 @@ class FileStore:
             conflict_kind=("hash" if same_hash else "path" if same_path else None),
             text_mode=text_mode,
             dpi=dpi,
-            verbose=verbose,
             debug=debug,
         )
 
@@ -362,7 +362,6 @@ class FileStore:
         text_mode: TextMode,
         file_id: str | None = None,
         dpi: int = DEFAULT_DPI,
-        verbose: bool = False,
         debug: bool = False,
     ) -> AddFileResult:
         file_id = file_id or new_id()
@@ -413,7 +412,6 @@ class FileStore:
                 text_mode=text_mode,
                 page_count=page_count,
                 dpi=dpi,
-                verbose=verbose,
                 debug=debug,
             )
 
@@ -478,7 +476,7 @@ class FileStore:
                     self.ws,
                     file_id,
                     RecordedError(
-                        operation="convert_to_pdf",
+                        operation=CONVERT_TO_PDF_OPERATION,
                         message=message,
                         occurred_at=now_iso(),
                         permanent=True,
@@ -566,7 +564,6 @@ class FileStore:
         text_mode: TextMode,
         page_count: int | None,
         dpi: int = DEFAULT_DPI,
-        verbose: bool = False,
         debug: bool = False,
     ) -> tuple[str | None, dict[str, Any] | None]:
         """Run text extraction for ``text_mode`` and record any failure.
@@ -586,7 +583,7 @@ class FileStore:
             return self._extract_text_ocr(pdf_path, file_id, page_count=page_count)
         if text_mode is TextMode.HYBRID:
             return self._extract_text_hybrid(
-                pdf_path, file_id, page_count=page_count, dpi=dpi, verbose=verbose, debug=debug
+                pdf_path, file_id, page_count=page_count, dpi=dpi, debug=debug
             )
         return None, None
 
@@ -634,7 +631,11 @@ class FileStore:
                     page_images_dir=pages_dir,
                     config=config,
                 )
-        except (OcrFailed, AuthError) as exc:
+        # MissingExtra joins these deliberately: an uninstalled `azure`/`aws` extra
+        # is the same shape of problem as a bad credential — permanent until the
+        # environment is fixed, and no reason to fail the whole add. Without it here
+        # the File would not land at all.
+        except (OcrFailed, AuthError, MissingExtra) as exc:
             # Provider/auth failures are recorded as permanent — re-running
             # without changing config or credentials won't help. `dgml check
             # --retry-errors` is the recovery path once the user fixes them.
@@ -649,7 +650,6 @@ class FileStore:
         *,
         page_count: int | None,
         dpi: int = DEFAULT_DPI,
-        verbose: bool = False,
         debug: bool = False,
     ) -> tuple[str | None, dict[str, Any] | None]:
         # Imported HERE, not at module scope: ``.hybrid`` reaches ``.llm`` →
@@ -680,10 +680,9 @@ class FileStore:
                     text_extraction_config=text_extraction_config,
                     workspace=self.ws,
                     dpi=dpi,
-                    verbose=verbose,
                     debug=debug,
                 )
-        except (OcrFailed, AuthError) as exc:
+        except (OcrFailed, AuthError, MissingExtra) as exc:
             return self._record_text_failure(file_id, str(exc), permanent=True), None
 
         return self._classify_and_record(result, file_id, page_count, mode_label="hybrid")

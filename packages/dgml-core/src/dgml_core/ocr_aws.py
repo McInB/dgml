@@ -21,36 +21,41 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from .errors import AuthError, OcrConfigInvalid, OcrFailed
+from .errors import AuthError, MissingExtra, OcrConfigInvalid, OcrFailed
 from .ocr import OcrConfig, OcrProvider, OcrProviderName
 
 
 class AwsProvider(OcrProvider):
-    name: ClassVar[OcrProviderName] = OcrProviderName.AWS
+    name: ClassVar[str] = OcrProviderName.AWS.value
     config_fields: ClassVar[frozenset[str]] = frozenset({"region", "profile"})
 
     @classmethod
-    def parse_config(cls, section: dict[str, Any]) -> OcrConfig:
-        cls._check_no_extra_fields(section)
-        region = section.get("region")
+    def parse_config(cls, config: OcrConfig) -> OcrConfig:
+        cls._check_no_extra_fields(config.options)
+        region = config.options.get("region")
         if not isinstance(region, str) or not region.strip():
             raise OcrConfigInvalid("AWS OCR requires non-empty 'ocr.region'")
-        profile = section.get("profile")
+        profile = config.options.get("profile")
         if profile is not None and (not isinstance(profile, str) or not profile):
             raise OcrConfigInvalid("'ocr.profile' must be a non-empty string if set")
-        return OcrConfig(provider=cls.name, region=region, profile=profile)
+        return config
 
     def __init__(self, config: OcrConfig) -> None:
         try:
             import boto3
             from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
         except ImportError as exc:
-            raise OcrFailed(
-                "boto3 is required for AWS OCR. Install with `pip install dgml[aws]`."
+            raise MissingExtra(
+                "boto3 is required for AWS OCR. Install with `pip install dgml[aws]`.",
+                extra="aws",
+                distribution="boto3",
             ) from exc
 
+        opts = config.options
         try:
-            session = boto3.Session(profile_name=config.profile, region_name=config.region)
+            session = boto3.Session(
+                profile_name=opts.get("profile"), region_name=opts.get("region")
+            )
             self._client = session.client("textract")
         except (BotoCoreError, NoCredentialsError) as exc:
             raise AuthError(f"AWS session/Textract client init failed: {exc}") from exc

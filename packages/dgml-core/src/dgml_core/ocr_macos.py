@@ -38,19 +38,19 @@ import sys
 from collections.abc import Iterator
 from typing import Any, ClassVar
 
-from .errors import OcrFailed
+from .errors import MissingExtra, OcrFailed
 from .ocr import OcrConfig, OcrProvider, OcrProviderName
 from .text_extraction import split_word_into_tokens
 
 
 class MacosProvider(OcrProvider):
-    name: ClassVar[OcrProviderName] = OcrProviderName.MACOS
+    name: ClassVar[str] = OcrProviderName.MACOS.value
     config_fields: ClassVar[frozenset[str]] = frozenset()
 
     @classmethod
-    def parse_config(cls, section: dict[str, Any]) -> OcrConfig:
-        cls._check_no_extra_fields(section)
-        return OcrConfig(provider=cls.name)
+    def parse_config(cls, config: OcrConfig) -> OcrConfig:
+        cls._check_no_extra_fields(config.options)
+        return config
 
     def __init__(self, config: OcrConfig) -> None:
         if sys.platform != "darwin":
@@ -63,9 +63,11 @@ class MacosProvider(OcrProvider):
             import Foundation
             import Vision
         except ImportError as exc:
-            raise OcrFailed(
+            raise MissingExtra(
                 "PyObjC Vision bindings are required for macOS OCR. "
-                "Install with `pip install dgml[macos]`."
+                "Install with `pip install dgml[macos]`.",
+                extra="macos",
+                distribution="pyobjc-framework-Vision",
             ) from exc
         # Annotated as Any so the attribute type never depends on resolving the
         # pyobjc modules — they're absent off-macOS (excluded by the `; darwin`

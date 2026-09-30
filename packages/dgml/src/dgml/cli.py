@@ -24,6 +24,7 @@ import codecs
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import shutil
 import sys
@@ -46,21 +47,16 @@ from dgml_core.docsets import DocSetStore
 from dgml_core.errors import (
     ConflictError,
     DgmlError,
+    GenerationFailed,
     InvalidArgument,
+    MissingExtra,
     NoExistingDocSets,
     StorageBackendMismatch,
     WorkspaceNotInitialized,
-    now_iso,
     short_error_message,
 )
 from dgml_core.files import AddFileResult, ConflictPolicy, FileStore
 from dgml_core.ids import RECORD_ID_SHAPE
-from dgml_core.migrations import (
-    MigrationResult,
-    migrate_workspace,
-    migrate_workspace_config,
-    stamp_schema_version,
-)
 from dgml_core.models import DocSet
 from dgml_core.pages import DEFAULT_DPI, load_pdf_config
 from dgml_core.storage import (
@@ -79,17 +75,21 @@ from dgml_core.storage import (
 from dgml_core.storage_resolve import (
     DEFAULT_STORAGE_PROVIDER,
     DEFAULT_STORAGE_SERVICE,
-    load_store_configs,
     storage_fingerprint_pair,
-    verify_storage_fingerprint,
 )
 from dgml_core.text_extraction import TextMode
-from dgml_core.workspace_id import ID_SHAPE, generate_unique_workspace_id, is_workspace_id
+from dgml_core.workspace_create import create_workspace
+from dgml_core.workspace_id import ID_SHAPE, is_workspace_id
 from dgml_core.workspaces_resolve import default_workspaces_store
 from dgml_core.workspaces_store import WorkspacesStore
 
 if TYPE_CHECKING:
     from dgml_core.generation.schema import Schema
+
+# The CLI's own logger (``dgml.cli``); routed to stderr with the library's by
+# `_configure_logging`. Diagnostics only — the JSON payload and the error
+# envelope go through `_emit`/`_emit_error`, never through logging.
+_log = logging.getLogger(__name__)
 
 
 def _emit(payload: dict[str, Any], fmt: str, stream: IO[str] | None = None) -> None:
@@ -169,16 +169,18 @@ _WORKSPACE_CONFIG_HELP = (
 )
 _FORMAT_HELP = "Output format. Default 'json' for machine/agent consumption."
 _VERBOSE_HELP = (
-    "Emit informational diagnostics to stderr. Controls hybrid text-mode "
-    "warnings (digital/OCR conflicts, OCR misses) and the per-page merge "
-    "summary, and the `docset generate` pipeline's progress lines; default "
-    "off so stderr stays reserved for error envelopes."
+    "Emit informational diagnostics to stderr: INFO-level log lines from dgml "
+    "and its library (hybrid text-mode warnings and per-page merge summary, "
+    "the `docset generate` pipeline's progress lines, workspace-upgrade "
+    "notices). Default off so stderr stays reserved for error envelopes and "
+    "warnings. DGML_DEBUG=1 in the environment has the same effect."
 )
 _DEBUG_HELP = (
     "Keep intermediate pipeline files in the workspace: the `docset generate` "
     "cache/ and coverage_report.json, the `docset ground` grounding_stats.json, "
     "and the `file extract` extraction_stats.json. Default off — only final "
-    "files (DGML XML, page text/images, schemas, values, metadata) are kept."
+    "files (DGML XML, page text/images, schemas, values, metadata) are kept. "
+    "Does not change log output (that is --verbose / DGML_DEBUG=1)."
 )
 
 
@@ -1201,26 +1203,68 @@ def _add_chain_subparsers(
         _chain_config_arg(pv)
 
 
-def _report_migrations(
-    results: list[MigrationResult], ws: Workspace, args: argparse.Namespace
-) -> None:
-    """Announce an applied workspace migration on stderr, under ``--verbose``.
+def _verbose_enabled(args: argparse.Namespace) -> bool:
+    """True when verbose diagnostics are on: the ``--verbose`` flag, or its
+    env-var alias ``DGML_DEBUG`` set to ``1`` or ``true`` (any case).
 
-    Verbose-gated on purpose. Migrations are automatic, additive and
-    idempotent, so the default-quiet cost is low — whereas stderr carries the
-    structured error envelope this CLI promises its callers, and a notice
-    printed ahead of a failing command would leave stderr holding a plain-text
-    line *and* a JSON object, breaking every agent that parses it. Under
-    ``--verbose`` stderr is already non-JSON (that is where the traceback
-    goes), so the notice is free there.
+    For the env var, ``1`` is the documented spelling; ``true``/``True`` is
+    accepted because ``str(True)`` is how a Python caller naturally writes an
+    env var. Strict otherwise, on purpose: a plain truthiness check would
+    treat ``DGML_DEBUG=0`` — a CI line that means "off" — as *on*."""
+    if getattr(args, "verbose", False):
+        return True
+    return os.environ.get("DGML_DEBUG", "").strip().lower() in ("1", "true")
 
-    A migration that changed nothing says nothing either way: bumping the
-    version stamp on a workspace that had no work to do is bookkeeping, not an
-    upgrade."""
-    if not (getattr(args, "verbose", False) or os.environ.get("DGML_DEBUG")):
-        return
-    for result in (r for r in results if r.changed):
-        sys.stderr.write(f"[dgml] upgraded workspace at {ws.root} — {result.summary()}\n")
+
+class _StderrHandler(logging.StreamHandler):  # type: ignore[type-arg]
+    """A stream handler bound to whatever ``sys.stderr`` is *at emit time*.
+
+    A plain ``StreamHandler(sys.stderr)`` captures the stream object it was built
+    with; ``main()`` runs many times in one process under pytest, and each run's
+    ``sys.stderr`` is a different capture buffer — closed by the time a later run
+    writes to it."""
+
+    @property
+    def stream(self) -> IO[str]:
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, _value: IO[str]) -> None:
+        pass
+
+
+def _configure_logging(args: argparse.Namespace) -> None:
+    """Route the ``dgml_core`` (library) and ``dgml`` (CLI) loggers to stderr.
+
+    The CLI is just another caller of the library: it owns routing, so this is
+    the one place logging is configured. Level is WARNING by default and INFO
+    under ``--verbose``. ``DGML_DEBUG=1`` is an env-var alias for ``--verbose``
+    (it long predates this switch, may be retired, and gets no role of its own);
+    DEBUG has no CLI switch — records at that level exist for library callers.
+
+    The WARNING default is load-bearing: stderr carries the JSON error envelope,
+    and a plain-text INFO line ahead of a failing command would leave stderr
+    holding text *and* JSON, breaking every agent that parses it. Under
+    ``--verbose`` stderr is already non-JSON (the traceback goes there too).
+
+    Idempotent: ``main()`` runs repeatedly in one process (tests), so a previous
+    run's handler is replaced, not stacked.
+
+    Deliberately process-owning: calling ``main()`` in-process adopts the CLI's
+    routing — levels are set on ``dgml_core``/``dgml`` (clobbering the host's),
+    the stderr handler is added, and ``propagate`` is left on (a host with a
+    root handler sees records twice). ``main()`` is an entry point, not an
+    embedding API; a program that wants dgml in-process with its own logging
+    should call ``dgml_core`` directly."""
+    level = logging.INFO if _verbose_enabled(args) else logging.WARNING
+    for name in ("dgml_core", "dgml"):
+        log = logging.getLogger(name)
+        for old in [h for h in log.handlers if isinstance(h, _StderrHandler)]:
+            log.removeHandler(old)
+        handler = _StderrHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        log.addHandler(handler)
+        log.setLevel(level)
 
 
 def _is_utf8(encoding: object) -> bool:
@@ -1281,55 +1325,41 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     fmt: str = args.format
+    _configure_logging(args)
 
     try:
         _reject_retired_config_flag(args)
-        ws = Workspace.resolve(args.workspace)
-        # `init` manages only the user-level config; `workspace create`
-        # is what actually builds the workspace — so both run before the
-        # workspace exists.
-        if args.command not in ("init", "workspace"):
-            # Move a pre-upgrade workspace's storage binding out of this machine's
-            # registry and into its own config.toml. Store-free and content-guarded,
-            # so it must run FIRST: everything below reads the store, and until this
-            # has run the store a legacy workspace resolves is the wrong one.
-            migrate_workspace_config(ws)
-            # Then check that binding against the workspace's own seal, still before
-            # any store is built — a drifted [storage] raises here rather than
-            # silently opening an empty backend. `workspace reseal` (exempt above,
-            # under the `workspace` group) is how an intended change is accepted.
-            verify_storage_fingerprint(ws)
-            # One check, not two: `is_initialized()` *is* "has a config". The config
-            # names the backend and cannot be reconstructed from anything else, so an
-            # absent one is indistinguishable from "never a workspace" — and both want
-            # the same answer from the caller. The message covers both readings.
-            if not ws.is_initialized():
+        # `init` manages only the user-level config; `workspace create` is what
+        # actually builds the workspace — so both run before the workspace exists
+        # and get `resolve` (which only answers "which workspace") rather than
+        # `open` (which also migrates it, and requires it to be initialized).
+        if args.command in ("init", "workspace"):
+            ws = Workspace.resolve(args.workspace)
+        else:
+            try:
+                ws = Workspace.open(args.workspace)
+            except WorkspaceNotInitialized as exc:
+                # Re-raised with remedies the library cannot offer: every one of them
+                # is a `dgml` command, and which of them applies depends on how this
+                # invocation addressed the workspace (see `_uninitialized_message`).
                 raise WorkspaceNotInitialized(
-                    _uninitialized_message(ws, from_default=_root_is_the_cwd_default(args))
-                )
+                    _uninitialized_message(
+                        exc.workspace, from_default=_root_is_the_cwd_default(args)
+                    ),
+                    workspace=exc.workspace,
+                ) from exc
             _warn_if_config_declares_workspaces(ws)
-            # Upgrade an older workspace in place before anything reads it. This
-            # is the one point every command passes through, so there is no
-            # separate migrate step to remember. No-op (one document read) when
-            # the workspace is already current.
-            #
-            # Nothing is indexed here any more. The old per-machine index had to be
-            # written on every open to stay current; a workspace's config now lives in
-            # the store of workspaces that lists it, so being listed is not a separate
-            # fact that can fall out of date.
-            _report_migrations(migrate_workspace(ws), ws, args)
         return _dispatch(args, ws, fmt)
     except DgmlError as exc:
         return _emit_error(exc.code, str(exc), fmt)
     except Exception as exc:
-        import os
         import traceback
 
         # The JSON error envelope carries a short, single-line cause so an
         # agent parsing it isn't handed a wall of provider error text. The full
-        # traceback goes to stderr under --verbose (or DGML_DEBUG) — stderr is
+        # traceback goes to stderr under --verbose (or DGML_DEBUG=1) — stderr is
         # already non-JSON under --verbose, so it can't corrupt the envelope.
-        if getattr(args, "verbose", False) or os.environ.get("DGML_DEBUG"):
+        if _verbose_enabled(args):
             traceback.print_exc()
         return _emit_error("INTERNAL_ERROR", short_error_message(exc), fmt)
 
@@ -1383,10 +1413,6 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     ``--verbose``.
     """
 
-    def _diag(msg: str) -> None:
-        if getattr(args, "verbose", False):
-            sys.stderr.write(msg)
-
     environ = dict(os.environ)
     detected = detected_api_keys(environ)
     provider = args.provider if args.provider is not None else detect_provider(environ)
@@ -1412,37 +1438,37 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         return 0
 
     if backup is not None:
-        _diag(f"[dgml init] previous config backed up to {backup}.\n")
+        _log.info(f"[dgml init] previous config backed up to {backup}.")
 
     if canonical is None:
         checked = ", ".join(API_KEY_ENV_VARS)
         payload["next_action"] = (
             f"set an API key, then rerun: dgml init --provider <{_PROVIDER_CHOICES}>"
         )
-        _diag(
+        _log.info(
             f"[dgml init] no API keys detected (checked {checked}).\n"
-            f"[dgml init] wrote {path} with a commented-out [models] placeholder.\n"
+            f"[dgml init] wrote {path} with a commented-out [models] placeholder."
         )
         _emit(payload, fmt)
         return 0
 
     payload["next_action"] = "dgml workspace create --organization <org>"
     if args.provider is not None:
-        _diag(
+        _log.info(
             f"[dgml init] wrote {path} (provider: {canonical}).\n"
             f"{_init_models_report(canonical)}\n"
             f"[dgml init] make sure {_PROVIDER_KEYS[canonical]} is set before running "
-            "dgml commands.\n"
+            "dgml commands."
         )
     else:
         keys_line = "  ".join(f"[x] {k}" for k in detected) if detected else "(none)"
-        _diag(
+        _log.info(
             f"[dgml init] detected API keys: {keys_line}\n"
             f"[dgml init] wrote {path} (provider: {canonical}).\n"
             f"{_init_models_report(canonical)}\n"
             "[dgml init] override any task with its own field (e.g. [generation] "
             'label_model = "..."); switch providers with '
-            f"dgml init --provider <{_PROVIDER_CHOICES}>.\n"
+            f"dgml init --provider <{_PROVIDER_CHOICES}>."
         )
     _emit(payload, fmt)
     return 0
@@ -1526,13 +1552,13 @@ def _warn_if_config_declares_workspaces(ws: Workspace) -> None:
     if "workspaces" not in parsed:
         return
     _WARNED_WORKSPACES_TABLE = True
-    sys.stderr.write(
+    _log.warning(
         f"Warning: {ws.config_location} declares a [workspaces] table, which is "
         f"ignored.\n\n"
         f"That table selects the machine's store of workspaces and is read only from "
         f"{user_config_path()} — it cannot be set per workspace, because that store is "
         f"what dgml used to find this workspace in the first place.\n\n"
-        f"Move it to the user config, or delete it.\n"
+        f"Move it to the user config, or delete it."
     )
 
 
@@ -1610,29 +1636,6 @@ def _read_seed_config(args: argparse.Namespace) -> str | None:
             f"({user_config_path()}), so it would have no effect here. Remove it."
         )
     return text
-
-
-def _write_workspace_config(ws: Workspace, service: str, seeded: bool) -> None:
-    """Give a new workspace the ``[storage.<service>]`` table it will resolve from.
-
-    When the workspace was seeded from a config the user authored (``--from-config``),
-    its ``[storage]`` is left exactly as written. Otherwise the named service is
-    materialized out of the user-level config into the workspace's own config, so the
-    workspace is self-describing from the moment it exists.
-
-    Never clobbers a ``[storage.<service>]`` the config already defines — ``workspace
-    create`` is documented as safe to re-run.
-    """
-    from dgml_core import workspace_config as wsconfig
-
-    if seeded or wsconfig.read_storage_table(ws, service) is not None:
-        return
-    blob_cfg, doc_cfg = load_store_configs(ws, service)
-    table: dict[str, Any] = {
-        "blobs": {"provider": blob_cfg.provider, **dict(blob_cfg.options)},
-        "docs": {"provider": doc_cfg.provider, **dict(doc_cfg.options)},
-    }
-    wsconfig.write_storage_table(ws, service, table)
 
 
 def _import_one(
@@ -1820,12 +1823,12 @@ def _workspace_import(args: argparse.Namespace, fmt: str) -> int:
         # Loud, and not behind --verbose: this is an assumption about which backend holds
         # the workspace's data, and only the caller can confirm it.
         listed = "\n".join(f"  {r['root']}" for r in assumed)
-        sys.stderr.write(
+        _log.warning(
             f"Note: {len(assumed)} workspace(s) recorded no storage binding, so local disk "
             f"was assumed:\n{listed}\n\n"
             f"That is the only backend they could have used at the time. If any of them "
             f"actually kept its data on a remote backend, edit [storage] in its config and "
-            f"run 'dgml workspace reseal <id>'.\n"
+            f"run 'dgml workspace reseal <id>'."
         )
     if source_label is not None:
         payload["source"] = source_label
@@ -1953,146 +1956,48 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
 
         seed = _read_seed_config(args)
 
-        if listed and ws.workspaces_id is None:
-            # The id has to come first, because for a store-listed workspace the root is
-            # derived from it — the reverse of the detached order.
-            store = default_workspaces_store()
-            new_id = requested_id or generate_unique_workspace_id(store)
-            store.write_config(new_id, seed or "")
-            ws = Workspace(root=store.workspace_root(new_id), workspaces_id=new_id)
-        elif seed is not None and not ws.config_present:
-            # Detached: the seed becomes the workspace's own config.toml, then is
-            # forgotten. It is a template, not an adopted file — later edits to the
-            # source have no effect on this workspace.
-            ws.root.mkdir(parents=True, exist_ok=True)
-            wsconfig.write_config_text(ws, seed)
+        result = create_workspace(
+            None if (listed and ws.workspaces_id is None) else ws,
+            workspace_id=requested_id,
+            organization=args.organization,
+            name=args.name,
+            storage_service=args.storage,
+            seed_toml=seed,
+        )
+        ws = result.workspace
+        workspace_id = result.identity.workspace_id or ""
+        name = result.identity.name or ""
+        organization = result.identity.organization or ""
+        service = result.identity.storage_service or DEFAULT_STORAGE_SERVICE
 
-        # Identity already recorded in the config wins over any local accident. Read it
-        # once: `create` is idempotent, so on a re-run (or on a second machine sharing a
-        # store of workspaces) these are the values that must survive.
-        recorded = wsconfig.read_identity(ws)
-
-        # Prefer an explicit --name, then the name the config already records, and only
-        # then the directory name. Without the middle term, re-running create against a
-        # shared config renames the workspace after whatever the local directory happens
-        # to be called — overwriting the display name in the remote store too.
-        name = args.name or recorded.name or ws.root.name
-
-        # --organization is required for a *new* workspace and optional once the config
-        # records one, so adopting an existing workspace does not make you retype the
-        # value that defines its namespace URIs — retyping it is exactly how a typo
-        # would re-organize the whole org's workspace.
-        organization = args.organization or recorded.organization
-        if organization is None:
-            raise InvalidArgument(
-                "--organization is required to create a workspace. It is embedded in "
-                "this workspace's docset namespace URIs "
-                "(http://dgml.io/<organization>/<DocSetSlug>), so pick a stable "
-                "identifier for your org. It becomes optional once the workspace's "
-                "config.toml records one."
-            )
-        if (
-            args.organization is not None
-            and recorded.organization is not None
-            and args.organization != recorded.organization
-        ):
+        if result.organization_changed_from is not None:
             # Loud, and not behind --verbose: this rewrites the organization for every
             # consumer of the workspace, and only affects *newly* generated XML, so the
             # corpus ends up split across two namespaces with nothing to flag it later.
-            sys.stderr.write(
+            _log.warning(
                 f"Warning: --organization {args.organization!r} differs from the "
-                f"{recorded.organization!r} recorded in {ws.config_path}.\n\n"
+                f"{result.organization_changed_from!r} recorded in {ws.config_location}.\n\n"
                 f"The workspace is now organization {args.organization!r}. Docset "
                 f"namespace URIs generated from here on will use it, while XML already "
                 f"generated keeps the old namespace.\n\n"
                 f"If this was a typo, re-run with --organization "
-                f"{recorded.organization!r}.\n"
+                f"{result.organization_changed_from!r}."
             )
-        # Inherit the recorded service, exactly as --organization is inherited above,
-        # and for a sharper reason: without the middle term, re-running `create` on a
-        # workspace bound to `acme` silently rebound it to the local-disk `default` and
-        # re-sealed, so the next `file add` wrote to local disk while the corpus sat in
-        # S3 — a silent change of where a user's data goes, on a command documented as
-        # safe to re-run.
-        service = args.storage or recorded.storage_service or DEFAULT_STORAGE_SERVICE
-        if (
-            args.storage is not None
-            and recorded.storage_service is not None
-            and args.storage != recorded.storage_service
-        ):
+        if result.storage_service_changed_from is not None:
             # Loud, and not behind --verbose: this rebinds where the workspace's data
             # lives. Artifacts already written stay on the old backend, so the corpus
             # ends up split across two with nothing to flag it later.
-            sys.stderr.write(
+            _log.warning(
                 f"Warning: --storage {args.storage!r} differs from the "
-                f"{recorded.storage_service!r} recorded in {ws.config_location}.\n\n"
+                f"{result.storage_service_changed_from!r} recorded in "
+                f"{ws.config_location}.\n\n"
                 f"This workspace's data now resolves through "
                 f"[storage.{args.storage}]. Anything already written stays on "
-                f"[storage.{recorded.storage_service}] — dgml does not move data.\n\n"
+                f"[storage.{result.storage_service_changed_from}] — dgml does not move "
+                f"data.\n\n"
                 f"If this was not intended, re-run with --storage "
-                f"{recorded.storage_service!r}.\n"
+                f"{result.storage_service_changed_from!r}."
             )
-        # Validate the named service before anything is created, so a bad --storage
-        # fails without leaving a half-built workspace behind. This is also the point
-        # `register_workspace` used to occupy.
-        load_store_configs(ws, service)
-        if seed is not None:
-            # A seed exists to name a backend. If it declares services but not the one
-            # selected, binding would fall through to the bundled local store — silently
-            # building the workspace somewhere the user did not ask for, which is only
-            # discovered once their data appears to be missing.
-            declared = wsconfig.declared_services(ws)
-            if wsconfig.read_storage_table(ws, service) is None and declared:
-                raise InvalidArgument(
-                    f"{ws.config_location} declares no [storage.{service}]. It does declare "
-                    f"{', '.join(f'[storage.{d}]' for d in declared)} — select one with "
-                    f"--storage <name>, or the workspace would be created on the bundled "
-                    f"local-disk store instead of the backend this config names."
-                )
-
-        # Write the whole binding — the [storage.<service>] table *and* the
-        # `storage_service` pointer — before anything resolves a store. Resolution
-        # reads that pointer to decide which table to use, so computing the seal (or
-        # touching ws.blobs/ws.docs) any earlier resolves against a config that does
-        # not yet name the service: the workspace would be built on the bundled local
-        # store and sealed to it, then fail STORAGE_BACKEND_MISMATCH on the very next
-        # command once the pointer became readable.
-        ws.root.mkdir(parents=True, exist_ok=True)
-        _write_workspace_config(ws, service, seed is not None)
-        # Reuse the id the config already carries; generate only for a genuinely new
-        # workspace. Minting unconditionally broke the documented "idempotent and safe
-        # to re-run" promise in two ways: re-running on the same machine forked the id
-        # and left two rows for one workspace, and running it on a second machine
-        # against a shared config changed the org's workspace identity — including the
-        # `workspace` record in the remote doc store.
-        workspace_id = (
-            ws.workspaces_id
-            or recorded.workspace_id
-            or requested_id
-            or generate_unique_workspace_id()
-        )
-        wsconfig.write_identity(
-            ws,
-            workspace_id=workspace_id,
-            name=name,
-            organization=organization,
-            storage_service=service,
-            created_at=recorded.created_at or now_iso(),
-        )
-
-        # Re-open now that the config is complete: `store_configs` is a
-        # cached_property, so a fresh object is what guarantees the seal and the
-        # stores below come from the finished binding rather than a memoized guess.
-        ws = Workspace(root=ws.root, workspaces_id=ws.workspaces_id)
-        wsconfig.write_identity(ws, storage_fingerprint=storage_fingerprint_pair(*ws.store_configs))
-
-        # Now build the workspace through the selected backend. Nothing is
-        # scaffolded first: stores create their own containers on write, so the
-        # workspace exists by virtue of its config and this first document.
-        ws.write_meta(name=name, organization=organization, workspace_id=workspace_id)
-        # Stamp the current layout revision so a brand-new workspace is never
-        # mistaken for an old one and re-scanned by the migration on first use.
-        stamp_schema_version(ws)
 
         upath = user_config_path()
         config_present = upath.exists()
@@ -2111,7 +2016,7 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             "workspace_config_path": _workspace_config_file(ws),
             "config_location": ws.config_location,
             "listed": ws.workspaces_id is not None,
-            "storage_fingerprint": wsconfig.read_identity(ws).storage_fingerprint,
+            "storage_fingerprint": result.identity.storage_fingerprint,
             "config_path": str(upath),
             "config_present": config_present,
         }
@@ -2120,10 +2025,10 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             # configures credentials. Always on stderr (no --verbose needed).
             keys = " / ".join(API_KEY_ENV_VARS)
             payload["next_action"] = f"run `dgml init` and set one of {keys}"
-            sys.stderr.write(
+            _log.warning(
                 "Warning: no user-level config found.\n\n"
                 "Some commands will fail until credentials are configured.\n\n"
-                f"Run `dgml init` and set one of {keys}.\n"
+                f"Run `dgml init` and set one of {keys}."
             )
         if ws.workspaces_id is not None:
             # A listed workspace has no path to use as a handle, and a bare next command
@@ -2141,12 +2046,12 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                 "next_action",
                 f"address it with --workspace {workspace_id} (or: export DGML_HOME={workspace_id})",
             )
-            sys.stderr.write(
+            _log.warning(
                 f"Workspace {workspace_id} is in this machine's store of workspaces, not a "
                 f"directory here.\n\n"
                 f"Use it with:  dgml --workspace {workspace_id} <command>\n"
                 f"or, for this shell:  export DGML_HOME={workspace_id}\n\n"
-                f"'dgml workspace list' shows it again later.\n"
+                f"'dgml workspace list' shows it again later."
             )
         _emit(payload, fmt)
         return 0
@@ -2188,7 +2093,8 @@ def _workspace_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             raise WorkspaceNotInitialized(
                 _uninitialized_message(
                     ws, from_default=_root_is_the_cwd_default(args, path=args.path)
-                )
+                ),
+                workspace=ws,
             )
         previous = wsconfig.read_identity(ws).storage_fingerprint
         blob_cfg, doc_cfg = ws.store_configs
@@ -2272,21 +2178,18 @@ def _dispatch(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         return 0
 
     if cmd == "check":
-        report = check_workspace(
-            ws, retry_errors=args.retry_errors, verbose=args.verbose, debug=args.debug
-        )
+        report = check_workspace(ws, retry_errors=args.retry_errors, debug=args.debug)
         _emit(report.to_json(), fmt)
         return 0 if report.ok else 2
 
     if cmd == "cluster":
         try:
             from dgml_core.clustering import clustering
-        except ImportError:
-            return _emit_error(
-                "MISSING_EXTRA",
+        except ImportError as exc:
+            raise MissingExtra(
                 "The 'clustering' extra is not installed. Run: pip install dgml[clustering]",
-                fmt,
-            )
+                extra="clustering",
+            ) from exc
         # `clustering` owns the `skipped` key and the skip-existing no-op
         # short-circuit (which avoids re-scanning the workspace). `config`
         # is passed through raw — it may be a preset name or a path.
@@ -2361,8 +2264,8 @@ def _discover_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             tag_names = [m.name for m in metrics]
             semantic_map = classify_tags_with_llm(tag_names, llm_cfg)
         except Exception as exc:
-            sys.stderr.write(
-                f"[dgml discover] semantic filter unavailable ({exc}), falling back to All\n"
+            _log.warning(
+                f"[dgml discover] semantic filter unavailable ({exc}), falling back to All"
             )
             filter_name = "All"
 
@@ -2405,10 +2308,10 @@ def _chain_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     # staking/dgml_chain (broken transitive dep, code bug) must surface as
     # INTERNAL_ERROR rather than be masked as "extra not installed".
     if importlib.util.find_spec("dgml_chain") is None:
-        return _emit_error(
-            "MISSING_EXTRA",
+        raise MissingExtra(
             "The 'chain' extra is not installed. Run: pip install dgml[chain]",
-            fmt,
+            extra="chain",
+            distribution="dgml-chain",
         )
     from dgml_core import staking
 
@@ -2979,7 +2882,21 @@ def _add_generate_subparser(
     )
     gen.add_argument("--window-size", type=int, default=10, help="Pages per transcription window.")
     gen.add_argument("--temperature", type=float, default=0.0)
-    gen.add_argument("--max-tokens", type=int, default=32000)
+    # Keep in step with ConvertOptions.max_tokens — see the note there for
+    # why the ceiling is 64000 rather than 32000.
+    gen.add_argument("--max-tokens", type=int, default=64000)
+    gen.add_argument(
+        "--thinking",
+        choices=["disabled", "adaptive"],
+        default=None,
+        help=(
+            "Anthropic extended thinking for both generation passes. Overrides "
+            "[generation] thinking, whose default is 'disabled'. Omitting the "
+            "field on the wire is NOT the same as turning thinking off: Claude "
+            "4.6+/5 models reason adaptively unless told not to. Ignored for "
+            "non-Anthropic models."
+        ),
+    )
     gen.add_argument(
         "--no-coverage",
         action="store_true",
@@ -3288,12 +3205,6 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     from dgml_core.usage import OPERATION_LINKS
     from dgml_core.xml_grounding import ground_dgml_xml
 
-    def _diag(msg: str) -> None:
-        # Progress is diagnostic, not part of the JSON contract: keep stdout a
-        # single JSON object and surface progress on stderr only under --verbose.
-        if args.verbose:
-            print(msg, file=sys.stderr, flush=True)
-
     ds_store = DocSetStore(ws)
     file_store = FileStore(ws)
 
@@ -3341,7 +3252,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     gen_api_base = gen_cfg.api_base
     label_api_key = resolve_generation_label_api_key(gen_cfg)
     label_api_base = gen_cfg.label_api_base
-    _diag(f"[models] transcription={gen_model} labeling={label_model} (source: {gen_model_source})")
+    _log.info(
+        f"[models] transcription={gen_model} labeling={label_model} (source: {gen_model_source})"
+    )
 
     # Pre-flight — fail fast BEFORE any transcription spend on the two model
     # misconfigurations detectable offline: a malformed model string, or a
@@ -3427,7 +3340,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                     },
                 )
             )
-            _diag(f"Source missing for {name} (file '{fid}') — reported as failed")
+            _log.info(f"Source missing for {name} (file '{fid}') — reported as failed")
             continue
         out_xml_key = layout.dgml_xml_key(args.docset_id, fid, stem)
         if ws.blobs.blob_exists(out_xml_key) and _has_generated_tree(
@@ -3441,7 +3354,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             prior_stems[stem] = name
             prior_out_paths[name] = out_xml_key
             name_to_fid[name] = fid  # in case it re-renders below and needs re-grounding
-            _diag(f"Skipping {name} (already converted)")
+            _log.info(f"Skipping {name} (already converted)")
             continue
         pt_prefix = layout.file_text_prefix(fid)
         candidates.setdefault(name, []).append(
@@ -3465,7 +3378,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                         fid,
                         name,
                         error={
-                            "code": "GENERATION_FAILED",
+                            "code": GenerationFailed.code,
                             "message": (
                                 f"duplicate filename '{name}' within the docset; the "
                                 "generation pipeline keys documents by filename, so give "
@@ -3474,7 +3387,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                         },
                     )
                 )
-            _diag(f"Duplicate filename '{name}' across {len(group)} files — reported as failed")
+            _log.info(f"Duplicate filename '{name}' across {len(group)} files — reported as failed")
             continue
         fid, out_xml_key, pt_pfx = group[0]
         convert_names.append(name)
@@ -3511,7 +3424,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     # name → short reason for a per-document transcription failure, so the
     # reconciliation loop below can name the cause in the JSON payload instead
     # of the generic "produced no output" message. The full error still goes to
-    # stderr under --verbose via _diag (convert_batch's progress log).
+    # the log at INFO (stderr under --verbose) via convert_batch's progress hook.
     gen_errors: dict[str, str] = {}
     # name → {code, message} when a file's labeling couldn't reach the model at
     # all (bad model id, wrong/absent key, network). Surfaced as label_error on
@@ -3536,7 +3449,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
 
     def _on_label_error(name: str, err: dict[str, str]) -> None:
         label_errors[name] = err
-        _diag(f"[label] {name}: model unreachable ({err.get('message', '')})")
+        _log.info(f"[label] {name}: model unreachable ({err.get('message', '')})")
 
     def _on_off_schema(name: str, tally: Counter[str]) -> None:
         # Which names the model reached for outside the supplied schema. The
@@ -3620,14 +3533,14 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 "grounded": False,
                 "grounding_error": {"code": exc.code, "message": str(exc)},
             }
-            _diag(f"[ground] {name}: not grounded ({exc})")
+            _log.info(f"[ground] {name}: not grounded ({exc})")
         else:
             grounding = {
                 "grounded": True,
                 "matched_token_pct": res.stats["matched_token_pct"],
                 "elements_annotated": res.stats["elements_annotated"],
             }
-            _diag(
+            _log.info(
                 f"[ground] {name}: {res.stats['elements_annotated']} element(s), "
                 f"{res.stats['matched_token_pct']}% tokens matched"
             )
@@ -3670,10 +3583,10 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 folded = f", {losses.merged} merged" if losses.merged else ""
                 lost = f", {losses.displaced} displaced" if losses.displaced else ""
                 nested = f", {losses.nested} nested dropped" if losses.nested else ""
-                _diag(f"[semlinks] {name}: {links_added} link(s){folded}{lost}{nested}{hit}")
+                _log.info(f"[semlinks] {name}: {links_added} link(s){folded}{lost}{nested}{hit}")
             except Exception as exc:  # a link-pass failure must not lose the DGML
                 link_errors[name] = short_error_message(exc)
-                _diag(f"[semlinks] {name}: skipped ({exc})")
+                _log.info(f"[semlinks] {name}: skipped ({exc})")
         # Re-embed the prior dg:extraction last, after grounding + semlinks
         # have finished rewriting the tree, so the extraction subtree is
         # spliced in verbatim and never run through those passes.
@@ -3683,9 +3596,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                     prior_with_extraction, ws.blobs.get_blob(xml_key).decode("utf-8")
                 )
                 ws.blobs.put_blob(xml_key, merged.encode("utf-8"))
-                _diag(f"[extraction] {name}: carried dg:extraction over into the fresh render")
+                _log.info(f"[extraction] {name}: carried dg:extraction over into the fresh render")
             except Exception as exc:  # never lose the fresh DGML over the merge
-                _diag(f"[extraction] {name}: dg:extraction NOT carried over ({exc})")
+                _log.info(f"[extraction] {name}: dg:extraction NOT carried over ({exc})")
         if name in prior_outputs:
             # an already-generated doc whose namespacing flipped
             rerendered_by_name[name] = None
@@ -3693,7 +3606,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
         pt_dir = page_text_dirs.get(name)
         if compute_cov and pt_dir is not None:
             result = cov_mod.compute_coverage(xml, name, page_text_dir=pt_dir)
-            _diag(cov_mod.coverage_summary_line(result))
+            _log.info(cov_mod.coverage_summary_line(result))
             # --debug: how many assigned labels reached the DGML (e.g. "180
             # labels exported over 200 total"). Reloads labeled blocks from
             # cache; best-effort, recorded under `label_propagation`.
@@ -3708,9 +3621,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                         result["label_propagation"] = {
                             k: v for k, v in prop.items() if k != "source"
                         }
-                        _diag(cov_mod.label_propagation_summary_line(prop))
+                        _log.info(cov_mod.label_propagation_summary_line(prop))
                 except Exception as exc:  # debug-only diagnostic — never fatal
-                    _diag(f"[labels] {name}: propagation check skipped ({exc})")
+                    _log.info(f"[labels] {name}: propagation check skipped ({exc})")
             cov_by_name[name] = result
         # Each present only when that step failed, like grounding_error, which
         # appears only when grounded is False.
@@ -3778,12 +3691,12 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 )
                 authored_seed = schema_seed
                 authored = True
-                _diag(
+                _log.info(
                     f"Loaded schema: {len(schema_seed.tags)} concept(s), "
                     f"{len(parent_map_seed)} container link(s) from {args.schema_path}"
                 )
                 for note in schema_notes:
-                    _diag(f"[schema] {note}")
+                    _log.info(f"[schema] {note}")
             elif not args.no_roster:
                 # Incremental reuse in precedence order: the vocabulary the USER
                 # authored first (never overwritten by derive_schema), then the
@@ -3801,22 +3714,22 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                             authored_local, layout.AUTHORED_SCHEMA_FILE
                         )
                         authored = True
-                        _diag(
+                        _log.info(
                             f"Reusing the docset's authored schema: {len(schema_seed.tags)} tag(s)"
                         )
                     except InvalidArgument as exc:
-                        _diag(f"[schema] authored-schema.json unusable ({exc}); ignoring")
+                        _log.info(f"[schema] authored-schema.json unusable ({exc}); ignoring")
                         schema_seed, parent_map_seed = None, {}
                 if schema_seed is None and schema_json_local.exists():
                     try:
                         schema_seed = Schema.load(schema_json_local)
-                        _diag(f"Reusing docset schema: {len(schema_seed.tags)} tag(s)")
+                        _log.info(f"Reusing docset schema: {len(schema_seed.tags)} tag(s)")
                     except (json.JSONDecodeError, TypeError, ValueError, OSError):
                         schema_seed = None
                 if schema_seed is None and roster_path.exists():
                     try:
                         roster_seed = _load_schema_roster(roster_path)
-                        _diag(f"Reusing docset roster: {len(roster_seed)} concept(s)")
+                        _log.info(f"Reusing docset roster: {len(roster_seed)} concept(s)")
                     except InvalidArgument:
                         roster_seed = None
 
@@ -3851,19 +3764,19 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                 authored=authored,
             )
             if vocab.closed:
-                _diag(
+                _log.info(
                     f"Vocabulary CLOSED at {len(vocab.names)} tag(s): the generated DGML uses "
                     "these tag names and no others. Unmatched content still renders "
                     "(as dg:chunk, text intact)."
                 )
             elif vocab.extends:
-                _diag(
+                _log.info(
                     f"Vocabulary EXTENDS {len(vocab.names)} authored tag(s): these are reused "
                     "wherever one fits; a role they do not cover may be coined, and every "
                     "coinage is reported under added_concepts."
                 )
             elif seed_names:
-                _diag(f"Seeded with {len(seed_names)} derived tag(s); labeling may coin more")
+                _log.info(f"Seeded with {len(seed_names)} derived tag(s); labeling may coin more")
 
             # Reload already-generated docs from cache so the whole docset stays
             # consistent as its schema/roster grows; changed originals re-render
@@ -3903,6 +3816,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                     window_size=args.window_size,
                     temperature=args.temperature,
                     max_tokens=args.max_tokens,
+                    thinking=args.thinking or gen_cfg.thinking,
                     max_parallel_docs=args.max_parallel_calls,
                     cache_dir=cache_dir,
                     debug=args.debug,
@@ -3915,7 +3829,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                     schema_seed=schema_seed,
                     parent_map=parent_map_seed or None,
                     vocab=vocab,
-                    progress=_diag,
+                    progress=_log.info,
                 )
                 convert_batch(
                     pdf_paths,
@@ -3951,7 +3865,7 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
                             "failed",
                             fid,
                             name,
-                            error={"code": "GENERATION_FAILED", "message": message},
+                            error={"code": GenerationFailed.code, "message": message},
                         )
                     )
             if cov_report_key is not None and cov_results:
@@ -3984,9 +3898,11 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
             if not args.cache_dir and authored_seed is not None:
                 authored_seed.save(authored_local)
                 ws.blobs.put_blob(authored_key, authored_local.read_bytes())
-                _diag(f"[schema] wrote {layout.AUTHORED_SCHEMA_FILE} (authored vocabulary)")
+                _log.info(f"[schema] wrote {layout.AUTHORED_SCHEMA_FILE} (authored vocabulary)")
     else:
-        _diag("Nothing to convert — every file is already converted, missing, or a duplicate name.")
+        _log.info(
+            "Nothing to convert — every file is already converted, missing, or a duplicate name."
+        )
 
     # Final step, after every file is converted, grounded and semlinked:
     # refresh the docset's full-schema.rnc (schema.json rendered as RELAX NG
@@ -3995,9 +3911,9 @@ def _docset_generate_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> i
     try:
         rnc_key = write_docset_rnc(ws, args.docset_id)
         if rnc_key is not None:
-            _diag(f"[schema] wrote {rnc_key.rsplit('/', 1)[-1]}")
+            _log.info(f"[schema] wrote {rnc_key.rsplit('/', 1)[-1]}")
     except Exception as exc:
-        _diag(f"[schema] full-schema.rnc skipped ({exc})")
+        _log.info(f"[schema] full-schema.rnc skipped ({exc})")
 
     # Report the coverage report key only if a report was actually written.
     coverage_report = cov_report_key if cov_results else None
@@ -4256,7 +4172,6 @@ def _file_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             on_conflict=ConflictPolicy(args.on_conflict),
             text_mode=TextMode(args.text_mode),
             dpi=args.dpi,
-            verbose=args.verbose,
             debug=args.debug,
         )
         payload: dict[str, Any] = _file_add_payload(result)

@@ -15,6 +15,12 @@ flag-driven (no interactive prompts) and idempotent where reasonable.
   ```json
   { "error": { "code": "FILE_NOT_FOUND", "message": "..." } }
   ```
+  It also carries plain-text diagnostics from Python `logging` (the `dgml` and
+  `dgml_core` loggers). By default only warnings are shown: a model tier
+  fallback, an unreachable style model, a changed `--organization`, and similar.
+  `--verbose` (or `DGML_DEBUG=1` in the environment) adds INFO lines. `--debug`
+  does **not** change what is logged; it controls which intermediate files are
+  kept.
 - Exit codes:
   - `0` — success
   - `1` — error (anything in the `error` envelope)
@@ -46,8 +52,8 @@ or after a command group (`dgml docset --format text list`).
 | `--workspace`    | Override the workspace to open — a filesystem path **or** a workspace id from `dgml workspace list`. An id is 3 to 40 characters using only lowercase letters, digits, hyphens and underscores, starting with a letter or digit (`my-workspace`, or a generated `ws_…`), so it can also be a directory name; the two are told apart by **looking**: a value the store of workspaces holds is that workspace, an existing directory of that name is a path, and a value that is neither fails with `WORKSPACE_NOT_FOUND` rather than being treated as a path to create. A listed id wins over a same-named directory — address the directory as `./name`. Anything carrying a separator, a dot or an uppercase letter is always a path. Default: `$DGML_HOME` (also either form) then `./dgml-workspace`. |
 | `--workspace-config` | **Removed.** Still accepted so an existing caller gets a JSON error envelope instead of an argparse usage dump; passing it (or setting `$DGML_CONFIG`) fails with `INVALID_ARGUMENT` naming the replacement. It only ever worked as an address because the per-machine index recorded the location and handed it back on the next open. To start a workspace from a config you authored, use `dgml workspace create --from-config <path>`. |
 | `--format`       | `json` (default) or `text`. |
-| `--verbose`      | Emit informational diagnostics to stderr. Controls hybrid text-mode warnings (digital/OCR conflicts, OCR misses) and the per-page merge summary, plus the `docset generate` pipeline's progress lines. Off by default — stderr stays reserved for error envelopes. |
-| `--debug`        | Keep intermediate debug files in the workspace **and** record LLM cost/token telemetry to `<workspace>/usage.jsonl`. Off by default, so only final files (and the small functional cache the next run reloads) are kept. With `--debug` off: no `usage.jsonl` rows are written for **any** operation (classify, cluster, transcribe, label, links, schema/value extraction, hybrid merge); `docset generate` skips the debug-only `cache/` artifacts (raw LLM dumps, `*.concept.xml`/`*.semantic.xml`, prompt listings) and `coverage_report.json`; and the in-place grounding pass skips the `<stem>.dgml.grounding_stats.json` sidecar. The functional `cache/` files (`*_blocks.json`, `label_*_cNN_raw.json`, `concept_roster.json`) are **always** written — incremental generation reloads them. Pass `--debug` to retain the debug artifacts and log usage. (Coverage summaries still print on stderr under `--verbose` either way.) |
+| `--verbose`      | Emit informational diagnostics (INFO-level log lines) to stderr: hybrid text-mode warnings (digital/OCR conflicts, OCR misses) and the per-page merge summary, per-page style-annotation failures, workspace-upgrade notices, and the `docset generate` pipeline's progress lines. Off by default, so stderr carries only error envelopes and warnings. `DGML_DEBUG=1` in the environment has the same effect (plus the full traceback on an uncaught error, which `--verbose` also shows). |
+| `--debug`        | Keep intermediate debug files in the workspace **and** record LLM cost/token telemetry to `<workspace>/usage.jsonl`. Off by default, so only final files (and the small functional cache the next run reloads) are kept. With `--debug` off: no `usage.jsonl` rows are written for **any** operation (classify, cluster, transcribe, label, links, schema/value extraction, hybrid merge); `docset generate` skips the debug-only `cache/` artifacts (raw LLM dumps, `*.concept.xml`/`*.semantic.xml`, prompt listings) and `coverage_report.json`; and the in-place grounding pass skips the `<stem>.dgml.grounding_stats.json` sidecar. The functional `cache/` files (`*_blocks.json`, `label_*_cNN_raw.json`, `concept_roster.json`) are **always** written — incremental generation reloads them. Pass `--debug` to retain the debug artifacts and log usage. (Coverage summaries still print on stderr under `--verbose` either way.) `--debug` does not change log output — log verbosity is `--verbose` / `DGML_DEBUG=1`. |
 
 ## Workspace commands
 
@@ -822,17 +828,22 @@ The models are **not** CLI flags — like every other model-consuming command
 (`extraction generate-schema`, `extraction extract`, `discover`), `generate` reads them
 solely from the merged config, so each is one visible, deliberate choice. Each
 model resolves from its per-task field (`generation.model`,
-`generation.label_model`) or, when unset, its `[models]` tier (`standard` for
-transcription, `advanced` for labeling). There is no code default: if neither a
+`generation.label_model`) or, when unset, the `standard` `[models]` tier — for
+both tasks, since measurement did not support paying the `advanced` tier for
+labeling. There is no code default: if neither a
 field nor a tier names a model it fails with `GENERATION_CONFIG_MISSING`, a
 malformed one with `GENERATION_CONFIG_INVALID`. The two models carry independent
 credentials (`api_key`/`api_key_env`/`api_base` for transcription,
 `label_api_key`/`label_api_key_env`/`label_api_base` for labeling) since they may
-name different providers. See the [`generation` config
+name different providers. Anthropic extended thinking is off for both passes
+unless `generation.thinking = "adaptive"` says otherwise — a Claude 4.6+/5 model
+thinks adaptively when a request omits the field, so the mode is stated rather
+than inherited. See the [`generation` config
 section](storage-layout.md#generation-required-for-dgml-docset-generate).
 | `--window-size <n>` | `10` | Pages per transcription window. |
 | `--temperature <f>` | `0.0` | LLM temperature. |
-| `--max-tokens <n>` | `32000` | LLM max output tokens per call. |
+| `--max-tokens <n>` | `64000` | LLM max output tokens per call, clamped to each model's own ceiling. A long document produces *more* calls rather than bigger ones (transcription is windowed, labeling is chunked), so this is headroom rather than a target — the largest reply measured across 1,884 cached calls was ~29.9K tokens, from the roster-sized `describe_concepts` call. Raising the ceiling costs nothing on calls that don't use it, since billing is on tokens actually produced. |
+| `--thinking <mode>` | from config | Anthropic extended thinking for both generation passes: `disabled` or `adaptive`. Overrides `generation.thinking`, whose default is `disabled`. Omitting the field on the wire is **not** the same as turning thinking off — Claude 4.6+/5 models reason adaptively unless told not to, so the mode is stated rather than inherited. Ignored for non-Anthropic models. |
 | `--no-coverage` | off | Skip word-coverage metrics (unique-lexicon recall, ROUGE-1/2) computed against the workspace `page_text/`. |
 | `--cache-dir <dir>` | `<docset-dir>/cache` | Directory for the generation cache (functional `*_blocks.json` / `label_*_cNN_raw.json` / `concept_roster.json`, always written; plus per-window debug snapshots when `--debug` is set). |
 
@@ -1349,7 +1360,10 @@ payloads. Chunking is strictly that escalation: an ordinary run is never
 offered the continuation tool or the `done` flag, so it can't split output
 that fits in one call. `extraction_stats.json` records both under
 `phases.phase1`: `chunk_calls` (1 = ordinary single submission) and
-`truncated_retries`.
+`truncated_retries`. `phases.phase3.pages_out_of_range` counts the pages
+phase 1 cited that the file does not have (outside `1..page_count`, with no
+page image): their items make no phase-3 call and stay unmatched, like any
+other leaf phase 3 could not resolve, and the run still writes the tree.
 
 **Schema-declared invariants.** A field may carry a `## Invariant:` annotation
 naming a checkable relation against the rest of the submission — the
@@ -1396,7 +1410,9 @@ inlined schema, e.g. Gemini's "too many states for serving").
 
 Errors across the group: `DOCSET_NOT_FOUND`, `FILE_NOT_FOUND`,
 `SCHEMA_NOT_FOUND`, `SCHEMA_INVALID`, `GUIDANCE_NOT_FOUND`, `NO_FILES`,
-`VALUES_NOT_FOUND`, `GROUNDED_CONFIG_MISSING`, `GROUNDED_CONFIG_INVALID`.
+`VALUES_NOT_FOUND`, `GROUNDED_CONFIG_MISSING`, `GROUNDED_CONFIG_INVALID`,
+and `CONVERSION_FAILED` when the file has no PDF because its conversion
+failed at `file add` (the message repeats the converter's error).
 
 ## File commands
 
@@ -1444,7 +1460,7 @@ existing record that does not carry the requested id.
 | `--text-mode` | Behavior |
 |---|---|
 | `digital` (default) | Extract digital text from the PDF with `pdfminer.six`. A permanent text-extraction error is recorded for files with no digital text — the File record is still created (soft fail). |
-| `ocr` | Send each rendered page image to the cloud provider configured in `<workspace>/config.toml`. Requires the `azure` or `aws` extra (`uv sync --extra azure` / `uv sync --extra aws` from a repo checkout; `pip install dgml[azure]`/`dgml[aws]` once DGML is published to PyPI). See "OCR configuration" below. |
+| `ocr` | Send each rendered page image to the provider configured in `<workspace>/config.toml` (a bundled one, or your own — see [ocr-providers.md](ocr-providers.md)). The bundled cloud providers require the `azure` or `aws` extra (`uv sync --extra azure` / `uv sync --extra aws` from a repo checkout; `pip install dgml[azure]`/`dgml[aws]` once DGML is published to PyPI). See "OCR configuration" below. |
 | `hybrid` | Run `digital` then `ocr` and merge the two per-page results by grouping words covering the same area into overlap regions (boxes overlap on IoU > 0.5 *or* one mostly contained in the other, so split/merge tokenization is resolved as a unit). Each region is resolved as a whole: OCR-only regions are kept; digital-only regions (no overlapping OCR) are assumed invisible to the human eye and dropped; mixed regions compare both sides' concatenated text by dash-normalized Levenshtein distance — if they agree (distance ≤ 2) digital wins (its characters come straight from the PDF font, more reliable than OCR even when OCR's tokenization is finer), and if they disagree OCR wins. A page whose digital text is mostly unresolved glyphs (pdfminer `(cid:N)` sentinels) falls back to OCR entirely. Default is silent — pass the global `--verbose` flag to surface per-page warnings and the merge summary on stderr. Requires the same `ocr` workspace config as `--text-mode ocr`. Optionally, an LLM can make the per-region decision instead of this heuristic — declare a `text_extraction` section in `config.toml` (e.g. a local Ollama model); see [storage-layout.md](storage-layout.md#text_extraction-optional). Any LLM failure falls back to the heuristic for that page. |
 
 `--dpi N` sets the resolution page images are rasterized at, in dots per
@@ -1500,7 +1516,7 @@ Error codes that can come back on `file add`:
 | Code | Cause |
 |---|---|
 | `OCR_CONFIG_MISSING` | `--text-mode ocr` or `--text-mode hybrid` but `<workspace>/config.toml` is missing or has no `ocr` section. No record is created. |
-| `OCR_CONFIG_INVALID` | `<workspace>/config.toml` has an `ocr` section with invalid fields. No record is created. |
+| `OCR_CONFIG_INVALID` | `<workspace>/config.toml` has an `ocr` section with invalid fields, or names a provider that cannot be imported / is not an `OcrProvider`. No record is created. |
 | `TEXT_EXTRACTION_CONFIG_INVALID` | `--text-mode hybrid` but the optional `text_extraction` section in `<workspace>/config.toml` is malformed. No record is created. |
 | `UNSUPPORTED_FILE_TYPE` | Path is not a `.pdf` and is not a convertible source with a converter configured for its format family. |
 | `INVALID_PDF` | File does not start with the `%PDF-` magic. |
@@ -1756,6 +1772,23 @@ When `--text-mode ocr` is used, the provider and its settings come from
 into source control, so secrets *may* live directly in `config.toml`
 (`api_key`) — but the safer default is to use `api_key_env` and keep
 the key in an environment variable.
+
+`ocr.provider` accepts a bundled short name (`azure`, `aws`, `macos`) **or** a
+dotted `"module.path:ClassName"` naming your own `OcrProvider` subclass, with
+its options alongside it in the same table:
+
+```json
+{
+  "ocr": {
+    "provider": "my_pkg.tesseract:TesseractProvider",
+    "lang": "eng"
+  }
+}
+```
+
+The short names are aliases for the bundled classes' own dotted paths — there
+is no privileged built-in set. See [ocr-providers.md](ocr-providers.md) for the
+provider contract and a worked example.
 
 ### Azure Document Intelligence
 
@@ -2365,9 +2398,9 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `INVALID_PDF` | hard | File does not start with the `%PDF-` magic. |
 | `CONFLICT` | hard | Hash- or path-conflict under `--on-conflict error`; `file add --id <id>` naming an id another File already holds; or `workspace create --id <id>` naming an id the store of workspaces already holds. |
 | `CONVERSION_CONFIG_INVALID` | hard | The `conversion` config section is malformed. |
-| `CONVERSION_FAILED` | hard / soft | A docx/xlsx→PDF conversion failed (soft as `conversion_error` on a bulk add entry). |
+| `CONVERSION_FAILED` | hard / soft | A docx/xlsx→PDF conversion failed (soft as `conversion_error` on a bulk add entry); also raised by `extraction generate-schema` and `extraction extract` for a file that has no PDF because its conversion failed. |
 | `OCR_CONFIG_MISSING` | hard | `--text-mode ocr`/`hybrid` with no `ocr` config section. |
-| `OCR_CONFIG_INVALID` | hard | The `ocr` config section has invalid fields. |
+| `OCR_CONFIG_INVALID` | hard | The `ocr` config section has invalid fields, or names a provider that cannot be resolved. |
 | `OCR_FAILED` | soft | Provider API failure during `--text-mode ocr`/`hybrid`; recorded on the File (`text_extraction_error`). |
 | `TEXT_EXTRACTION_CONFIG_INVALID` | hard | The optional `text_extraction` (hybrid-merge) config is malformed. |
 | `STYLE_CONFIG_INVALID` | hard | The optional `style` (image-based `dg:style` for OCR files) config section is malformed; fails `generate` up front. |
@@ -2385,6 +2418,8 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `SCHEMA_INVALID` | hard | A schema passed to `extraction set-schema` is not valid RNC (within the supported subset) or not a JSON object. |
 | `NO_FILES` | hard | `extraction generate-schema` has no sample files (empty DocSet and no `--from-file`). |
 | `VALUES_NOT_FOUND` | hard | `extraction get-values` ran before `extraction extract` for that file. |
+| `GENERATION_CONFIG_MISSING` | hard | A generation model can't be resolved — neither the per-task field (`generation.model` / `generation.label_model`) nor its `[models]` tier (`standard` / `advanced`) is set in the merged config. |
+| `GENERATION_CONFIG_INVALID` | hard | The `generation` config section has a missing/invalid field. |
 | `GROUNDED_CONFIG_MISSING` | hard | An `extraction` command needs a `grounded` config section that is absent. |
 | `GROUNDED_CONFIG_INVALID` | hard | The `grounded` config section has a missing/invalid field. |
 | `SCHEMA_GENERATION_FAILED` | hard | The schema-generation LLM call failed or returned a non-object. |
@@ -2394,7 +2429,7 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `CHAIN_TX_REVERTED` | hard | A broadcast `stake`/`registry create` transaction reverted on-chain. |
 | `WALLET_KEY_MISSING` | hard | No signing key in the OS keyring, or it doesn't control `--from`. |
 | `RECORD_NOT_FOUND` | hard | `prove` could not find the anchored record (bad checksum/registry). |
-| `MANIFEST_INVALID` | hard | A `dgmlx verify` bundle is structurally broken (missing/duplicate page number, absent artifact). |
+| `ATTESTATION_INVALID` | hard | A `dgmlx verify` bundle or an `attestation.xml` is structurally broken — missing/duplicate page number, absent artifact, not well-formed XML, or missing a required attribute. |
 | `ENGINE_NOT_AVAILABLE` | soft | The configured PDF engine cannot run (e.g. `pypdfium2` without the `pdfium` extra installed); recorded as a page-render failure, or a per-file `failed` entry when it was slicing. |
 | `GHOSTSCRIPT_NOT_FOUND` | soft | The ghostscript binary (`gs`, or `gswin64c`/`gswin32c` on Windows) is not on `PATH` (an `ENGINE_NOT_AVAILABLE` subtype); recorded as a page-render failure. |
 | `PAGE_RENDER_FAILED` | soft | The page renderer failed to render a page; recorded on the File (`page_render_error`). |
@@ -2408,7 +2443,13 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `WORKSPACE_NOT_FOUND` | hard | `--workspace <id>` named something the store of workspaces does not hold and that is not an existing directory either. Deliberately an error rather than falling through to path resolution: with both places looked in and neither answering, the likeliest explanation is a typo'd id, and resolving to a path would turn that typo into a new directory. |
 | `WORKSPACES_WRITE_CONFLICT` | hard | Another writer changed this workspace's `config.toml` since it was read. A config is written whole, so overwriting would discard whatever that writer changed; re-run the command to work from the current config. Only backends that make writes conditional on the stored text (Mongo) can report this; the local-dir store has one writer per machine and does not. |
 | `STORAGE_BACKEND_MISMATCH` | hard | The `[storage]` configuration a workspace resolves no longer matches the `storage_fingerprint` sealed in its `config.toml` — its data is on the previously sealed backend. Accept the change with `dgml workspace reseal <root>`, or restore the `[storage]` table. |
-| `NOT_IMPLEMENTED` | hard | A requested mode/path is not implemented. |
+| `WORKSPACES_UNAVAILABLE` | hard | The store of workspaces could not be reached — it is what *finds* a workspace, so this fails every command, not just the one that touches the backing store. The message names the host, port and driver error. |
+| `WORKSPACE_MIGRATION_FAILED` | hard | An automatic in-place workspace upgrade could not complete; the workspace is left as it was, and the message names the migration that stopped. |
+| `EMPTY_MODEL_RESPONSE` | hard | An LLM call returned no content at all (as distinct from content that failed to parse). |
+| `INCREMENTAL_WITHOUT_CLUSTERS` | hard | `cluster --skip-existing` in a workspace that has no existing clusters to build on. |
+| `LINK_PLAN_FAILED` | soft | The semantic-link pass failed for a document during `docset generate`; the document still converts, unlinked. |
+| `GUIDANCE_NOT_FOUND` | hard | An `extraction` command needs DocSet guidance that has not been set. |
+| `REGISTRY_NOT_FOUND` | hard | A named on-chain registry does not exist (`stake`, `prove`). |
 | `DGML_ERROR` | hard | Generic base code; specific codes above are preferred. |
 
 Codes that read as soft above are the same identifiers, just delivered in a

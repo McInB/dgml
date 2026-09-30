@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from . import layout
@@ -24,23 +25,72 @@ from .conversion import (
     make_converter,
 )
 from .docsets import DocSetStore
+
+# Exported in full, and pinned so by tests/test_error_codes.py.
 from .errors import (
+    AttestationInvalid,
+    AuthError,
+    ChainConfigError,
+    ChainRpcFailed,
+    ChainTxReverted,
+    ClassificationConfigInvalid,
+    ClassificationConfigMissing,
+    ClassificationFailed,
+    ClusteringConfigInvalid,
     ConflictError,
     ConversionConfigInvalid,
     ConversionFailed,
     CorruptMetadata,
     DgmlError,
     DocSetNotFound,
+    EmptyModelResponse,
     EngineNotAvailable,
     FileNotFound,
+    GenerationConfigInvalid,
+    GenerationConfigMissing,
+    GenerationFailed,
     GhostscriptNotFound,
+    GroundedConfigInvalid,
+    GroundedConfigMissing,
+    GroundingFailed,
+    GuidanceNotFound,
+    IncrementalWithoutClusters,
     InvalidArgument,
     InvalidPDF,
+    LabelModelUnreachable,
+    LegacyConfigPresent,
+    LinkPlanFailed,
+    MissingExtra,
+    ModelNotSupported,
+    ModelsConfigInvalid,
+    NoExistingDocSets,
+    NotFoundError,
+    OcrConfigInvalid,
+    OcrConfigMissing,
+    OcrFailed,
     PageRenderFailed,
     PdfConfigInvalid,
+    PdfSliceFailed,
+    RecordNotFound,
+    RegistryNotFound,
+    SchemaGenerationFailed,
+    SchemaInvalid,
+    SchemaNotFound,
+    StorageBackendMismatch,
+    StorageConfigInvalid,
+    StorageProviderUnresolvable,
+    StyleConfigInvalid,
+    TextExtractionConfigInvalid,
+    TextExtractionFailed,
     UnsupportedFileType,
+    ValuesExtractionFailed,
+    WalletKeyMissing,
     WorkspaceMigrationFailed,
+    WorkspaceNotFound,
     WorkspaceNotInitialized,
+    WorkspacesConfigInvalid,
+    WorkspacesUnavailable,
+    WorkspacesWriteConflict,
 )
 from .file_attestation import (
     ArtifactKind,
@@ -74,6 +124,14 @@ from .migrations import (
     workspace_schema_version,
 )
 from .models import DocSet, FileRecord
+from .ocr import (
+    BUILTIN_OCR_PROVIDERS,
+    OcrConfig,
+    OcrProvider,
+    OcrProviderName,
+    load_ocr_config,
+    make_ocr_provider,
+)
 from .pages import EngineName, PdfConfig, PdfSlicer, load_pdf_config, slice_pages
 from .storage import Workspace
 from .storage_local import LocalStore
@@ -91,7 +149,9 @@ from .storage_service import (
     DocStore,
     StorageConfig,
 )
+from .text_extraction import TextMode
 from .workspace_config import WorkspaceIdentity
+from .workspace_create import CreateWorkspaceResult, create_workspace
 from .workspace_id import (
     ID_SHAPE,
     generate_unique_workspace_id,
@@ -112,6 +172,12 @@ if TYPE_CHECKING:
     from .consistency import CheckReport, Issue, check_workspace
 
 __version__ = "0.1.0"
+
+# Logging: every module logs through ``logging.getLogger(__name__)`` (so under
+# ``dgml_core.*``) and configures nothing — the caller decides where records go.
+# The NullHandler keeps a caller who configured nothing silent, rather than
+# falling through to Python's last-resort stderr handler.
+logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 #: Names re-exported from ``.consistency``, resolved on FIRST ACCESS rather than
 #: at import (PEP 562). That module reaches ``.hybrid`` → ``.llm`` → ``litellm``,
@@ -145,6 +211,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "BUILTIN_OCR_PROVIDERS",
     "DEFAULT_STORAGE_PROVIDER",
     "DEFAULT_STORAGE_SERVICE",
     "DEFAULT_WORKSPACES_PROVIDER",
@@ -155,9 +222,18 @@ __all__ = [
     "ArtifactKind",
     "ArtifactRef",
     "AttestationEntry",
+    "AttestationInvalid",
     "AttestationInventory",
+    "AuthError",
     "BlobStore",
+    "ChainConfigError",
+    "ChainRpcFailed",
+    "ChainTxReverted",
     "CheckReport",
+    "ClassificationConfigInvalid",
+    "ClassificationConfigMissing",
+    "ClassificationFailed",
+    "ClusteringConfigInvalid",
     "Collection",
     "ConflictError",
     "ConflictPolicy",
@@ -165,12 +241,14 @@ __all__ = [
     "ConversionFailed",
     "ConverterConfig",
     "CorruptMetadata",
+    "CreateWorkspaceResult",
     "DgmlError",
     "DocConverter",
     "DocSet",
     "DocSetNotFound",
     "DocSetStore",
     "DocStore",
+    "EmptyModelResponse",
     "EngineName",
     "EngineNotAvailable",
     "FileAttestation",
@@ -178,34 +256,76 @@ __all__ = [
     "FileRecord",
     "FileStore",
     "FileVersion",
+    "GenerationConfigInvalid",
+    "GenerationConfigMissing",
+    "GenerationFailed",
     "GhostscriptNotFound",
+    "GroundedConfigInvalid",
+    "GroundedConfigMissing",
+    "GroundingFailed",
+    "GuidanceNotFound",
+    "IncrementalWithoutClusters",
     "InvalidArgument",
     "InvalidPDF",
     "Issue",
+    "LabelModelUnreachable",
+    "LegacyConfigPresent",
+    "LinkPlanFailed",
     "LocalDirWorkspacesStore",
     "LocalStore",
     "Migration",
     "MigrationResult",
+    "MissingExtra",
+    "ModelNotSupported",
+    "ModelsConfigInvalid",
+    "NoExistingDocSets",
+    "NotFoundError",
+    "OcrConfig",
+    "OcrConfigInvalid",
+    "OcrConfigMissing",
+    "OcrFailed",
+    "OcrProvider",
+    "OcrProviderName",
     "PageRenderFailed",
     "PdfConfig",
     "PdfConfigInvalid",
+    "PdfSliceFailed",
     "PdfSlicer",
+    "RecordNotFound",
+    "RegistryNotFound",
+    "SchemaGenerationFailed",
+    "SchemaInvalid",
+    "SchemaNotFound",
+    "StorageBackendMismatch",
     "StorageConfig",
+    "StorageConfigInvalid",
+    "StorageProviderUnresolvable",
+    "StyleConfigInvalid",
+    "TextExtractionConfigInvalid",
+    "TextExtractionFailed",
+    "TextMode",
     "UnsupportedFileType",
+    "ValuesExtractionFailed",
     "VerifyResult",
+    "WalletKeyMissing",
     "Workspace",
     "WorkspaceIdentity",
     "WorkspaceMigrationFailed",
+    "WorkspaceNotFound",
     "WorkspaceNotInitialized",
     "WorkspaceOps",
     "WorkspacesConfig",
+    "WorkspacesConfigInvalid",
     "WorkspacesStore",
+    "WorkspacesUnavailable",
+    "WorkspacesWriteConflict",
     "__version__",
     "attest_file",
     "attest_file_version",
     "check_workspace",
     "collect_file_version",
     "collect_from_attestation",
+    "create_workspace",
     "default_workspaces_root",
     "default_workspaces_store",
     "export_attestation",
@@ -214,12 +334,14 @@ __all__ = [
     "is_workspace_id",
     "layout",
     "load_conversion_config",
+    "load_ocr_config",
     "load_pdf_config",
     "load_store_configs",
     "load_workspaces_config",
     "make_blob_store",
     "make_converter",
     "make_doc_store",
+    "make_ocr_provider",
     "make_workspaces_store",
     "migrate_workspace",
     "new_workspace_id",

@@ -23,7 +23,7 @@ from __future__ import annotations
 import sys
 
 import pytest
-from dgml_core.errors import OcrConfigInvalid, OcrFailed
+from dgml_core.errors import MissingExtra, OcrConfigInvalid, OcrFailed
 from dgml_core.ocr import OcrConfig, OcrProviderName
 from dgml_core.ocr_macos import MacosProvider
 
@@ -33,13 +33,15 @@ _MACOS_CFG = OcrConfig(provider=OcrProviderName.MACOS)
 
 
 def test_macos_parse_config_happy() -> None:
-    cfg = MacosProvider.parse_config({"provider": "macos"})
-    assert cfg.provider is OcrProviderName.MACOS
+    cfg = MacosProvider.parse_config(_MACOS_CFG)
+    assert cfg.provider == OcrProviderName.MACOS
 
 
 def test_macos_parse_config_rejects_extra_fields() -> None:
     with pytest.raises(OcrConfigInvalid, match="unknown fields"):
-        MacosProvider.parse_config({"provider": "macos", "region": "us-east-1"})
+        MacosProvider.parse_config(
+            OcrConfig(provider=OcrProviderName.MACOS, options={"region": "us-east-1"})
+        )
 
 
 def test_macos_provider_raises_on_non_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -55,8 +57,10 @@ def test_macos_provider_raises_when_pyobjc_missing(monkeypatch: pytest.MonkeyPat
     monkeypatch.setitem(sys.modules, "Foundation", None)
     monkeypatch.setitem(sys.modules, "Quartz", None)
     monkeypatch.setitem(sys.modules, "Vision", None)
-    with pytest.raises(OcrFailed, match="PyObjC"):
+    with pytest.raises(MissingExtra, match="PyObjC") as caught:
         MacosProvider(_MACOS_CFG)
+    assert caught.value.extra == "macos"
+    assert caught.value.distribution == "pyobjc-framework-Vision"
 
 
 # --- macOS-only end-to-end (real Vision) -----------------------------------
