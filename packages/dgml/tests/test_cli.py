@@ -3289,6 +3289,59 @@ def test_uncaught_error_full_traceback_on_stderr_with_verbose(
     assert "INTERNAL_ERROR" in err  # the envelope is still emitted
 
 
+@pytest.mark.parametrize("value", ["1", "true", "True", "TRUE", " 1 "])
+def test_dgml_debug_one_enables_traceback_without_verbose(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    """DGML_DEBUG=1 (documented) or true/True (``str(True)``, as a Python caller
+    writes it) is an env-var alias for --verbose: traceback on stderr, and the
+    log level at INFO — exactly --verbose's level, not DEBUG."""
+    import logging
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    monkeypatch.setenv("DGML_DEBUG", value)
+    capsys.readouterr()
+
+    with patch("dgml.cli._dispatch", side_effect=RuntimeError("kaboom detail")):
+        rc = main(_ws_args(ws) + ["status"])
+    assert rc != 0
+    assert logging.getLogger("dgml_core").level == logging.INFO
+    err = capsys.readouterr().err
+    assert "Traceback (most recent call last)" in err
+
+
+@pytest.mark.parametrize("value", ["0", "false", "False", "yes", "on", "", "  ", "2"])
+def test_dgml_debug_other_values_mean_off(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    """Anything but ``1``/``true`` is off — including ``0``.
+
+    A CI line like ``DGML_DEBUG=0`` intends to disable debug output; a plain
+    truthiness check on the env var would enable it instead. Off means the
+    default behaviour exactly: no traceback, stderr holding only the JSON
+    envelope, and the log level at WARNING rather than DEBUG."""
+    import logging
+
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    monkeypatch.setenv("DGML_DEBUG", value)
+    capsys.readouterr()
+
+    with patch("dgml.cli._dispatch", side_effect=RuntimeError("kaboom detail")):
+        rc = main(_ws_args(ws) + ["status"])
+    assert rc != 0
+    assert logging.getLogger("dgml_core").level == logging.WARNING
+    err = _read_stderr(capsys)  # parses cleanly → stderr held only the envelope
+    assert err["error"]["code"] == "INTERNAL_ERROR"
+
+
 @needs_gs
 def test_docset_generate_duplicate_filename_fails(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
