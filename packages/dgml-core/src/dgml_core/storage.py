@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
     from .storage_service import BlobStore, DocStore, StorageConfig
 
 from .default_config import PROVIDER_MODELS
+
+logger = logging.getLogger(__name__)
 
 ENV_VAR = "DGML_HOME"
 DEFAULT_DIR_NAME = "dgml-workspace"
@@ -124,8 +127,13 @@ class Workspace:
         3. ``is_initialized()`` — which *is* "has a config".
         4. ``migrate_workspace`` — upgrades the layout; a no-op read when current.
 
-        ``on_migration`` fires per migration that **changed** something, with the
-        workspace it changed. Ignoring it is a reasonable default.
+        Each migration that **changed** something is logged at INFO (a
+        human-readable notice) and, when given, passed to ``on_migration`` with
+        the workspace it changed — the structured hook, for a caller that wants
+        to record the upgrade rather than read about it. Ignoring it is a
+        reasonable default. A migration that changed nothing says nothing:
+        bumping the version stamp on a workspace with no work to do is
+        bookkeeping, not an upgrade.
         """
         # Imported here, not at module scope: both modules import this one.
         from .errors import WorkspaceNotInitialized
@@ -147,7 +155,10 @@ class Workspace:
                 workspace=ws,
             )
         for result in migrate_workspace(ws):
-            if result.changed and on_migration is not None:
+            if not result.changed:
+                continue
+            logger.info("[dgml] upgraded workspace at %s — %s", ws.root, result.summary())
+            if on_migration is not None:
                 on_migration(ws, result)
         return ws
 
@@ -495,15 +506,23 @@ def write_json_atomic(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    tmp.write_text(text, encoding="utf-8")
+    # newline="" for the same reason as write_text_atomic: every atomic writer puts
+    # down the text's own line endings on every platform.
+    tmp.write_text(text, encoding="utf-8", newline="")
     tmp.replace(path)
 
 
 def write_text_atomic(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` via write-then-rename (e.g. ``extraction-schema.rnc``)."""
+    """Write ``text`` to ``path`` via write-then-rename (e.g. ``extraction-schema.rnc``).
+
+    ``newline=""`` writes the text's own line endings. Without it, Windows
+    text mode turns every newline into carriage return plus newline, and a
+    config read with ``newline=""`` (which keeps a CRLF file's endings) came
+    back with a doubled carriage return that the TOML parser refused.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8", newline="")
     tmp.replace(path)
 
 
@@ -699,7 +718,7 @@ def write_user_config(provider: str | None, *, overwrite: bool) -> tuple[bool, P
     backup: Path | None = None
     if path.exists():
         backup = path.with_suffix(path.suffix + ".bak")
-        backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        backup.write_bytes(path.read_bytes())  # the same bytes, newlines included
     resolved = canonical_provider(provider) if provider is not None else None
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text_atomic(path, render_config_toml(resolved))

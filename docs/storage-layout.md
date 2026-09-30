@@ -565,7 +565,10 @@ profile = "default"
 
 Field rules:
 
-- `provider` — required. `"azure"` or `"aws"`.
+- `provider` — required. A bundled short name (`"azure"`, `"aws"`, `"macos"`)
+  or a dotted `"module.path:ClassName"` naming your own `OcrProvider`
+  subclass. The short names are aliases for the bundled classes' own dotted
+  paths; see [ocr-providers.md](ocr-providers.md).
 - `endpoint` — required for Azure.
 - `api_key` — Azure-only, optional. A literal API key. Mutually
   exclusive with `api_key_env`.
@@ -575,6 +578,9 @@ Field rules:
 - `region` — required for AWS.
 - `profile` — AWS-only, optional. The boto3 profile name from
   `~/.aws/credentials`. When unset, the default credential chain runs.
+
+Every other field is passed to the named provider, which declares the keys it
+accepts and rejects the rest — so a custom provider's options go here too.
 
 ### `grounded` (optional, required for `dgml docset schema generate` / `dgml file extract`)
 
