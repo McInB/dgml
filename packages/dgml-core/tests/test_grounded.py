@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -34,11 +35,13 @@ from dgml_core.errors import (
 )
 from dgml_core.extraction_schema import parse_rnc
 from dgml_core.extraction_xml import dgml_xml_to_values
+from dgml_core.files import FileStore
 from dgml_core.grounded import (
     _SCHEMA_TREE_MAX_DEPTH,
     DEFAULT_MAX_TOOL_ITERS,
     GroundedConfig,
     _field_node_schema,
+    _pdf_bytes,
     _submit_schema_tool,
     _to_page_pixels,
     extract_values,
@@ -2884,3 +2887,24 @@ def test_extract_values_repeats_the_latest_conversion_error(workspace: Workspace
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with pytest.raises(ConversionFailed, match=r"converting it failed: second attempt$"):
         extract_values(workspace, ds_id, fid, config=config)
+
+
+def test_pdf_bytes_reads_a_source_stored_with_an_uppercase_suffix(
+    workspace: Workspace, sample_pdf: Path
+) -> None:
+    """`file add` lowercases the suffix to validate a source, so `INVOICE.PDF`
+    is accepted as a PDF and stored under that name; the extraction lookup
+    used to match the stored key against `.pdf` case-sensitively and refuse
+    the file as having no source PDF."""
+    upper = sample_pdf.with_name("INVOICE.PDF")
+    upper.write_bytes(sample_pdf.read_bytes())
+    record = FileStore(workspace).add(upper).record
+    assert record.original_filename == "INVOICE.PDF"
+
+    assert _pdf_bytes(workspace, record.id) == upper.read_bytes()
+
+    # The negative side is unchanged: a record whose only blob is not a PDF
+    # under any casing still has no source PDF.
+    _seed_file(workspace, "f2bbbbbbbbbb", filename="doc.docx")
+    with pytest.raises(FileNotFound, match=r"file 'f2bbbbbbbbbb' has no source PDF$"):
+        _pdf_bytes(workspace, "f2bbbbbbbbbb")

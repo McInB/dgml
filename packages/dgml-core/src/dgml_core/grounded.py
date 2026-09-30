@@ -350,6 +350,10 @@ def get_page_words(
 def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
     """Return the bytes of the single ``*.pdf`` stored for ``file_id``.
 
+    The suffix is matched without regard to case: ``file add`` accepts a
+    source named ``INVOICE.PDF`` (it lowercases the suffix to validate it)
+    and stores it under that name, so the lookup must accept it too.
+
     A convertible source whose conversion failed at ``file add`` has a
     record but no PDF, and the converter's error is among the file's
     recorded errors: such a file raises :class:`ConversionFailed` repeating
@@ -357,7 +361,7 @@ def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
     :class:`FileNotFound` as before.
     """
     keys = workspace.blobs.list_blobs(layout.file_prefix(file_id))
-    pdfs = [k for k in keys if k.endswith(".pdf")]
+    pdfs = [k for k in keys if k.lower().endswith(".pdf")]
     if not pdfs:
         try:
             failed = [
