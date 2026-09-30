@@ -7,10 +7,14 @@ flag-driven (no interactive prompts) and idempotent where reasonable.
 ## Conventions
 
 - **stdout** carries the success payload as a JSON object. When stdout or
-  stderr is a pipe or a file it is written as UTF-8 whatever the locale, so a
-  wrapper that captures either must decode it as UTF-8. A terminal keeps its
-  own encoding, and a character it lacks is written as a JSON escape, so the
-  payload stays valid JSON either way.
+  stderr is a pipe or a file it is written as UTF-8 whatever the locale, and
+  even when `PYTHONIOENCODING` names another encoding, so a wrapper that
+  captures either must decode it as UTF-8. A terminal keeps its own encoding.
+  A character a stream cannot encode (or a lone surrogate, e.g. from a file
+  name) never fails the command: in `--format json` output it is written as a
+  JSON `\u` escape, so the payload stays valid JSON; in `--format text`,
+  `--help` and stderr diagnostics it is written as a Python backslash escape
+  such as `→`.
 - **stderr** carries error envelopes:
   ```json
   { "error": { "code": "FILE_NOT_FOUND", "message": "..." } }

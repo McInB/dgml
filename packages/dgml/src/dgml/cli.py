@@ -1288,16 +1288,20 @@ def _configure_stream_encodings() -> None:
     ``dgml --help | more`` and every wrapper that captured the output crashed
     on a stock Windows machine.
 
-    A stream that is not UTF-8 is reconfigured: a piped or redirected stdout
-    or stderr gets UTF-8, since its reader is a program that wants the
-    payload intact; a terminal keeps its own code page, since UTF-8 bytes
-    would show as mojibake there. Both get ``backslashreplace``, so a
-    character the encoding lacks (or a lone surrogate from a file name)
+    A piped or redirected stdout or stderr gets UTF-8, since its reader is a
+    program that wants the payload intact. A pipe or file gets UTF-8 even
+    when ``PYTHONIOENCODING`` names another encoding; a terminal keeps its
+    own. That is the contract for wrappers: what they capture is always
+    UTF-8, whatever the locale or the environment says. A terminal keeps its
+    code page, since UTF-8 bytes would show as mojibake there. Every stream,
+    including one that is UTF-8 already, gets ``backslashreplace``, so a
+    character the encoding lacks, or a lone surrogate from a file name,
     prints as an escape rather than crashing or silently becoming ``?``;
-    :func:`_emit` keeps JSON valid on such a stream by escaping non-ASCII
-    itself. A stream that is UTF-8 already is left alone, and so is one
-    without ``reconfigure``; one whose ``isatty`` is missing or fails is
-    treated as redirected. stdin is not touched. ``main`` is the console
+    :func:`_emit` keeps JSON valid on a non-UTF-8 stream by escaping
+    non-ASCII itself, and a lone surrogate on a UTF-8 stream lands as a
+    backslash escape that JSON accepts. A stream without ``reconfigure`` is
+    left alone; one whose ``isatty`` is missing or fails is treated as
+    redirected. stdin is not touched. ``main`` is the console
     entry point, so the change lasts for the process; a host that calls
     ``main()`` in-process on its own streams will find them reconfigured.
     ``PYTHONUTF8=1`` has the same effect and stays the way to get it for
@@ -1305,14 +1309,15 @@ def _configure_stream_encodings() -> None:
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None or _is_utf8(getattr(stream, "encoding", None)):
+        if reconfigure is None:
             continue
+        utf8 = _is_utf8(getattr(stream, "encoding", None))
         try:
             tty = bool(stream.isatty())
         except (AttributeError, ValueError, OSError):
             tty = False
         try:
-            if tty:
+            if tty or utf8:
                 reconfigure(errors="backslashreplace")
             else:
                 reconfigure(encoding="utf-8", errors="backslashreplace")
