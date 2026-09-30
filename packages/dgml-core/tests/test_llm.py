@@ -14,7 +14,9 @@
 
 from __future__ import annotations
 
+import logging
 import sys
+import threading
 from typing import Any
 
 import litellm
@@ -37,9 +39,14 @@ def test_litellm_debug_banner_suppressed() -> None:
 
 
 def test_completion_with_retry_keeps_stdout_clean(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Anything a completion writes to stdout is redirected to stderr."""
+    """Anything a completion writes to stdout becomes a WARNING record on
+    ``dgml_core.llm`` — stdout stays clean for the JSON payload, and nothing
+    reaches a real stream unless the caller routes it (the CLI shows WARNINGs
+    by default)."""
 
     def chatty_completion(**kwargs: Any) -> dict[str, Any]:
         print("LiteLLM noise on stdout")  # simulating the chatty dependency
@@ -47,12 +54,112 @@ def test_completion_with_retry_keeps_stdout_clean(
 
     monkeypatch.setattr("litellm.completion", chatty_completion)
 
-    result = llm._completion_with_retry({"model": "gpt-4o", "messages": []})
+    with caplog.at_level(logging.WARNING, logger="dgml_core.llm"):
+        result = llm._completion_with_retry({"model": "gpt-4o", "messages": []})
 
     assert result == _resp("OK")
     captured = capsys.readouterr()
     assert captured.out == ""  # stdout stays clean for the JSON payload
-    assert "LiteLLM noise on stdout" in captured.err
+    assert captured.err == ""  # no logging configured -> no stream output
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("LiteLLM noise on stdout" in r.getMessage() for r in warned)
+
+
+def test_quiet_stdout_non_lifo_exits_restore_stdout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Overlapping guards exiting out of order still restore the real stdout.
+
+    LLM calls run in thread pools (grounded phase 3, parallel transcription,
+    style page workers) and ``sys.stdout`` is process-global. The guard is
+    refcounted — first in saves the real stdout, last out restores it — where
+    a naive per-call ``redirect_stdout`` would re-install a dead sink on the
+    second exit and swallow every later print for the rest of the process."""
+    real = sys.stdout
+    a_in, b_in, a_out = threading.Event(), threading.Event(), threading.Event()
+
+    def thread_a() -> None:
+        with llm._quiet_stdout():
+            a_in.set()
+            assert b_in.wait(5)
+            print("captured while both guards active")
+        a_out.set()  # A exits FIRST — non-LIFO
+
+    def thread_b() -> None:
+        assert a_in.wait(5)
+        with llm._quiet_stdout():
+            b_in.set()
+            assert a_out.wait(5)
+
+    with caplog.at_level(logging.WARNING, logger="dgml_core.llm"):
+        ta, tb = threading.Thread(target=thread_a), threading.Thread(target=thread_b)
+        ta.start()
+        tb.start()
+        ta.join(10)
+        tb.join(10)
+
+    assert sys.stdout is real  # the whole point: not a stale sink
+    assert any("captured while both guards active" in r.getMessage() for r in caplog.records)
+
+
+def test_quiet_stdout_survives_a_handler_that_writes_to_stdout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pathological embedder config: a handler that resolves ``sys.stdout`` at
+    emit time writes INTO the sink while the sink is logging. The sink's lock
+    is a leaf lock (released before emitting) and lines carrying the capture
+    marker are dropped on any thread, so this must neither deadlock nor echo
+    unboundedly — and the original stray line is still recorded exactly once."""
+
+    class _StdoutAtEmit(logging.StreamHandler):  # type: ignore[type-arg]
+        @property
+        def stream(self) -> Any:
+            return sys.stdout
+
+        @stream.setter
+        def stream(self, _value: Any) -> None:
+            pass
+
+    log = logging.getLogger("dgml_core.llm")
+    handler = _StdoutAtEmit()
+    handler.setLevel(logging.WARNING)
+    log.addHandler(handler)
+    done = threading.Event()
+
+    def scenario() -> None:
+        with llm._quiet_stdout():
+            print("stray line")
+        done.set()
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="dgml_core.llm"):
+            worker = threading.Thread(target=scenario, daemon=True)
+            worker.start()
+            assert done.wait(10), "deadlock: sink lock held while a handler wrote back into it"
+            worker.join(10)
+    finally:
+        log.removeHandler(handler)
+
+    hits = [r for r in caplog.records if "stray line" in r.getMessage()]
+    assert len(hits) == 1  # the real line once; the handler's echo dropped
+
+
+def test_stray_stdout_partial_line_is_flushed_as_a_record(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A write with no trailing newline still surfaces: the sink flushes its
+    buffer when the guarded call exits, so nothing a dependency wrote is lost."""
+
+    def chatty_completion(**kwargs: Any) -> dict[str, Any]:
+        sys.stdout.write("partial line, no newline")
+        return _resp("OK")
+
+    monkeypatch.setattr("litellm.completion", chatty_completion)
+
+    with caplog.at_level(logging.WARNING, logger="dgml_core.llm"):
+        llm._completion_with_retry({"model": "gpt-4o", "messages": []})
+
+    assert any("partial line, no newline" in r.getMessage() for r in caplog.records)
 
 
 def test_completion_with_retry_redirects_only_during_call(

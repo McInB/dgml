@@ -47,11 +47,14 @@ non-generation call sites share one implementation.
 from __future__ import annotations
 
 import base64
+import io
+import logging
 import re
 import sys
+import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -69,6 +72,8 @@ from .usage import (
     extract_cost_and_tokens,
     record_usage,
 )
+
+logger = logging.getLogger(__name__)
 
 # The CLI contract is "stdout = a single JSON object" (see :mod:`dgml.cli`).
 # LiteLLM, by default, prints a "Give Feedback / Get Help" banner to *stdout*
@@ -763,18 +768,111 @@ def _build_completion_kwargs(
     return kwargs
 
 
+# Prefix on every captured-stdout record. Doubles as the echo breaker: a line
+# already carrying it came from this sink (a pathological handler writing to
+# the live ``sys.stdout``), so it is dropped instead of re-logged — on any
+# thread, however many handler/queue hops it took to come back.
+_CAPTURE_MARKER = "stdout captured during an LLM call:"
+
+
+class _StdoutToLog(io.TextIOBase):
+    """File-like sink turning a dependency's stray stdout into WARNING records.
+
+    ``write`` buffers until a newline so one log record is one printed line,
+    however the writes were chunked; the last guard out empties the buffer via
+    :meth:`drain`. ``flush`` is deliberately the inherited no-op — flushing
+    means "push to the OS" and there is no OS buffer here, so a dependency's
+    mid-line ``flush()`` must not split its line into two records.
+
+    One instance is shared by every concurrently active guard, so buffer
+    updates take a lock. It is a *leaf* lock — records are emitted only after
+    it is released — and lines carrying :data:`_CAPTURE_MARKER` are dropped,
+    so a handler that itself writes to the live ``sys.stdout`` can neither
+    deadlock against the sink nor echo through it unboundedly."""
+
+    # TextIOBase declares no codec; a dependency probing ``sys.stdout.encoding``
+    # before printing non-ASCII expects a real name (the old target, a stream,
+    # had one). ``fileno()`` stays unsupported on purpose: handing out a real fd
+    # would let writes bypass the sink.
+    encoding = "utf-8"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._buf = ""
+        self._lock = threading.Lock()
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, s: str) -> int:
+        lines: list[str] = []
+        with self._lock:
+            self._buf += s
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                if line.strip() and _CAPTURE_MARKER not in line:
+                    lines.append(line)
+        for line in lines:
+            logger.warning("%s %s", _CAPTURE_MARKER, line)
+        return len(s)
+
+    def drain(self) -> None:
+        """Emit any trailing partial line; the last guard out calls this."""
+        with self._lock:
+            tail, self._buf = self._buf, ""
+        if tail.strip() and _CAPTURE_MARKER not in tail:
+            logger.warning("%s %s", _CAPTURE_MARKER, tail)
+
+
+# State for _quiet_stdout: overlapping guards (LLM calls run in thread pools,
+# and sys.stdout is process-global) share ONE sink, refcounted — the first
+# guard in saves the real stdout, the last one out restores it. A per-call
+# ``redirect_stdout`` breaks under non-LIFO exits: A enters (saves real), B
+# enters (saves A's sink), A exits (restores real), B exits (re-installs A's
+# dead sink) — leaving every later print swallowed for the rest of the process.
+_stdout_guard_lock = threading.Lock()
+_stdout_guard_depth = 0
+_stdout_guard_saved: Any = None
+_stdout_guard_sink: _StdoutToLog | None = None
+
+
 @contextmanager
 def _quiet_stdout() -> Iterator[None]:
-    """Redirect anything written to stdout onto stderr for the duration.
+    """Capture anything written to stdout and re-log it at WARNING.
 
     Guards the JSON-on-stdout CLI contract against dependencies (LiteLLM in
-    particular) that ``print`` directly to stdout. ``suppress_debug_info``
-    silences the known LiteLLM banner; this catches the rest. dgml's own
-    output is unaffected — ``_emit`` writes the JSON payload after the
-    completion call returns, outside this block.
+    particular) that ``print`` directly to stdout — raw prints bypass
+    ``logging`` entirely, so a stream-level swap is the only interception.
+    ``suppress_debug_info`` silences the known LiteLLM banner at the source;
+    by the time text lands here it is unclassified dependency output, hence
+    WARNING: visible by default in the CLI, and routed — or silenced — by a
+    library caller like any other ``dgml_core`` record. dgml's own output is
+    unaffected — ``_emit`` writes the JSON payload after the completion call
+    returns, outside this block.
+
+    Safe for overlapping calls across threads (see the guard-state comment
+    above); the swap itself remains process-global, as ``sys.stdout`` is.
     """
-    with redirect_stdout(sys.stderr):
+    global _stdout_guard_depth, _stdout_guard_saved, _stdout_guard_sink
+    with _stdout_guard_lock:
+        if _stdout_guard_depth == 0:
+            _stdout_guard_saved = sys.stdout
+            _stdout_guard_sink = _StdoutToLog()
+            sys.stdout = _stdout_guard_sink
+        _stdout_guard_depth += 1
+    try:
         yield
+    finally:
+        last_sink: _StdoutToLog | None = None
+        with _stdout_guard_lock:
+            _stdout_guard_depth -= 1
+            if _stdout_guard_depth == 0:
+                last_sink = _stdout_guard_sink
+                sys.stdout = _stdout_guard_saved
+                _stdout_guard_saved = None
+                _stdout_guard_sink = None
+        if last_sink is not None:
+            last_sink.drain()
 
 
 def _completion_with_retry(kwargs: dict[str, Any], *, max_retries: int = 3) -> Any:
