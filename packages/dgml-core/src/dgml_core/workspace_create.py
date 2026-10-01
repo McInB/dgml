@@ -251,7 +251,12 @@ def create_workspace(
         if wrote_seed:
             with contextlib.suppress(Exception):
                 if ws.workspaces_id is not None:
-                    wsconfig.write_config_text(ws, "")  # an addressed row: back to empty
+                    # A row addressed by id: back to empty — through a fresh Workspace,
+                    # because the build's last write went through one of its own, so
+                    # this one's memoized text (the reset's conflict token) is stale
+                    # and a conflict-detecting backend would refuse the reset.
+                    fresh = Workspace(root=ws.root, workspaces_id=ws.workspaces_id)
+                    wsconfig.write_config_text(fresh, "")
                 else:
                     ws.config_path.unlink()
                     if made_root:

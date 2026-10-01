@@ -296,6 +296,52 @@ def test_a_failing_rollback_does_not_mask_the_cause(monkeypatch: pytest.MonkeyPa
         create_workspace(workspace_id="acme")
 
 
+def test_addressed_rollback_holds_on_a_conflict_detecting_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resetting a row addressed by id must be conditional on the store's *current* text, not the
+    stale memo of the Workspace the create started from. The build's last write goes
+    through a fresh Workspace, so on a backend that enforces ``expected_text`` (Mongo,
+    Postgres) a stale token makes the reset fail silently — stranding the seed, and with
+    it the documented retry. The local store ignores the token, so this test teaches it
+    to enforce it."""
+    store = default_workspaces_store()
+    real_write = store.write_config
+
+    def conditional(workspace_id: str, text: str, *, expected_text: str | None = None) -> None:
+        if expected_text is not None and store.read_config(workspace_id) != expected_text:
+            raise WorkspacesWriteConflict("another writer changed it since it was read")
+        real_write(workspace_id, text, expected_text=expected_text)
+
+    monkeypatch.setattr(store, "write_config", conditional)
+    store.create_config("acme", "")
+    ws = Workspace(root=store.workspace_root("acme"), workspaces_id="acme")
+
+    from dgml_core.migrations import stamp_schema_version
+
+    calls = {"n": 0}
+
+    def flaky_stamp(workspace: Workspace) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("the backend went away after the seal")
+        stamp_schema_version(workspace)
+
+    monkeypatch.setattr("dgml_core.workspace_create.stamp_schema_version", flaky_stamp)
+    with pytest.raises(RuntimeError):
+        create_workspace(ws, organization="Acme", storage_service="svca", seed_toml=SEED_SVCA)
+    assert store.read_config("acme") == ""  # the seed this call wrote is gone
+
+    retry = create_workspace(
+        Workspace(root=store.workspace_root("acme"), workspaces_id="acme"),
+        organization="Acme",
+        storage_service="svca",
+        seed_toml=SEED_SVCA,
+    )
+    assert retry.identity.workspace_id == "acme"
+    assert retry.identity.storage_service == "svca"
+
+
 def test_a_conflicting_write_does_not_delete_the_row(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ``WorkspacesWriteConflict`` during the build means another writer changed the
     claimed row — it is theirs now, so the rollback must leave it in the store."""
