@@ -205,6 +205,19 @@ def test_seed_that_declares_only_other_services_is_refused() -> None:
     assert default_workspaces_store().list_ids() == []
 
 
+def test_seeded_unknown_service_is_answered_with_the_declared_ones() -> None:
+    """A mistyped service must be answered with the services the seed *does* declare —
+    resolving it first buried that under a bare 'no [storage.<service>] configured'."""
+    with pytest.raises(InvalidArgument, match=r"does declare \[storage.svca\]"):
+        create_workspace(
+            workspace_id="acme",
+            organization="Acme",
+            storage_service="mystorage",
+            seed_toml=SEED_SVCA,
+        )
+    assert default_workspaces_store().list_ids() == []
+
+
 def test_unknown_storage_service_leaves_no_row() -> None:
     with pytest.raises(StorageConfigInvalid):
         create_workspace(workspace_id="bad-svc", organization="A", storage_service="nope")

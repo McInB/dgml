@@ -309,14 +309,13 @@ def _build(
         else None
     )
 
-    # Validate the named service — shape *and* provider classes — before anything is
-    # built, so a bad service or `provider =` fails without a half-built workspace.
-    check_store_configs(*resolve_service_configs(ws, service))
     if seeded:
         # A seed exists to name a backend. If it declares services but not the one
         # selected, binding would fall through to the bundled local store — building
         # the workspace somewhere the caller did not ask for, discovered only once
-        # their data appears to be missing.
+        # their data appears to be missing. Checked before the service resolves so a
+        # mistyped service is answered with the services the seed *does* declare,
+        # not a bare "no [storage.<service>] configured".
         declared = wsconfig.declared_services(ws)
         if wsconfig.read_storage_table(ws, service) is None and declared:
             raise InvalidArgument(
@@ -325,6 +324,9 @@ def _build(
                 f"or the workspace would be created on the bundled local-disk store instead "
                 f"of the backend this config names."
             )
+    # Validate the named service — shape *and* provider classes — before anything is
+    # built, so a bad service or `provider =` fails without a half-built workspace.
+    check_store_configs(*resolve_service_configs(ws, service))
 
     # Write the whole binding — the [storage.<service>] table *and* the
     # `storage_service` pointer — before anything resolves a store. Resolution reads
