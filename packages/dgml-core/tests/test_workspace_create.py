@@ -393,6 +393,31 @@ def _configure_unimportable_workspaces_store() -> None:
     default_workspaces_store.cache_clear()
 
 
+def test_rerun_with_a_seed_declaring_workspace_keys_is_a_no_op(tmp_path: Path) -> None:
+    """``write_identity`` adds machine-managed keys (``workspace_id``, ``created_at``,
+    ``storage_fingerprint``…) beside what the seed declared, so the no-op check must ask
+    whether the keys the seed declares still stand — not whether the whole table stayed
+    exactly as written, which after a successful create it never has."""
+    seed = SEED_SVCA + '\n[workspace]\norganization = "Acme"\n'
+    first = create_workspace(
+        Workspace(root=tmp_path / "ws"), storage_service="svca", seed_toml=seed
+    )
+    assert first.identity.organization == "Acme"
+
+    again = create_workspace(
+        Workspace(root=tmp_path / "ws"), storage_service="svca", seed_toml=seed
+    )
+    assert again.identity.workspace_id == first.identity.workspace_id
+
+    # A seed whose declared value genuinely differs is still refused.
+    with pytest.raises(InvalidArgument, match="differs from the seed"):
+        create_workspace(
+            Workspace(root=tmp_path / "ws"),
+            storage_service="svca",
+            seed_toml=seed.replace('"Acme"', '"Beta"'),
+        )
+
+
 def test_detached_create_does_not_need_the_workspaces_store(tmp_path: Path) -> None:
     """A path-addressed workspace lists nowhere, so a broken ``[workspaces]`` table must
     not stop it being created. Regressed once when the store was built unconditionally."""

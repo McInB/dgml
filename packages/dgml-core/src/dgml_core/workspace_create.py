@@ -96,15 +96,24 @@ def _already_held(store: WorkspacesStore, workspace_id: str) -> ConflictError:
     )
 
 
+def _declared_stands(declared: Any, existing: Any) -> bool:
+    """Whether every key ``declared`` sets holds the declared value in ``existing``,
+    recursively. Keys only ``existing`` has don't count against it — ``write_identity``
+    adds machine-managed ``[workspace]`` keys beside whatever a seed declared."""
+    if isinstance(declared, dict) and isinstance(existing, dict):
+        return all(_declared_stands(v, existing.get(k)) for k, v in declared.items())
+    return bool(declared == existing)
+
+
 def _seed_already_applied(ws: Workspace, seed_toml: str) -> bool:
-    """Whether every table ``seed_toml`` declares already stands, as written, in ``ws``'s
-    config — the re-run of a seeded create, which must stay a no-op."""
+    """Whether everything ``seed_toml`` declares already stands in ``ws``'s config — the
+    re-run of a seeded create, which must stay a no-op."""
     try:
         existing = tomllib.loads(ws.config_text or "")
     except tomllib.TOMLDecodeError as exc:
         # The same failure every other reader of the config reports.
         raise CorruptMetadata(f"invalid TOML in {ws.config_location}: {exc}") from exc
-    return all(existing.get(k) == v for k, v in tomllib.loads(seed_toml).items())
+    return _declared_stands(tomllib.loads(seed_toml), existing)
 
 
 def _materialize_storage_table(ws: Workspace, service: str, *, seeded: bool) -> None:
@@ -219,11 +228,7 @@ def create_workspace(
             if known is None:
                 store = default_workspaces_store()
                 if store.exists(workspace_id):
-                    raise ConflictError(
-                        f"{store.label()} already holds a workspace {workspace_id}.",
-                        kind="workspace",
-                        existing_id=workspace_id,
-                    )
+                    raise _already_held(store, workspace_id)
     wrote_seed = False
     made_root = not ws.root.exists()
     if seed_toml is not None:

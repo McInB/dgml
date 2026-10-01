@@ -201,11 +201,14 @@ ignored: that table selects the store of workspaces, is read only from the user 
 and would be silently inert here.
 
 A seed only initializes a workspace that has **no** config yet (or an empty one). Against
-a workspace whose config already exists, `create` accepts `--from-config` only when every
-table the seed declares already stands in that config as written — the re-run of the same
-seeded `create`, a no-op. A seed that differs fails with `INVALID_ARGUMENT` rather than
-being silently ignored or replacing the workspace's config; edit that config directly
-instead.
+a workspace whose config already exists, `create` accepts `--from-config` only when
+everything the seed declares already stands in that config — the re-run of the same
+seeded `create`, a no-op. A seed whose declared values differ fails with
+`INVALID_ARGUMENT` rather than being silently ignored or replacing the workspace's
+config; edit that config directly instead. The comparison reads only the keys the seed
+declares, so a seed never **removes** a setting either: a key set by an earlier seed and
+dropped from this one stays set in the workspace — removal, like replacement, is an edit
+to the workspace's own config.
 
 `--storage` **composes with** `--from-config`: that flag supplies a config to start
 from, `--storage` says *which* `[storage.<name>]` table in it to bind to.
