@@ -30,6 +30,7 @@ from dgml_core import (
     StorageConfigInvalid,
     StorageProviderUnresolvable,
     Workspace,
+    WorkspacesWriteConflict,
     create_workspace,
     default_workspaces_store,
 )
@@ -280,6 +281,35 @@ def test_a_failing_rollback_does_not_mask_the_cause(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(default_workspaces_store(), "delete", boom)
     with pytest.raises(InvalidArgument, match="organization is required"):
         create_workspace(workspace_id="acme")
+
+
+def test_a_conflicting_write_does_not_delete_the_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``WorkspacesWriteConflict`` during the build means another writer changed the
+    claimed row — it is theirs now, so the rollback must leave it in the store."""
+    store = default_workspaces_store()
+
+    def taken(*args: object, **kwargs: object) -> None:
+        raise WorkspacesWriteConflict("another writer changed it since it was read")
+
+    monkeypatch.setattr(store, "write_config", taken)
+    with pytest.raises(WorkspacesWriteConflict):
+        create_workspace(workspace_id="acme", organization="Acme")
+    assert store.exists("acme")
+
+
+def test_losing_the_claim_race_is_a_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A claim that loses the create-if-absent race reads exactly like an id the store
+    already held — the caller cannot tell them apart and should not have to."""
+    store = default_workspaces_store()
+
+    def lost(workspace_id: str, text: str) -> None:
+        raise WorkspacesWriteConflict("already holds one")
+
+    monkeypatch.setattr(store, "create_config", lost)
+    with pytest.raises(ConflictError) as caught:
+        create_workspace(workspace_id="acme", organization="Acme")
+    assert caught.value.kind == "workspace"
+    assert caught.value.existing_id == "acme"
 
 
 def test_rerun_with_the_same_seed_is_a_no_op(tmp_path: Path) -> None:

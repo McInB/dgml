@@ -24,7 +24,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import workspace_config as wsconfig
-from .errors import ConflictError, CorruptMetadata, InvalidArgument, now_iso
+from .errors import (
+    ConflictError,
+    CorruptMetadata,
+    InvalidArgument,
+    WorkspacesWriteConflict,
+    now_iso,
+)
 from .migrations import stamp_schema_version
 from .storage import Workspace
 from .storage_resolve import (
@@ -37,6 +43,7 @@ from .storage_resolve import (
 from .workspace_config import WorkspaceIdentity
 from .workspace_id import ID_SHAPE, generate_unique_workspace_id, is_workspace_id
 from .workspaces_resolve import default_workspaces_store
+from .workspaces_store import WorkspacesStore
 
 __all__ = ["CreateWorkspaceResult", "create_workspace"]
 
@@ -75,6 +82,18 @@ def _validate_seed_config(text: str) -> None:
             "store of workspaces and is read only from the user config, so it would have "
             "no effect here. Remove it."
         )
+
+
+def _already_held(store: WorkspacesStore, workspace_id: str) -> ConflictError:
+    """The refusal for an id the store already holds — one wording however it is hit."""
+    return ConflictError(
+        f"{store.label()} already holds a workspace {workspace_id}. If it is this "
+        f"workspace, re-run create against it — create_workspace("
+        f"Workspace.resolve({workspace_id!r})) is safe to re-run. Otherwise pick "
+        f"another id.",
+        kind="workspace",
+        existing_id=workspace_id,
+    )
 
 
 def _seed_already_applied(ws: Workspace, seed_toml: str) -> bool:
@@ -162,10 +181,19 @@ def create_workspace(
         # The id comes first: for a listed workspace the root is derived from it —
         # the reverse of the detached order.
         new_id = workspace_id or generate_unique_workspace_id(store)
-        store.write_config(new_id, seed_toml or "")
+        try:
+            # The claim. Create-if-absent, so of two creates racing the same id exactly
+            # one wins and the loser is refused here instead of overwriting the row.
+            store.create_config(new_id, seed_toml or "")
+        except WorkspacesWriteConflict:
+            raise _already_held(store, new_id) from None
         ws = Workspace(root=store.workspace_root(new_id), workspaces_id=new_id)
         try:
             return _build(ws, workspace_id, organization, name, storage_service, seed_toml)
+        except WorkspacesWriteConflict:
+            # Another writer changed the row after this call claimed it, so it is theirs
+            # now — deleting it would destroy their workspace, not this call's leavings.
+            raise
         except BaseException:
             # This call claimed the row, so any failure past here must remove it: a
             # stranded row raises ConflictError on every retry of the same id. A cleanup
@@ -213,6 +241,10 @@ def create_workspace(
             )
     try:
         return _build(ws, workspace_id, organization, name, storage_service, seed_toml)
+    except WorkspacesWriteConflict:
+        # Another writer changed the row after this call seeded it — resetting it now
+        # would discard their write, so leave it to them.
+        raise
     except BaseException:
         # Same promise as the listed path: a seed this call wrote must not survive a
         # failed create, or the documented retry is refused as "differs from the seed".

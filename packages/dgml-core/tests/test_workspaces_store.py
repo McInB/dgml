@@ -25,7 +25,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from dgml_core.errors import CorruptMetadata, StorageProviderUnresolvable, WorkspacesConfigInvalid
+from dgml_core.errors import (
+    CorruptMetadata,
+    StorageProviderUnresolvable,
+    WorkspacesConfigInvalid,
+    WorkspacesWriteConflict,
+)
 from dgml_core.provider import import_provider_class
 from dgml_core.storage_local import LocalStore
 from dgml_core.workspace_id import generate_unique_workspace_id, new_workspace_id
@@ -67,6 +72,7 @@ class DerivedOnlyStore(LocalDirWorkspacesStore):
     exists = WorkspacesStore.exists
     list_ids = WorkspacesStore.list_ids
     list_entries = WorkspacesStore.list_entries
+    create_config = WorkspacesStore.create_config
 
 
 StoreFactory = Callable[[Path], WorkspacesStore]
@@ -114,6 +120,20 @@ def test_write_replaces(store: WorkspacesStore) -> None:
     assert found is not None
     assert "Renamed" in found
     assert "Acme Contracts" not in found
+
+
+def test_create_config_claims_a_fresh_id(store: WorkspacesStore) -> None:
+    wid = new_workspace_id()
+    store.create_config(wid, CONFIG)
+    assert store.read_config(wid) == CONFIG
+
+
+def test_create_config_never_replaces(store: WorkspacesStore) -> None:
+    wid = new_workspace_id()
+    store.create_config(wid, CONFIG)
+    with pytest.raises(WorkspacesWriteConflict):
+        store.create_config(wid, "[workspace]\nname = 'Usurper'\n")
+    assert store.read_config(wid) == CONFIG
 
 
 def test_exists_tracks_write_and_delete(store: WorkspacesStore) -> None:
