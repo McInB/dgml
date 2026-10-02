@@ -191,22 +191,24 @@ def create_workspace(
         # the reverse of the detached order.
         new_id = workspace_id or generate_unique_workspace_id(store)
         try:
-            # The claim. Create-if-absent, so of two creates racing the same id exactly
-            # one wins and the loser is refused here instead of overwriting the row.
-            store.create_config(new_id, seed_toml or "")
-        except WorkspacesWriteConflict:
-            raise _already_held(store, new_id) from None
-        ws = Workspace(root=store.workspace_root(new_id), workspaces_id=new_id)
-        try:
+            try:
+                # The claim. Create-if-absent, so of two creates racing the same id
+                # exactly one wins and the loser is refused here instead of overwriting
+                # the row.
+                store.create_config(new_id, seed_toml or "")
+            except WorkspacesWriteConflict:
+                raise _already_held(store, new_id) from None
+            ws = Workspace(root=store.workspace_root(new_id), workspaces_id=new_id)
             return _build(ws, workspace_id, organization, name, storage_service, seed_toml)
-        except WorkspacesWriteConflict:
-            # Another writer changed the row after this call claimed it, so it is theirs
-            # now — deleting it would destroy their workspace, not this call's leavings.
+        except (ConflictError, WorkspacesWriteConflict):
+            # The row is another writer's — the claim lost, or they changed it after
+            # this call claimed it. Deleting it would destroy their workspace.
             raise
         except BaseException:
-            # This call claimed the row, so any failure past here must remove it: a
-            # stranded row raises ConflictError on every retry of the same id. A cleanup
-            # that fails must not mask the cause.
+            # Any other failure must remove the row this call claimed — even one from
+            # the claim itself, whose ack can be lost after the server applied it. A
+            # stranded row raises ConflictError on every retry of the same id, and a
+            # cleanup that fails must not mask the cause.
             with contextlib.suppress(Exception):
                 store.delete(new_id)
             raise

@@ -30,6 +30,7 @@ from dgml_core import (
     StorageConfigInvalid,
     StorageProviderUnresolvable,
     Workspace,
+    WorkspacesUnavailable,
     WorkspacesWriteConflict,
     create_workspace,
     default_workspaces_store,
@@ -340,6 +341,28 @@ def test_addressed_rollback_holds_on_a_conflict_detecting_store(
     )
     assert retry.identity.workspace_id == "acme"
     assert retry.identity.storage_service == "svca"
+
+
+def test_a_claim_that_fails_after_applying_is_rolled_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ack of a successful claim can be lost (connection drops after the server
+    applied the insert). The failure must still remove the row, or every retry of the
+    same id is refused as CONFLICT — the stranding this create promises away."""
+    store = default_workspaces_store()
+    real = store.create_config
+
+    def applied_but_ack_lost(workspace_id: str, text: str) -> None:
+        real(workspace_id, text)
+        raise WorkspacesUnavailable("connection reset before the acknowledgement")
+
+    monkeypatch.setattr(store, "create_config", applied_but_ack_lost)
+    with pytest.raises(WorkspacesUnavailable):
+        create_workspace(workspace_id="acme", organization="Acme")
+    assert not store.exists("acme")
+
+    monkeypatch.undo()
+    assert create_workspace(workspace_id="acme", organization="Acme").identity.workspace_id
 
 
 def test_a_conflicting_write_does_not_delete_the_row(monkeypatch: pytest.MonkeyPatch) -> None:
