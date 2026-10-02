@@ -303,6 +303,47 @@ def test_load_config_defaults(workspace: Workspace) -> None:
     assert config.schema_api_key_env is None
     assert config.values_api_key_env is None
     assert config.max_tool_iters == DEFAULT_MAX_TOOL_ITERS
+    # Unset, the values reasoning effort is the module's measured default.
+    assert config.values_reasoning_effort == "medium"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("low", "low"),
+        ("high", "high"),
+        ("none", "none"),  # litellm's own value: sent, asks the provider for no thinking
+        ("default", None),  # send no reasoning effort at all
+    ],
+)
+def test_load_config_reads_values_reasoning_effort(
+    workspace: Workspace, raw: str, expected: str | None
+) -> None:
+    _write_grounded_config(
+        workspace,
+        {
+            "schema_model": DEFAULT_SCHEMA_MODEL,
+            "values_model": DEFAULT_VALUES_MODEL,
+            "values_reasoning_effort": raw,
+        },
+    )
+    assert load_grounded_config(workspace).values_reasoning_effort == expected
+
+
+@pytest.mark.parametrize("raw", ["turbo", "", "Low", 3, True])
+def test_load_config_rejects_unknown_values_reasoning_effort(
+    workspace: Workspace, raw: object
+) -> None:
+    _write_grounded_config(
+        workspace,
+        {
+            "schema_model": DEFAULT_SCHEMA_MODEL,
+            "values_model": DEFAULT_VALUES_MODEL,
+            "values_reasoning_effort": raw,
+        },
+    )
+    with pytest.raises(GroundedConfigInvalid, match="values_reasoning_effort"):
+        load_grounded_config(workspace)
 
 
 def test_load_config_rejects_empty_api_key_env(workspace: Workspace) -> None:
@@ -671,6 +712,80 @@ def test_lower_values_budget_does_not_reach_location_grounding(workspace: Worksp
     assert m.call_count == 2
     assert m.call_args_list[0].kwargs["reasoning_effort"] == "medium"
     assert m.call_args_list[1].kwargs["reasoning_effort"] == "high"
+
+
+def _extract_with_grounding_call(workspace: Workspace, config: GroundedConfig) -> list[Any]:
+    """One extraction whose text phase 2 cannot match, so both LLM calls run:
+    value extraction (phase 1) and location grounding (phase 3). Returns the
+    two ``litellm.completion`` calls."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)  # only contains "Hello", "world"
+    _seed_page_image(workspace, fid, 1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Goodnight", "locations": [{"page_number": 1}]}}
+    phase3_args = {"locations": [{"id": "a", "bounding_boxes": [[100, 56, 200, 76]]}]}
+    with patch(
+        "litellm.completion",
+        side_effect=[
+            _tool_call_response("submit_values", {"values": phase1_values}, call_id="p1"),
+            _tool_call_response("submit_locations", phase3_args, call_id="p3"),
+        ],
+    ) as m:
+        extract_values(workspace, ds_id, fid, config=config)
+    assert m.call_count == 2
+    return list(m.call_args_list)
+
+
+def test_configured_values_effort_reaches_value_extraction_only(workspace: Workspace) -> None:
+    """``values_reasoning_effort`` sets the budget of the value-extraction call
+    and nothing else: location grounding keeps the module default. A Gemini
+    values model makes both calls observable (Anthropic drops the setting on
+    the forced grounding call either way)."""
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model=DEFAULT_VALUES_MODEL,
+        values_reasoning_effort="low",
+    )
+    phase1, phase3 = _extract_with_grounding_call(workspace, config)
+    assert phase1.kwargs["reasoning_effort"] == "low"
+    assert phase3.kwargs["reasoning_effort"] == "high"
+
+
+def test_values_effort_default_sends_no_reasoning_effort(workspace: Workspace) -> None:
+    """``None`` (the config's ``"default"``) leaves the value-extraction budget
+    to the provider: the field is absent from that request, and still present
+    on location grounding, which this setting does not govern."""
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model=DEFAULT_VALUES_MODEL,
+        values_reasoning_effort=None,
+    )
+    phase1, phase3 = _extract_with_grounding_call(workspace, config)
+    assert "reasoning_effort" not in phase1.kwargs
+    assert phase3.kwargs["reasoning_effort"] == "high"
+
+
+def test_configured_values_effort_reaches_anthropic_value_extraction(
+    workspace: Workspace,
+) -> None:
+    """Value extraction runs with ``tool_choice`` auto, so an Anthropic values
+    model receives the configured effort too (the wrapper only drops it on a
+    forced tool call)."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    response = _tool_call_response("submit_values", {"values": phase1_values})
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model="anthropic/claude-sonnet-5",
+        values_reasoning_effort="low",
+    )
+    with patch("litellm.completion", return_value=response) as m:
+        extract_values(workspace, ds_id, fid, config=config)
+    assert m.call_args_list[0].kwargs["reasoning_effort"] == "low"
 
 
 def test_generate_schema_rejects_empty_file_list(workspace: Workspace) -> None:

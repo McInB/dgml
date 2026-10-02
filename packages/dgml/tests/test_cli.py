@@ -5416,6 +5416,60 @@ def test_extraction_extract_reports_a_failed_conversion(
     mock_completion.assert_not_called()
 
 
+def test_extraction_extract_values_effort_overrides_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--values-effort` replaces `grounded.values_reasoning_effort` for one
+    call: a named effort is sent as given, `default` sends none, and without
+    the flag the request carries the module default."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _write_grounded_config(ws)
+    ds_id = _new_docset(ws, capsys)
+    schema_file = tmp_path / "schema.rnc"
+    schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
+    main(_ws_args(ws) + ["extraction", "set-schema", ds_id, "--schema-file", str(schema_file)])
+    capsys.readouterr()
+    fid = "fileeffort001"
+    _seed_file_dir(ws, fid, pages=1)
+    values = {"VendorName": {"text": "Acme", "locations": []}}  # empty locs → no phase 3
+    response = _tool_response("submit_values", {"values": values})
+    wsx = Workspace(root=ws)
+
+    def _extract(*flags: str) -> dict[str, Any]:
+        if wsx.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc")):
+            wsx.blobs.delete_blob(layout.dgml_xml_key(ds_id, fid, "doc"))
+        with patch("litellm.completion", return_value=response) as m:
+            assert main(_ws_args(ws) + ["extraction", "extract", ds_id, fid, *flags]) == 0
+        capsys.readouterr()
+        return dict(m.call_args_list[0].kwargs)
+
+    assert _extract()["reasoning_effort"] == "medium"
+    assert _extract("--values-effort", "low")["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in _extract("--values-effort", "default")
+
+
+def test_extraction_extract_refuses_unknown_values_effort(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An effort the pipeline does not know is refused before the model is called."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _write_grounded_config(ws)
+    ds_id = _new_docset(ws, capsys)
+    with patch("litellm.completion") as mock_completion:
+        rc = main(
+            _ws_args(ws) + ["extraction", "extract", ds_id, "somefile", "--values-effort", "turbo"]
+        )
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "GROUNDED_CONFIG_INVALID"
+    assert "--values-effort" in err["message"]
+    mock_completion.assert_not_called()
+
+
 def test_extraction_extract_records_usage_under_debug(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

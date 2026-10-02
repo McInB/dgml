@@ -2582,6 +2582,14 @@ def _add_extraction_subparsers(
         default=None,
         help="Override grounded.values_model for this call (LiteLLM model string).",
     )
+    ex_extract.add_argument(
+        "--values-effort",
+        default=None,
+        help=(
+            "Override grounded.values_reasoning_effort for this call: none, minimal, "
+            "low, medium, high, xhigh, or 'default' to send no reasoning effort."
+        ),
+    )
 
     ex_get_values = extraction.add_parser(
         "get-values",
@@ -2630,7 +2638,12 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
 
     from dgml_core.extraction_schema import parse_rnc, rnc_to_json_schema
     from dgml_core.extraction_xml import dgml_xml_to_values
-    from dgml_core.grounded import extract_values, generate_schema, load_grounded_config
+    from dgml_core.grounded import (
+        extract_values,
+        generate_schema,
+        load_grounded_config,
+        parse_values_reasoning_effort,
+    )
 
     store = DocSetStore(ws)
     sub = args.extraction_command
@@ -2700,6 +2713,13 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         config = load_grounded_config(ws)
         if args.values_model:
             config = replace(config, values_model=args.values_model)
+        if args.values_effort is not None:
+            config = replace(
+                config,
+                values_reasoning_effort=parse_values_reasoning_effort(
+                    args.values_effort, source="--values-effort"
+                ),
+            )
         result = extract_values(
             ws,
             args.docset_id,
