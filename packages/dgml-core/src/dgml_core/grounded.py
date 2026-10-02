@@ -353,9 +353,9 @@ def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
     The PDF is found by the name ``file add`` stored it under
     (:func:`layout.file_pdf_key`, from the record's ``original_filename``),
     not by matching a suffix: a source named ``INVOICE.PDF`` is stored under
-    that name, so a case-sensitive ``.pdf`` match missed it. A prefix scan
-    remains as the fallback for a file with no record, or whose PDF is not at
-    that key.
+    that name, so a case-sensitive ``.pdf`` match missed it. There is no
+    fallback scan: a filename is not unique in the workspace, so a PDF found
+    anywhere else under the prefix could belong to another source.
 
     A convertible source whose conversion failed at ``file add`` has a
     record but no PDF, and the converter's error is among the file's
@@ -363,39 +363,28 @@ def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
     that error. A file with no PDF and no recorded conversion error raises
     :class:`FileNotFound` as before.
     """
+    pdf_key = layout.file_pdf_key(file_id, FileStore(workspace).get(file_id).original_filename)
+    if workspace.blobs.blob_exists(pdf_key):
+        return workspace.blobs.get_blob(pdf_key)
     try:
-        original_filename = FileStore(workspace).get(file_id).original_filename
-    except FileNotFound:
-        original_filename = None
-    if original_filename is not None:
-        pdf_key = layout.file_pdf_key(file_id, original_filename)
-        if workspace.blobs.blob_exists(pdf_key):
-            return workspace.blobs.get_blob(pdf_key)
-    # No record, or a PDF not where `file add` puts it today: fall back to
-    # whatever PDF the file's prefix holds, in a stable order.
-    keys = workspace.blobs.list_blobs(layout.file_prefix(file_id))
-    pdfs = sorted(k for k in keys if k.lower().endswith(".pdf"))
-    if not pdfs:
-        try:
-            failed = [
-                err.message.strip()
-                for err in load_recorded_errors(workspace, file_id)
-                if err.operation == CONVERT_TO_PDF_OPERATION
-                and isinstance(err.message, str)
-                and err.message.strip()
-            ]
-        except (TypeError, KeyError, ValueError, AttributeError):
-            # The lookup is a diagnostic: a malformed errors document (a
-            # wrong shape, a missing field) must not turn the missing PDF
-            # into an internal error; a record without a usable message is
-            # skipped the same way.
-            failed = []
-        if failed:
-            raise ConversionFailed(
-                f"file '{file_id}' has no source PDF: converting it failed: {failed[-1]}"
-            )
-        raise FileNotFound(f"file '{file_id}' has no source PDF")
-    return workspace.blobs.get_blob(pdfs[0])
+        failed = [
+            err.message.strip()
+            for err in load_recorded_errors(workspace, file_id)
+            if err.operation == CONVERT_TO_PDF_OPERATION
+            and isinstance(err.message, str)
+            and err.message.strip()
+        ]
+    except (TypeError, KeyError, ValueError, AttributeError):
+        # The lookup is a diagnostic: a malformed errors document (a
+        # wrong shape, a missing field) must not turn the missing PDF
+        # into an internal error; a record without a usable message is
+        # skipped the same way.
+        failed = []
+    if failed:
+        raise ConversionFailed(
+            f"file '{file_id}' has no source PDF: converting it failed: {failed[-1]}"
+        )
+    raise FileNotFound(f"file '{file_id}' has no source PDF")
 
 
 def _pdf_content_block(pdf_bytes: bytes) -> dict[str, Any]:

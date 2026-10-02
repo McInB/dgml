@@ -2919,13 +2919,14 @@ def test_pdf_bytes_reads_the_pdf_converted_from_a_source(workspace: Workspace) -
     assert _pdf_bytes(workspace, fid) == b"%PDF converted"
 
 
-def test_pdf_bytes_falls_back_to_a_pdf_not_at_the_derived_key(workspace: Workspace) -> None:
-    """A record whose PDF is not where `file add` puts it today is still read,
-    from the file's prefix, and the first by name when there are several."""
+def test_pdf_bytes_does_not_read_another_pdf_under_the_file_prefix(workspace: Workspace) -> None:
+    """The PDF is read only at its derived key. A filename is not unique in the
+    workspace, so a PDF found elsewhere under the file's prefix is not taken
+    for it: the file has no source PDF."""
     fid = "f4dddddddddd"
     _seed_file(workspace, fid, filename="doc.pdf")
     workspace.blobs.delete_blobs(layout.file_source_key(fid, "doc.pdf"))
-    workspace.blobs.put_blob(layout.file_source_key(fid, "b.PDF"), b"%PDF b")
-    workspace.blobs.put_blob(layout.file_source_key(fid, "a.pdf"), b"%PDF a")
+    workspace.blobs.put_blob(layout.file_source_key(fid, "other.pdf"), b"%PDF other")
 
-    assert _pdf_bytes(workspace, fid) == b"%PDF a"
+    with pytest.raises(FileNotFound, match=r"file 'f4dddddddddd' has no source PDF$"):
+        _pdf_bytes(workspace, fid)

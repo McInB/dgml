@@ -5319,10 +5319,25 @@ def test_extraction_generate_schema_happy_path(
     _write_grounded_config(ws)
     ds_id = _new_docset(ws, capsys)
 
-    # Seed a source PDF where generation expects it (files/<id>/*.pdf), written
-    # through the store's staging bridge (zero-copy on LocalStore).
+    # Seed a file record and its source PDF where generation expects it
+    # (files/<id>/<original_filename>), written through the store's staging
+    # bridge (zero-copy on LocalStore).
+    from dgml_core.models import FileRecord
+
     fid = "filexyz12345"
     _wsx = Workspace(root=ws)
+    _wsx.docs.put_doc(
+        "files",
+        fid,
+        FileRecord(
+            id=fid,
+            original_path="/fake/doc.pdf",
+            original_filename="doc.pdf",
+            sha256="0" * 64,
+            added_at="2026-01-01T00:00:00Z",
+            page_count=1,
+        ).to_json(),
+    )
     with _wsx.blobs.staged_write(layout.file_prefix(fid)) as _stage:
         _write_blank_pdf(_stage / "doc.pdf", 1)
 
