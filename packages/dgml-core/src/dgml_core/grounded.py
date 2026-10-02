@@ -350,9 +350,12 @@ def get_page_words(
 def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
     """Return the bytes of the single ``*.pdf`` stored for ``file_id``.
 
-    The suffix is matched without regard to case: ``file add`` accepts a
-    source named ``INVOICE.PDF`` (it lowercases the suffix to validate it)
-    and stores it under that name, so the lookup must accept it too.
+    The PDF is found by the name ``file add`` stored it under
+    (:func:`layout.file_pdf_key`, from the record's ``original_filename``),
+    not by matching a suffix: a source named ``INVOICE.PDF`` is stored under
+    that name, so a case-sensitive ``.pdf`` match missed it. A prefix scan
+    remains as the fallback for a file with no record, or whose PDF is not at
+    that key.
 
     A convertible source whose conversion failed at ``file add`` has a
     record but no PDF, and the converter's error is among the file's
@@ -360,8 +363,18 @@ def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
     that error. A file with no PDF and no recorded conversion error raises
     :class:`FileNotFound` as before.
     """
+    try:
+        original_filename = FileStore(workspace).get(file_id).original_filename
+    except FileNotFound:
+        original_filename = None
+    if original_filename is not None:
+        pdf_key = layout.file_pdf_key(file_id, original_filename)
+        if workspace.blobs.blob_exists(pdf_key):
+            return workspace.blobs.get_blob(pdf_key)
+    # No record, or a PDF not where `file add` puts it today: fall back to
+    # whatever PDF the file's prefix holds, in a stable order.
     keys = workspace.blobs.list_blobs(layout.file_prefix(file_id))
-    pdfs = [k for k in keys if k.lower().endswith(".pdf")]
+    pdfs = sorted(k for k in keys if k.lower().endswith(".pdf"))
     if not pdfs:
         try:
             failed = [

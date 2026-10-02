@@ -2908,3 +2908,24 @@ def test_pdf_bytes_reads_a_source_stored_with_an_uppercase_suffix(
     _seed_file(workspace, "f2bbbbbbbbbb", filename="doc.docx")
     with pytest.raises(FileNotFound, match=r"file 'f2bbbbbbbbbb' has no source PDF$"):
         _pdf_bytes(workspace, "f2bbbbbbbbbb")
+
+
+def test_pdf_bytes_reads_the_pdf_converted_from_a_source(workspace: Workspace) -> None:
+    """A convertible source's PDF is the `<stem>.pdf` sibling `file add` persists."""
+    fid = "f3cccccccccc"
+    _seed_file(workspace, fid, filename="report.docx", pdf_bytes=b"the docx")
+    workspace.blobs.put_blob(layout.file_pdf_key(fid, "report.docx"), b"%PDF converted")
+
+    assert _pdf_bytes(workspace, fid) == b"%PDF converted"
+
+
+def test_pdf_bytes_falls_back_to_a_pdf_not_at_the_derived_key(workspace: Workspace) -> None:
+    """A record whose PDF is not where `file add` puts it today is still read,
+    from the file's prefix, and the first by name when there are several."""
+    fid = "f4dddddddddd"
+    _seed_file(workspace, fid, filename="doc.pdf")
+    workspace.blobs.delete_blobs(layout.file_source_key(fid, "doc.pdf"))
+    workspace.blobs.put_blob(layout.file_source_key(fid, "b.PDF"), b"%PDF b")
+    workspace.blobs.put_blob(layout.file_source_key(fid, "a.pdf"), b"%PDF a")
+
+    assert _pdf_bytes(workspace, fid) == b"%PDF a"
