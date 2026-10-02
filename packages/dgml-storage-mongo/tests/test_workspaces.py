@@ -123,6 +123,29 @@ def test_write_read_list_delete(workspaces_store: MongoWorkspacesStore) -> None:
     assert workspaces_store.list_ids() == []
 
 
+def test_create_config_claims_a_fresh_id(workspaces_store: MongoWorkspacesStore) -> None:
+    """The insert-only claim: the row lands complete — text, derived projection and
+    catalog version — exactly as a `write_config` row would."""
+    import hashlib
+
+    workspaces_store.create_config(WID, CONFIG)
+    assert workspaces_store.read_config(WID) == CONFIG
+    doc = workspaces_store._docs.find_one({"_id": WID})
+    assert doc is not None
+    assert doc["name"] == "Acme Contracts"
+    assert doc["config_sha256"] == hashlib.sha256(CONFIG.encode("utf-8")).hexdigest()
+    assert doc["schema_version"] == 1
+
+
+def test_create_config_never_replaces(workspaces_store: MongoWorkspacesStore) -> None:
+    """The unique `_id` index decides the race: the loser conflicts, the winner's row
+    survives byte for byte."""
+    workspaces_store.create_config(WID, CONFIG)
+    with pytest.raises(WorkspacesWriteConflict, match="never replaces"):
+        workspaces_store.create_config(WID, "[workspace]\nname = 'Usurper'\n")
+    assert workspaces_store.read_config(WID) == CONFIG
+
+
 def test_list_entries_derives_from_the_config(
     workspaces_store: MongoWorkspacesStore,
 ) -> None:
