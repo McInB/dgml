@@ -133,6 +133,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from dgml_core.errors import (
@@ -301,6 +302,30 @@ class MongoWorkspacesStore(WorkspacesStore):
                 f"Its config is written whole, so overwriting would discard whatever that "
                 f"writer changed. Re-run the command to work from the current config."
             )
+
+    def create_config(self, workspace_id: str, text: str) -> None:
+        # A plain insert, so the unique `_id` index decides a race: of two concurrent
+        # claims exactly one succeeds, and the loser conflicts instead of replacing the
+        # winner's row — the semantics an upsert cannot give.
+        from pymongo.errors import DuplicateKeyError
+
+        derived = self._derive(workspace_id, text)
+        with self._reachable():
+            try:
+                self._docs.insert_one(
+                    {
+                        "_id": workspace_id,
+                        "config_toml": text,
+                        **derived,
+                        "updated_at": datetime.now(tz=UTC),
+                        "schema_version": CATALOG_SCHEMA_VERSION,
+                    }
+                )
+            except DuplicateKeyError:
+                raise WorkspacesWriteConflict(
+                    f"cannot create a config for {workspace_id} in {self.label()}: it "
+                    f"already holds one, and creating never replaces it."
+                ) from None
 
     def list_configs(self) -> dict[str, str]:
         with self._reachable():
