@@ -206,6 +206,12 @@ def create_workspace(
             # reads as the seed is its own. That check is only sound right here, before
             # the build adds identity and storage to the config — after that the text
             # never equals the seed, and the build's rollback below must not use it.
+            # One ambiguity remains: another writer racing the same id with
+            # byte-identical seed text (which could be empty) reads as this call's row,
+            # so its fresh claim can be deleted here. Bounded: their unfinished create
+            # fails with a retryable conflict at its next conditional write, and a row
+            # that got any further no longer reads as the seed — a built workspace is
+            # never deleted.
             with contextlib.suppress(Exception):
                 if store.read_config(new_id) == seed:
                     store.delete(new_id)
