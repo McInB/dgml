@@ -286,8 +286,8 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=sorted(PROVIDER_MODELS),
         default=None,
         help=(
-            "Force a provider's default [models] block. Omit to auto-detect from the "
-            f"API-key env vars that are set ({', '.join(API_KEY_ENV_VARS)})."
+            "Force a provider family's default models ([models] family = ...). Omit to "
+            f"auto-detect from the API-key env vars that are set ({', '.join(API_KEY_ENV_VARS)})."
         ),
     )
     init_p.add_argument(
@@ -1318,8 +1318,8 @@ _TIER_CAPABILITIES = {
 # when a provider is forced with --provider).
 _PROVIDER_KEYS = {
     "anthropic": "ANTHROPIC_API_KEY",
+    "anthropic_google": "ANTHROPIC_API_KEY and GEMINI_API_KEY",
     "google": "GEMINI_API_KEY",
-    "mixed": "ANTHROPIC_API_KEY and GEMINI_API_KEY",
     "openai": "OPENAI_API_KEY",
 }
 
@@ -1329,11 +1329,12 @@ _PROVIDER_CHOICES = "|".join(sorted(PROVIDER_MODELS))
 
 
 def _init_models_report(provider: str) -> str:
-    """The ``[models]`` block for *provider* with tier→capability comments —
-    for the stderr advisory only (never written into the file)."""
+    """What ``[models] family = "<provider>"`` expands to, with tier→capability
+    comments — for the stderr advisory only. The config file names just the
+    family, so this report is the user's view of the expansion."""
     tiers = PROVIDER_MODELS[provider]
     width = max(len(t) for t in _TIER_CAPABILITIES)
-    lines = ["  [models]"]
+    lines = [f'  [models] family = "{provider}" expands to:']
     for tier in ("light", "standard", "advanced", "expert"):
         lines.append(f'  {tier.ljust(width)} = "{tiers[tier]}"    # {_TIER_CAPABILITIES[tier]}')
     return "\n".join(lines)
@@ -1406,8 +1407,8 @@ def _init_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             f"[dgml init] detected API keys: {keys_line}\n"
             f"[dgml init] wrote {path} (provider: {canonical}).\n"
             f"{_init_models_report(canonical)}\n"
-            "[dgml init] override any task with its own field (e.g. [generation] "
-            'label_model = "..."); switch providers with '
+            '[dgml init] override a single tier ([models] advanced = "...") or a task '
+            '(e.g. [generation] label_model = "..."); switch families with '
             f"dgml init --provider <{_PROVIDER_CHOICES}>."
         )
     _emit(payload, fmt)

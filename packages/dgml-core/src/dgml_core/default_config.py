@@ -10,7 +10,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Default `[models]` tables `dgml init --provider` writes into a user config.
+"""Default `[models]` tables, one per provider family.
+
+Two consumers: `load_models_config` expands `[models].family = "<key>"` into
+these four tiers at runtime (an explicitly set tier overrides its default),
+and `dgml init` reports the expansion on stderr. The generated config names
+only the family, so a family-based config *tracks* these defaults across dgml
+upgrades; users who need a reproducible pin set explicit tiers instead.
 
 Kept apart from :mod:`dgml_core.storage` (the path-resolution and TOML-writing
 machinery) so the shipped model defaults live in one obvious place and can be
@@ -19,10 +25,9 @@ updated without touching the config generator.
 
 from __future__ import annotations
 
-# The four tiers, cheapest → strongest, per provider. `dgml init --provider`
-# writes one of these into the `[models]` block; the tier→task mapping and
-# per-task overrides are documented in the CLI reference, not baked into the
-# file (the mapping may change without a config rewrite).
+# The four tiers, cheapest → strongest, per provider family. The tier→task
+# mapping and per-task overrides are documented in the CLI reference, not
+# baked into the config file (the mapping may change without a config rewrite).
 #
 # The cheap Gemini tier uses the `gemini-flash-lite-latest` *alias*, not a
 # pinned version. A pinned flash-lite (`gemini-2.5-flash-lite`) was the default
@@ -32,7 +37,7 @@ from __future__ import annotations
 # alias tracks the current flash-lite and cannot go stale that way. Users who
 # need a reproducible pin can still set an explicit model in their own config.
 PROVIDER_MODELS: dict[str, dict[str, str]] = {
-    "mixed": {
+    "anthropic_google": {
         # Gemini Flash-Lite for the cheap high-volume vision work
         # (classification/style); Anthropic for the document-reasoning pipeline
         # (transcription → labeling/value-extraction → schema generation).

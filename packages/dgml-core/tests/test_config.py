@@ -123,6 +123,46 @@ def test_cli_overrides_take_precedence(workspace: Workspace) -> None:
     assert merged[ConfigSection.MODELS]["light"] == "cli/model"
 
 
+def test_workspace_blank_tier_reverts_to_the_user_family_default(workspace: Workspace) -> None:
+    """The blank-out story end to end: `""` is a *set* value, so it survives the
+    deep merge over the user's explicit tier, and `load_models_config` then treats
+    it as unset — the family default applies again."""
+    from dgml_core.default_config import PROVIDER_MODELS
+    from dgml_core.models_config import load_models_config
+
+    _write_user_config({"models": {"family": "anthropic", "advanced": "user/model"}})
+    write_config(workspace, {"models": {"advanced": ""}})
+    merged = load_merged_config(workspace)
+    assert merged[ConfigSection.MODELS]["advanced"] == ""
+    assert load_models_config(merged).advanced == PROVIDER_MODELS["anthropic"]["advanced"]
+
+
+def test_workspace_blank_family_unsets_the_user_family(workspace: Workspace) -> None:
+    from dgml_core.models_config import load_models_config
+
+    _write_user_config({"models": {"family": "google"}})
+    write_config(workspace, {"models": {"family": "", "light": "ws/model"}})
+    cfg = load_models_config(load_merged_config(workspace))
+    assert cfg.light == "ws/model"
+    assert cfg.expert is None
+
+
+def test_env_var_sets_family(workspace: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DGML_MODELS__FAMILY", "openai")
+    assert load_merged_config(workspace)[ConfigSection.MODELS]["family"] == "openai"
+
+
+def test_env_var_blank_tier_survives_as_empty_string(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins how pydantic-settings delivers an empty env value: as `""`, which the
+    models loader reads as blank-out. If an upgrade changes this, blank-out via
+    env var stops working and this test is the tripwire."""
+    write_config(workspace, {"models": {"light": "ws/model"}})
+    monkeypatch.setenv("DGML_MODELS__LIGHT", "")
+    assert load_merged_config(workspace)[ConfigSection.MODELS]["light"] == ""
+
+
 # ---- Malformed input --------------------------------------------------------
 
 

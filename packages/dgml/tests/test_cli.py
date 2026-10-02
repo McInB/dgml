@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import threading
+import tomllib
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -106,8 +107,8 @@ def test_init_writes_user_config(tmp_path: Path, capsys: pytest.CaptureFixture[s
     payload = _read_stdout(capsys)
     assert payload["config_created"] is True
     assert payload["forced"] is False
-    # Both dummy provider keys are set by the autouse fixture → auto-detect mixed.
-    assert payload["provider"] == "mixed"
+    # Both dummy provider keys set by the autouse fixture → auto-detect the blend.
+    assert payload["provider"] == "anthropic_google"
     assert set(payload["detected_keys"]) == {"ANTHROPIC_API_KEY", "GEMINI_API_KEY"}
     assert "next_action" in payload
     cfg = user_config_path()
@@ -131,7 +132,23 @@ def test_init_provider_flag_forces_table(
     rc = main(_ws_args(tmp_path / "ws") + ["init", "--provider", "google"])
     assert rc == 0
     assert _read_stdout(capsys)["provider"] == "google"
-    assert "gemini/" in user_config_path().read_text(encoding="utf-8")
+    assert _config_family(user_config_path()) == "google"
+
+
+def _config_family(path: Path) -> str:
+    """The `[models] family` the written config names (the file carries no tiers)."""
+    value: str = tomllib.loads(path.read_text(encoding="utf-8"))["models"]["family"]
+    return value
+
+
+def test_init_rejects_the_old_mixed_provider_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`mixed` was renamed to `anthropic_google` with no alias → argparse error."""
+    with pytest.raises(SystemExit) as exc:
+        main(_ws_args(tmp_path / "ws") + ["init", "--provider", "mixed"])
+    assert exc.value.code == 2
+    assert "anthropic_google" in capsys.readouterr().err
 
 
 def test_init_provider_openai_writes_openai_table(
@@ -142,7 +159,7 @@ def test_init_provider_openai_writes_openai_table(
     rc = main(_ws_args(tmp_path / "ws") + ["init", "--provider", "openai"])
     assert rc == 0
     assert _read_stdout(capsys)["provider"] == "openai"
-    assert "openai/gpt-" in user_config_path().read_text(encoding="utf-8")
+    assert _config_family(user_config_path()) == "openai"
 
 
 def test_init_auto_detects_openai_from_its_key_alone(
@@ -160,7 +177,7 @@ def test_init_auto_detects_openai_from_its_key_alone(
     payload = _read_stdout(capsys)
     assert payload["provider"] == "openai"
     assert payload["detected_keys"] == ["OPENAI_API_KEY"]
-    assert "openai/gpt-" in user_config_path().read_text(encoding="utf-8")
+    assert _config_family(user_config_path()) == "openai"
 
 
 def test_init_provider_without_force_does_not_clobber(
@@ -177,7 +194,7 @@ def test_init_provider_without_force_does_not_clobber(
     payload = _read_stdout(capsys)
     assert payload["config_created"] is False
     assert "--force" in payload["next_action"]
-    assert "anthropic/" in user_config_path().read_text(encoding="utf-8")  # unchanged
+    assert _config_family(user_config_path()) == "anthropic"  # unchanged
 
 
 def test_init_force_overwrites_with_backup(
@@ -193,7 +210,7 @@ def test_init_force_overwrites_with_backup(
     payload = _read_stdout(capsys)
     assert payload["forced"] is True
     cfg = user_config_path()
-    assert "gemini/" in cfg.read_text(encoding="utf-8")
+    assert _config_family(cfg) == "google"
     assert cfg.with_suffix(".toml.bak").exists()
 
 

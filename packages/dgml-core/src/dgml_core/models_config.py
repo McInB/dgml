@@ -24,6 +24,18 @@ task's own section (e.g. ``generation.api_key_env``, ``grounded.schema_api_key``
 a model sourced from a tier uses its task section's credentials, or falls back to
 litellm's per-provider env-var conventions when the section sets none.
 
+``family`` picks a whole provider family's defaults: one of the
+:data:`~dgml_core.default_config.PROVIDER_MODELS` keys, expanded into all four
+tiers at load time. An explicitly set tier overrides its family default. A
+family-based config tracks dgml's shipped defaults across upgrades; explicit
+tiers are the pinning mechanism.
+
+A tier (or ``family``) set to an empty / whitespace-only string is treated as
+*unset at that config layer* — the layered deep-merge means an empty value is
+the only way a workspace config or env var can undo a value a lower layer set
+(TOML has no null). This applies only to the ``[models]`` keys; task-section
+fields like ``generation.model`` still reject empty strings.
+
 A tier that is unset falls back to the nearest set tier (nearest *lower* first,
 then higher), emitting a warning — so a minimal config that sets only, say,
 ``standard`` still resolves every task.
@@ -36,6 +48,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from .default_config import PROVIDER_MODELS
 from .errors import DgmlError, ModelsConfigInvalid
 
 logger = logging.getLogger(__name__)
@@ -133,24 +146,42 @@ class ModelsConfig:
 
 
 def _validate_optional_str(value: Any, field: str) -> str | None:
+    """``None``, or a string. Empty / whitespace-only normalizes to ``None``:
+    the config layer explicitly *unset* the key (see module docstring)."""
     if value is None:
         return None
-    if not isinstance(value, str) or not value.strip():
-        raise ModelsConfigInvalid(f"'models.{field}' must be a non-empty string if set")
-    return value
+    if not isinstance(value, str):
+        raise ModelsConfigInvalid(f"'models.{field}' must be a string if set")
+    return value if value.strip() else None
 
 
 def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
     """Build a :class:`ModelsConfig` from the merged config mapping's
-    ``[models]`` section (an empty section yields an all-``None`` config)."""
+    ``[models]`` section (an empty section yields an all-``None`` config).
+
+    ``family`` expands to that family's :data:`PROVIDER_MODELS` tiers here, at
+    load time; an explicitly set tier wins over its family default. The family
+    is never stored on the result."""
     section = merged.get(ConfigSection.MODELS)
     if section is None:
         return ModelsConfig()
     if not isinstance(section, dict):
         raise ModelsConfigInvalid("'models' must be a table")
-    return ModelsConfig(
-        **{t.value: _validate_optional_str(section.get(t.value), t.value) for t in TIERS}
-    )
+    family = _validate_optional_str(section.get("family"), "family")
+    defaults: dict[str, str] = {}
+    if family is not None:
+        family = family.strip()
+        if family not in PROVIDER_MODELS:
+            raise ModelsConfigInvalid(
+                f"'models.family' must be one of {', '.join(sorted(PROVIDER_MODELS))}; "
+                f"got {family!r}"
+            )
+        defaults = PROVIDER_MODELS[family]
+    tiers: dict[str, str | None] = {}
+    for t in TIERS:
+        explicit = _validate_optional_str(section.get(t.value), t.value)
+        tiers[t.value] = explicit if explicit is not None else defaults.get(t.value)
+    return ModelsConfig(**tiers)
 
 
 def section_enabled(
@@ -249,8 +280,8 @@ def resolve_tiered_model(
         model = load_models_config(merged).resolve(tier)
     if not isinstance(model, str) or not model.strip():
         raise missing(
-            f"no {model_field} for {section_name}: set [models].{tier} or "
-            f"'{section_name}.{model_field}' in the config"
+            f"no {model_field} for {section_name}: set [models].family, [models].{tier}, "
+            f"or '{section_name}.{model_field}' in the config"
         )
 
     return ResolvedModel(model=model, api_key=api_key, api_key_env=api_key_env, api_base=api_base)
