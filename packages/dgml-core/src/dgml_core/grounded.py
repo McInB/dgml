@@ -173,6 +173,14 @@ _DEFAULT_REASONING_EFFORT = "high"
 # keeps the default; see _PHASE3_GRID_REASONING_EFFORT for pages without them.
 _VALUES_REASONING_EFFORT = "medium"
 
+# What ``grounded.values_reasoning_effort`` (and ``--values-effort``) accept: the
+# effort names litellm takes, sent as given, plus ``"default"``, which sends no
+# ``reasoning_effort`` at all and leaves the budget to the provider. ``"none"``
+# is litellm's own value and is sent (it asks the provider to turn thinking
+# off), which is why omitting the field needs a word of its own.
+VALUES_REASONING_EFFORT_CHOICES = ("none", "minimal", "low", "medium", "high", "xhigh")
+VALUES_REASONING_EFFORT_PROVIDER_DEFAULT = "default"
+
 # Location grounding on a page with no OCR words (the 0-1000 grid path) runs at
 # "medium". There the model only reads a position off the image; at "high" it
 # spent most of its output reasoning without placing boxes any better. Measured
@@ -237,6 +245,26 @@ class GroundedConfig:
     schema_api_base: str | None = None
     values_api_base: str | None = None
     max_tool_iters: int = DEFAULT_MAX_TOOL_ITERS
+    # Reasoning budget of the value-extraction call (phase 1). ``None`` sends no
+    # ``reasoning_effort``; location grounding keeps its own constants.
+    values_reasoning_effort: str | None = _VALUES_REASONING_EFFORT
+
+
+def parse_values_reasoning_effort(raw: Any, *, source: str) -> str | None:
+    """Validate a values reasoning effort from the config file or the CLI.
+
+    Returns the effort to send, or ``None`` for ``"default"`` (send nothing).
+    ``source`` names where the value came from, for the error message.
+    """
+    if raw == VALUES_REASONING_EFFORT_PROVIDER_DEFAULT:
+        return None
+    if isinstance(raw, str) and raw in VALUES_REASONING_EFFORT_CHOICES:
+        return raw
+    accepted = ", ".join(
+        repr(v)
+        for v in (*VALUES_REASONING_EFFORT_CHOICES, VALUES_REASONING_EFFORT_PROVIDER_DEFAULT)
+    )
+    raise GroundedConfigInvalid(f"{source} must be one of {accepted} if set (got {raw!r})")
 
 
 def load_grounded_config(workspace: Workspace) -> GroundedConfig:
@@ -277,6 +305,13 @@ def load_grounded_config(workspace: Workspace) -> GroundedConfig:
         or max_tool_iters_raw < 1
     ):
         raise GroundedConfigInvalid("'grounded.max_tool_iters' must be a positive integer if set")
+    values_reasoning_effort = (
+        parse_values_reasoning_effort(
+            sec["values_reasoning_effort"], source="'grounded.values_reasoning_effort'"
+        )
+        if "values_reasoning_effort" in sec
+        else _VALUES_REASONING_EFFORT
+    )
 
     return GroundedConfig(
         schema_model=schema.model,
@@ -288,6 +323,7 @@ def load_grounded_config(workspace: Workspace) -> GroundedConfig:
         schema_api_base=schema.api_base,
         values_api_base=values.api_base,
         max_tool_iters=max_tool_iters_raw,
+        values_reasoning_effort=values_reasoning_effort,
     )
 
 
@@ -775,6 +811,7 @@ def extract_values(
                     api_base=api_base,
                     max_tool_iters=config.max_tool_iters,
                     totals=phase1_totals,
+                    reasoning_effort=config.values_reasoning_effort,
                 )
                 break
             except _OutputTruncated as exc:
@@ -1760,6 +1797,7 @@ def _run_extract_loop(
     max_tool_iters: int,
     totals: dict[str, Any],
     chunked: bool = False,
+    reasoning_effort: str | None = _VALUES_REASONING_EFFORT,
 ) -> tuple[dict[str, Any], int, int]:
     """Run a multi-turn extraction loop until the model finishes submitting.
 
@@ -1797,7 +1835,8 @@ def _run_extract_loop(
     # Anthropic — only forced tool_choice triggers the Anthropic drop. That
     # also makes this the only call site where the reasoning budget has any
     # effect on Claude, which is why :data:`_VALUES_REASONING_EFFORT` applies
-    # here and nowhere else.
+    # here and nowhere else. ``reasoning_effort`` is that constant unless the
+    # workspace set ``grounded.values_reasoning_effort`` (``None`` = send none).
     llm_config = LLMConfig(
         model=model,
         api_key=api_key,
@@ -1806,7 +1845,7 @@ def _run_extract_loop(
         max_completion_tokens=_DEFAULT_MAX_COMPLETION_TOKENS,
         temperature=_DEFAULT_VALUES_TEMPERATURE,
         timeout=_DEFAULT_TIMEOUT_SECONDS,
-        reasoning_effort=_VALUES_REASONING_EFFORT,
+        reasoning_effort=reasoning_effort,
     )
 
     tool_calls_run = 0
@@ -2423,6 +2462,8 @@ def _resolve_api_key(literal: str | None, env_name: str | None) -> str | None:
 
 __all__ = [
     "DEFAULT_MAX_TOOL_ITERS",
+    "VALUES_REASONING_EFFORT_CHOICES",
+    "VALUES_REASONING_EFFORT_PROVIDER_DEFAULT",
     "ExtractionResult",
     "GroundedConfig",
     "extract_values",

@@ -1207,8 +1207,8 @@ Two formats are involved:
 
 The LLM is configurable like every other model-using command — via the
 `grounded` section of the workspace `config.toml` (`schema_model`,
-`values_model`, API keys, `max_tool_iters`), with per-call overrides on the
-commands below.
+`values_model`, `values_reasoning_effort`, API keys, `max_tool_iters`), with
+per-call overrides on the commands below.
 
 ### `dgml extraction generate-schema <docset_id> [--from-file ID ...] [--schema-model M]`
 
@@ -1290,7 +1290,7 @@ fields, prompts for where to find one value. Returns
 Return the DocSet's extraction guidance as `{docset_id, guidance}`. Errors
 `GUIDANCE_NOT_FOUND` if none is set.
 
-### `dgml extraction extract <docset_id> <file_id> [--values-model M]`
+### `dgml extraction extract <docset_id> <file_id> [--values-model M] [--values-effort E]`
 
 Extract values from a file against the DocSet schema and write a `dg:extraction`
 element into the file's core `<stem>.dgml.xml`. Runs a three-phase pipeline
@@ -1299,6 +1299,11 @@ a generated document tree the extraction is added alongside it
 (`mode: full-extraction`); otherwise a minimal core file is created
 (`mode: extraction`). `extraction_stats.json` is written only under the global
 `--debug` flag. Errors `SCHEMA_NOT_FOUND` if the DocSet has no schema.
+
+`--values-effort` overrides `grounded.values_reasoning_effort` for this call:
+`none`, `minimal`, `low`, `medium` (the default), `high`, `xhigh`, or `default`
+to send no reasoning effort and take the provider's own default. Any other value
+is refused before the model is called.
 
 ```json
 {
