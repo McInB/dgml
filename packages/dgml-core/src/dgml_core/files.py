@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import layout
@@ -462,7 +462,8 @@ class FileStore:
         ``(None, message, converter_name)`` is returned so the file record is
         still created (consistent with the page-render / text soft-fail pattern).
         """
-        if source_key.lower().endswith(".pdf"):
+        pdf_key = layout.file_pdf_key(file_id, PurePosixPath(source_key).name)
+        if pdf_key == source_key:
             return source_key, None, None
 
         converters = load_conversion_config(self.ws)
@@ -484,7 +485,6 @@ class FileStore:
                 )
                 return None, message, converter_name
 
-        pdf_key = Path(source_key).with_suffix(".pdf").as_posix()
         self.ws.blobs.put_blob(pdf_key, pdf_bytes)
         return pdf_key, None, converter_name
 

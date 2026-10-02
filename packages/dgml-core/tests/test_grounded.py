@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -34,11 +35,13 @@ from dgml_core.errors import (
 )
 from dgml_core.extraction_schema import parse_rnc
 from dgml_core.extraction_xml import dgml_xml_to_values
+from dgml_core.files import FileStore
 from dgml_core.grounded import (
     _SCHEMA_TREE_MAX_DEPTH,
     DEFAULT_MAX_TOOL_ITERS,
     GroundedConfig,
     _field_node_schema,
+    _pdf_bytes,
     _submit_schema_tool,
     _to_page_pixels,
     extract_values,
@@ -2907,3 +2910,46 @@ def test_extract_values_repeats_the_latest_conversion_error(workspace: Workspace
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with pytest.raises(ConversionFailed, match=r"converting it failed: second attempt$"):
         extract_values(workspace, ds_id, fid, config=config)
+
+
+def test_pdf_bytes_reads_a_source_stored_with_an_uppercase_suffix(
+    workspace: Workspace, sample_pdf: Path
+) -> None:
+    """`file add` lowercases the suffix to validate a source, so `INVOICE.PDF`
+    is accepted as a PDF and stored under that name; the extraction lookup
+    used to match the stored key against `.pdf` case-sensitively and refuse
+    the file as having no source PDF."""
+    upper = sample_pdf.with_name("INVOICE.PDF")
+    upper.write_bytes(sample_pdf.read_bytes())
+    record = FileStore(workspace).add(upper).record
+    assert record.original_filename == "INVOICE.PDF"
+
+    assert _pdf_bytes(workspace, record.id) == upper.read_bytes()
+
+    # The negative side is unchanged: a record whose only blob is not a PDF
+    # under any casing still has no source PDF.
+    _seed_file(workspace, "f2bbbbbbbbbb", filename="doc.docx")
+    with pytest.raises(FileNotFound, match=r"file 'f2bbbbbbbbbb' has no source PDF$"):
+        _pdf_bytes(workspace, "f2bbbbbbbbbb")
+
+
+def test_pdf_bytes_reads_the_pdf_converted_from_a_source(workspace: Workspace) -> None:
+    """A convertible source's PDF is the `<stem>.pdf` sibling `file add` persists."""
+    fid = "f3cccccccccc"
+    _seed_file(workspace, fid, filename="report.docx", pdf_bytes=b"the docx")
+    workspace.blobs.put_blob(layout.file_pdf_key(fid, "report.docx"), b"%PDF converted")
+
+    assert _pdf_bytes(workspace, fid) == b"%PDF converted"
+
+
+def test_pdf_bytes_does_not_read_another_pdf_under_the_file_prefix(workspace: Workspace) -> None:
+    """The PDF is read only at its derived key. A filename is not unique in the
+    workspace, so a PDF found elsewhere under the file's prefix is not taken
+    for it: the file has no source PDF."""
+    fid = "f4dddddddddd"
+    _seed_file(workspace, fid, filename="doc.pdf")
+    workspace.blobs.delete_blobs(layout.file_source_key(fid, "doc.pdf"))
+    workspace.blobs.put_blob(layout.file_source_key(fid, "other.pdf"), b"%PDF other")
+
+    with pytest.raises(FileNotFound, match=r"file 'f4dddddddddd' has no source PDF$"):
+        _pdf_bytes(workspace, fid)
