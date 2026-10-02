@@ -583,7 +583,10 @@ profile = "default"
 
 Field rules:
 
-- `provider` — required. `"azure"` or `"aws"`.
+- `provider` — required. A bundled short name (`"azure"`, `"aws"`, `"macos"`)
+  or a dotted `"module.path:ClassName"` naming your own `OcrProvider`
+  subclass. The short names are aliases for the bundled classes' own dotted
+  paths; see [ocr-providers.md](ocr-providers.md).
 - `endpoint` — required for Azure.
 - `api_key` — Azure-only, optional. A literal API key. Mutually
   exclusive with `api_key_env`.
@@ -593,6 +596,9 @@ Field rules:
 - `region` — required for AWS.
 - `profile` — AWS-only, optional. The boto3 profile name from
   `~/.aws/credentials`. When unset, the default credential chain runs.
+
+Every other field is passed to the named provider, which declares the keys it
+accepts and rejects the rest — so a custom provider's options go here too.
 
 ### `grounded` (optional, required for `dgml docset schema generate` / `dgml file extract`)
 
@@ -625,22 +631,30 @@ Field rules:
 
 ### `generation` (required for `dgml docset generate`)
 
-The two LLMs the PDF→DGML pipeline runs. Each defaults to a tier —
-`model` (per-page **transcription**) ← `standard`, `label_model` (the batch-wide
-**semantic labeling** call) ← `advanced` — so this section is optional. There is
-no CLI flag; the models are a visible config choice. If neither a field nor its
-tier resolves a model, generation fails with `GENERATION_CONFIG_MISSING`.
+The two LLMs the PDF→DGML pipeline runs. Both default to the `standard` tier —
+`model` (per-page **transcription**) and `label_model` (the batch-wide
+**semantic labeling** call) — so this section is optional. There is no CLI
+flag; the models are a visible config choice. If neither a field nor the tier
+resolves a model, generation fails with `GENERATION_CONFIG_MISSING`.
+
+Labeling previously fell back to the `advanced` tier. It no longer does:
+measured over 13 docsets in two independent corpora, 3 draws each, the
+`standard` tier matched or beat `advanced` on every metric while costing about
+half as much, so the stronger tier was not earning its price on this task. Set
+`label_model` explicitly to override.
 
 ```toml
 [generation]
 # Overrides (optional — the tiers cover both by default):
 label_model = "anthropic/claude-opus-5"
+# Anthropic extended thinking for both passes. Default "disabled".
+thinking = "adaptive"
 ```
 
 Field rules:
 
 - `model` — optional; falls back to the `standard` tier. Per-page transcription.
-- `label_model` — optional; falls back to the `advanced` tier. The single
+- `label_model` — optional; falls back to the `standard` tier. The single
   batch-wide semantic-labeling call (also used by the final semantic-link pass
   and `dgml discover`'s semantic filters).
 - Transcription credentials: `api_key` / `api_key_env` / `api_base`.
@@ -649,6 +663,16 @@ Field rules:
   they may name different providers (e.g. the default `mixed` config transcribes
   on Anthropic and labels on Gemini). These apply whether the models are set here
   or come from their tiers; when unset, litellm uses its per-provider env var.
+- `thinking` — optional; `"disabled"` (default) or `"adaptive"`. Anthropic
+  extended thinking, applied to **both** passes; ignored for non-Anthropic
+  models. Omitting the field on the wire is not the same as turning thinking
+  off: Claude 4.6+/5 models think adaptively unless told not to, so generation
+  states the mode rather than inheriting it. The default is `"disabled"`
+  because on an internal 5-docset benchmark (three draws per arm, transcription
+  frozen so only labeling varied) it scored higher than adaptive on
+  exact-match and token-overlap F1, individually and pooled, at roughly 2.7x
+  less cost and 4.5x less wall time. Set `"adaptive"` to restore the model
+  default. Any other value fails with `GENERATION_CONFIG_INVALID`.
 
 A malformed section fails the next `docset generate` with
 `GENERATION_CONFIG_INVALID`.
