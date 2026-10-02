@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from dgml_core.errors import (
@@ -139,16 +140,25 @@ def test_create_config_never_replaces(store: WorkspacesStore) -> None:
 def test_create_config_that_cannot_write_leaves_the_id_unclaimed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed content write must not strand a half-claimed file: the old O_EXCL-then-
-    write shape left a partial config behind, turning every retry of the same id into a
-    conflict until someone hand-deleted it."""
+    """A failed content write must not strand a half-claimed file: the O_EXCL claim
+    alone would leave a partial config behind, turning every retry of the same id into a
+    conflict until someone hand-deleted it. The failure is injected on the handle the
+    claim returns, so the test holds however the text reaches it."""
     local = _local(tmp_path / "workspaces")
     wid = new_workspace_id()
+    real_open = Path.open
 
-    def no_space(self: Path, *args: object, **kwargs: object) -> int:
-        raise OSError(28, "No space left on device")
+    def open_without_space(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        fh: Any = real_open(self, mode, *args, **kwargs)
+        if "x" in mode:
 
-    monkeypatch.setattr(Path, "write_text", no_space)
+            def no_space(_: str) -> int:
+                raise OSError(28, "No space left on device")
+
+            fh.write = no_space
+        return fh
+
+    monkeypatch.setattr(Path, "open", open_without_space)
     with pytest.raises(OSError):
         local.create_config(wid, CONFIG)
     monkeypatch.undo()

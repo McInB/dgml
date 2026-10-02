@@ -190,25 +190,36 @@ def create_workspace(
         # The id comes first: for a listed workspace the root is derived from it —
         # the reverse of the detached order.
         new_id = workspace_id or generate_unique_workspace_id(store)
+        seed = seed_toml or ""
         try:
-            try:
-                # The claim. Create-if-absent, so of two creates racing the same id
-                # exactly one wins and the loser is refused here instead of overwriting
-                # the row.
-                store.create_config(new_id, seed_toml or "")
-            except WorkspacesWriteConflict:
-                raise _already_held(store, new_id) from None
-            ws = Workspace(root=store.workspace_root(new_id), workspaces_id=new_id)
+            # The claim. Create-if-absent, so of two creates racing the same id exactly
+            # one wins and the loser is refused here instead of overwriting the row.
+            store.create_config(new_id, seed)
+        except WorkspacesWriteConflict:
+            raise _already_held(store, new_id) from None
+        except BaseException:
+            # The claim's ack can be lost after the server applied it, which would
+            # strand a row that raises ConflictError on every retry of the same id. But
+            # the same error can also mean the insert never applied, and then any row
+            # under this id is another writer's. The two are told apart by reading the
+            # row back: this call has written nothing but the seed, so a row that still
+            # reads as the seed is its own. That check is only sound right here, before
+            # the build adds identity and storage to the config — after that the text
+            # never equals the seed, and the build's rollback below must not use it.
+            with contextlib.suppress(Exception):
+                if store.read_config(new_id) == seed:
+                    store.delete(new_id)
+            raise
+        ws = Workspace(root=store.workspace_root(new_id), workspaces_id=new_id)
+        try:
             return _build(ws, workspace_id, organization, name, storage_service, seed_toml)
-        except (ConflictError, WorkspacesWriteConflict):
-            # The row is another writer's — the claim lost, or they changed it after
-            # this call claimed it. Deleting it would destroy their workspace.
+        except WorkspacesWriteConflict:
+            # Another writer changed the row after this call claimed it — it is theirs
+            # now, and deleting it would destroy their workspace.
             raise
         except BaseException:
-            # Any other failure must remove the row this call claimed — even one from
-            # the claim itself, whose ack can be lost after the server applied it. A
-            # stranded row raises ConflictError on every retry of the same id, and a
-            # cleanup that fails must not mask the cause.
+            # Any other failure must remove the row this call claimed, and a cleanup
+            # that fails must not mask the cause.
             with contextlib.suppress(Exception):
                 store.delete(new_id)
             raise

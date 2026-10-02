@@ -365,6 +365,29 @@ def test_a_claim_that_fails_after_applying_is_rolled_back(
     assert create_workspace(workspace_id="acme", organization="Acme").identity.workspace_id
 
 
+def test_a_claim_that_fails_before_applying_leaves_another_writers_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same error can mean the insert never applied. If a row already sits under
+    the id, it is someone else's, and the lost-ack rollback must not delete it."""
+    store = default_workspaces_store()
+    theirs = create_workspace(workspace_id="acme", organization="Theirs")
+    their_text = store.read_config("acme")
+
+    def never_applied(workspace_id: str, text: str) -> None:
+        raise WorkspacesUnavailable("timed out before the insert was sent")
+
+    # `exists` is blinded so the pre-check does not refuse the id first: the claim
+    # itself must be what fails, with their row already there.
+    monkeypatch.setattr(store, "create_config", never_applied)
+    monkeypatch.setattr(store, "exists", lambda workspace_id: False)
+    with pytest.raises(WorkspacesUnavailable):
+        create_workspace(workspace_id="acme", organization="Acme")
+
+    assert store.read_config("acme") == their_text
+    assert theirs.identity.workspace_id == "acme"
+
+
 def test_a_conflicting_write_does_not_delete_the_row(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ``WorkspacesWriteConflict`` during the build means another writer changed the
     claimed row — it is theirs now, so the rollback must leave it in the store."""
