@@ -5416,10 +5416,25 @@ def test_extraction_generate_schema_happy_path(
     _write_grounded_config(ws)
     ds_id = _new_docset(ws, capsys)
 
-    # Seed a source PDF where generation expects it (files/<id>/*.pdf), written
-    # through the store's staging bridge (zero-copy on LocalStore).
+    # Seed a file record and its source PDF where generation expects it
+    # (files/<id>/<original_filename>), written through the store's staging
+    # bridge (zero-copy on LocalStore).
+    from dgml_core.models import FileRecord
+
     fid = "filexyz12345"
     _wsx = Workspace(root=ws)
+    _wsx.docs.put_doc(
+        "files",
+        fid,
+        FileRecord(
+            id=fid,
+            original_path="/fake/doc.pdf",
+            original_filename="doc.pdf",
+            sha256="0" * 64,
+            added_at="2026-01-01T00:00:00Z",
+            page_count=1,
+        ).to_json(),
+    )
     with _wsx.blobs.staged_write(layout.file_prefix(fid)) as _stage:
         _write_blank_pdf(_stage / "doc.pdf", 1)
 
@@ -5510,6 +5525,60 @@ def test_extraction_extract_reports_a_failed_conversion(
     assert err["code"] == "CONVERSION_FAILED"
     assert err["message"].startswith(f"file '{fid}' has no source PDF: converting it failed: ")
     assert "openpyxl does not support the old .xls" in err["message"]
+    mock_completion.assert_not_called()
+
+
+def test_extraction_extract_values_effort_overrides_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--values-effort` replaces `grounded.values_reasoning_effort` for one
+    call: a named effort is sent as given, `default` sends none, and without
+    the flag the request carries the module default."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _write_grounded_config(ws)
+    ds_id = _new_docset(ws, capsys)
+    schema_file = tmp_path / "schema.rnc"
+    schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
+    main(_ws_args(ws) + ["extraction", "set-schema", ds_id, "--schema-file", str(schema_file)])
+    capsys.readouterr()
+    fid = "fileeffort001"
+    _seed_file_dir(ws, fid, pages=1)
+    values = {"VendorName": {"text": "Acme", "locations": []}}  # empty locs → no phase 3
+    response = _tool_response("submit_values", {"values": values})
+    wsx = Workspace(root=ws)
+
+    def _extract(*flags: str) -> dict[str, Any]:
+        if wsx.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc")):
+            wsx.blobs.delete_blob(layout.dgml_xml_key(ds_id, fid, "doc"))
+        with patch("litellm.completion", return_value=response) as m:
+            assert main(_ws_args(ws) + ["extraction", "extract", ds_id, fid, *flags]) == 0
+        capsys.readouterr()
+        return dict(m.call_args_list[0].kwargs)
+
+    assert _extract()["reasoning_effort"] == "medium"
+    assert _extract("--values-effort", "low")["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in _extract("--values-effort", "default")
+
+
+def test_extraction_extract_refuses_unknown_values_effort(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An effort the pipeline does not know is refused before the model is called."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _write_grounded_config(ws)
+    ds_id = _new_docset(ws, capsys)
+    with patch("litellm.completion") as mock_completion:
+        rc = main(
+            _ws_args(ws) + ["extraction", "extract", ds_id, "somefile", "--values-effort", "turbo"]
+        )
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "GROUNDED_CONFIG_INVALID"
+    assert "--values-effort" in err["message"]
     mock_completion.assert_not_called()
 
 

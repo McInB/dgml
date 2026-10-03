@@ -78,6 +78,7 @@ from .extraction_schema import (
     FIELD_DATATYPES,
     Tag,
     Vocabulary,
+    check_invariant_paths,
     field_tree_to_rnc,
     parse_rnc,
     rnc_to_json_schema,
@@ -172,6 +173,14 @@ _DEFAULT_REASONING_EFFORT = "high"
 # keeps the default; see _PHASE3_GRID_REASONING_EFFORT for pages without them.
 _VALUES_REASONING_EFFORT = "medium"
 
+# What ``grounded.values_reasoning_effort`` (and ``--values-effort``) accept: the
+# effort names litellm takes, sent as given, plus ``"default"``, which sends no
+# ``reasoning_effort`` at all and leaves the budget to the provider. ``"none"``
+# is litellm's own value and is sent (it asks the provider to turn thinking
+# off), which is why omitting the field needs a word of its own.
+VALUES_REASONING_EFFORT_CHOICES = ("none", "minimal", "low", "medium", "high", "xhigh")
+VALUES_REASONING_EFFORT_PROVIDER_DEFAULT = "default"
+
 # Location grounding on a page with no OCR words (the 0-1000 grid path) runs at
 # "medium". There the model only reads a position off the image; at "high" it
 # spent most of its output reasoning without placing boxes any better. Measured
@@ -236,6 +245,26 @@ class GroundedConfig:
     schema_api_base: str | None = None
     values_api_base: str | None = None
     max_tool_iters: int = DEFAULT_MAX_TOOL_ITERS
+    # Reasoning budget of the value-extraction call (phase 1). ``None`` sends no
+    # ``reasoning_effort``; location grounding keeps its own constants.
+    values_reasoning_effort: str | None = _VALUES_REASONING_EFFORT
+
+
+def parse_values_reasoning_effort(raw: Any, *, source: str) -> str | None:
+    """Validate a values reasoning effort from the config file or the CLI.
+
+    Returns the effort to send, or ``None`` for ``"default"`` (send nothing).
+    ``source`` names where the value came from, for the error message.
+    """
+    if raw == VALUES_REASONING_EFFORT_PROVIDER_DEFAULT:
+        return None
+    if isinstance(raw, str) and raw in VALUES_REASONING_EFFORT_CHOICES:
+        return raw
+    accepted = ", ".join(
+        repr(v)
+        for v in (*VALUES_REASONING_EFFORT_CHOICES, VALUES_REASONING_EFFORT_PROVIDER_DEFAULT)
+    )
+    raise GroundedConfigInvalid(f"{source} must be one of {accepted} if set (got {raw!r})")
 
 
 def load_grounded_config(workspace: Workspace) -> GroundedConfig:
@@ -276,6 +305,13 @@ def load_grounded_config(workspace: Workspace) -> GroundedConfig:
         or max_tool_iters_raw < 1
     ):
         raise GroundedConfigInvalid("'grounded.max_tool_iters' must be a positive integer if set")
+    values_reasoning_effort = (
+        parse_values_reasoning_effort(
+            sec["values_reasoning_effort"], source="'grounded.values_reasoning_effort'"
+        )
+        if "values_reasoning_effort" in sec
+        else _VALUES_REASONING_EFFORT
+    )
 
     return GroundedConfig(
         schema_model=schema.model,
@@ -287,6 +323,7 @@ def load_grounded_config(workspace: Workspace) -> GroundedConfig:
         schema_api_base=schema.api_base,
         values_api_base=values.api_base,
         max_tool_iters=max_tool_iters_raw,
+        values_reasoning_effort=values_reasoning_effort,
     )
 
 
@@ -350,35 +387,41 @@ def get_page_words(
 def _pdf_bytes(workspace: Workspace, file_id: str) -> bytes:
     """Return the bytes of the single ``*.pdf`` stored for ``file_id``.
 
+    The PDF is found by the name ``file add`` stored it under
+    (:func:`layout.file_pdf_key`, from the record's ``original_filename``),
+    not by matching a suffix: a source named ``INVOICE.PDF`` is stored under
+    that name, so a case-sensitive ``.pdf`` match missed it. There is no
+    fallback scan: a filename is not unique in the workspace, so a PDF found
+    anywhere else under the prefix could belong to another source.
+
     A convertible source whose conversion failed at ``file add`` has a
     record but no PDF, and the converter's error is among the file's
     recorded errors: such a file raises :class:`ConversionFailed` repeating
     that error. A file with no PDF and no recorded conversion error raises
     :class:`FileNotFound` as before.
     """
-    keys = workspace.blobs.list_blobs(layout.file_prefix(file_id))
-    pdfs = [k for k in keys if k.endswith(".pdf")]
-    if not pdfs:
-        try:
-            failed = [
-                err.message.strip()
-                for err in load_recorded_errors(workspace, file_id)
-                if err.operation == CONVERT_TO_PDF_OPERATION
-                and isinstance(err.message, str)
-                and err.message.strip()
-            ]
-        except (TypeError, KeyError, ValueError, AttributeError):
-            # The lookup is a diagnostic: a malformed errors document (a
-            # wrong shape, a missing field) must not turn the missing PDF
-            # into an internal error; a record without a usable message is
-            # skipped the same way.
-            failed = []
-        if failed:
-            raise ConversionFailed(
-                f"file '{file_id}' has no source PDF: converting it failed: {failed[-1]}"
-            )
-        raise FileNotFound(f"file '{file_id}' has no source PDF")
-    return workspace.blobs.get_blob(pdfs[0])
+    pdf_key = layout.file_pdf_key(file_id, FileStore(workspace).get(file_id).original_filename)
+    if workspace.blobs.blob_exists(pdf_key):
+        return workspace.blobs.get_blob(pdf_key)
+    try:
+        failed = [
+            err.message.strip()
+            for err in load_recorded_errors(workspace, file_id)
+            if err.operation == CONVERT_TO_PDF_OPERATION
+            and isinstance(err.message, str)
+            and err.message.strip()
+        ]
+    except (TypeError, KeyError, ValueError, AttributeError):
+        # The lookup is a diagnostic: a malformed errors document (a
+        # wrong shape, a missing field) must not turn the missing PDF
+        # into an internal error; a record without a usable message is
+        # skipped the same way.
+        failed = []
+    if failed:
+        raise ConversionFailed(
+            f"file '{file_id}' has no source PDF: converting it failed: {failed[-1]}"
+        )
+    raise FileNotFound(f"file '{file_id}' has no source PDF")
 
 
 def _pdf_content_block(pdf_bytes: bytes) -> dict[str, Any]:
@@ -656,7 +699,8 @@ def extract_values(
     """
     store = DocSetStore(workspace)
     rnc_schema = store.get_schema(docset_id)  # RNC text; raises SchemaNotFound
-    vocab = parse_rnc(rnc_schema)
+    # A stored schema is not re-checked on read; here it is about to be used.
+    vocab = check_invariant_paths(parse_rnc(rnc_schema))
     schema = rnc_to_json_schema(rnc_schema)
     guidance = store.get_guidance(docset_id) if store.has_guidance(docset_id) else None
     pdf_bytes = _pdf_bytes(workspace, file_id)
@@ -767,6 +811,7 @@ def extract_values(
                     api_base=api_base,
                     max_tool_iters=config.max_tool_iters,
                     totals=phase1_totals,
+                    reasoning_effort=config.values_reasoning_effort,
                 )
                 break
             except _OutputTruncated as exc:
@@ -1752,6 +1797,7 @@ def _run_extract_loop(
     max_tool_iters: int,
     totals: dict[str, Any],
     chunked: bool = False,
+    reasoning_effort: str | None = _VALUES_REASONING_EFFORT,
 ) -> tuple[dict[str, Any], int, int]:
     """Run a multi-turn extraction loop until the model finishes submitting.
 
@@ -1789,7 +1835,8 @@ def _run_extract_loop(
     # Anthropic — only forced tool_choice triggers the Anthropic drop. That
     # also makes this the only call site where the reasoning budget has any
     # effect on Claude, which is why :data:`_VALUES_REASONING_EFFORT` applies
-    # here and nowhere else.
+    # here and nowhere else. ``reasoning_effort`` is that constant unless the
+    # workspace set ``grounded.values_reasoning_effort`` (``None`` = send none).
     llm_config = LLMConfig(
         model=model,
         api_key=api_key,
@@ -1798,7 +1845,7 @@ def _run_extract_loop(
         max_completion_tokens=_DEFAULT_MAX_COMPLETION_TOKENS,
         temperature=_DEFAULT_VALUES_TEMPERATURE,
         timeout=_DEFAULT_TIMEOUT_SECONDS,
-        reasoning_effort=_VALUES_REASONING_EFFORT,
+        reasoning_effort=reasoning_effort,
     )
 
     tool_calls_run = 0
@@ -2415,6 +2462,8 @@ def _resolve_api_key(literal: str | None, env_name: str | None) -> str | None:
 
 __all__ = [
     "DEFAULT_MAX_TOOL_ITERS",
+    "VALUES_REASONING_EFFORT_CHOICES",
+    "VALUES_REASONING_EFFORT_PROVIDER_DEFAULT",
     "ExtractionResult",
     "GroundedConfig",
     "extract_values",
