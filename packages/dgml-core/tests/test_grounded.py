@@ -3492,6 +3492,8 @@ def test_repair_rejects_a_layout_whose_descriptor_has_the_wrong_shape() -> None:
         args = {"values": {"values": _hello_title(), "layout": inner}, "layout": outer}
         repaired, _ = _repair_submit_values_args(args, _TITLE_VOCAB)
         assert repaired["layout"] == inner, outer
+
+
 def test_pdf_bytes_reads_a_source_stored_with_an_uppercase_suffix(
     workspace: Workspace, sample_pdf: Path
 ) -> None:
