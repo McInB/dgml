@@ -3244,6 +3244,42 @@ def test_extract_values_records_the_phase1_duration_on_the_refusal(
     assert stats["phases"]["phase1"]["duration_s"] >= 1.0
 
 
+def test_extract_values_records_phase1_tool_calls_and_layout_on_the_refusal(
+    workspace: Workspace,
+) -> None:
+    """A refused run still reports what phase 1 did: the ``get_page_words``
+    calls it made reach the ``--debug`` usage row, and the layout it
+    submitted reaches the stats sidecar. Both were counted after the refusal
+    raised, so a refused run read ``tool_calls: 0`` and no layout."""
+    from dgml_core.usage import read_events
+
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    bogus = {
+        "values": {"Bogus": {"text": "x", "locations": [{"page_number": 1}]}},
+        "layout": {"pages": [{"page_number": 1, "orientation": "portrait"}]},
+    }
+    with patch(
+        "litellm.completion",
+        side_effect=[
+            _tool_call_response("get_page_words", {"page": 1}, call_id="c1"),
+            _tool_call_response("get_page_words", {"page": 1}, call_id="c2"),
+            _tool_call_response("submit_values", bogus, call_id="c3"),
+        ],
+    ):
+        with pytest.raises(ValuesExtractionFailed, match="nothing that fits the schema"):
+            extract_values(workspace, ds_id, fid, config=config, debug=True)
+    (event,) = read_events(workspace)
+    assert event["outcome"] == "error"
+    assert event["context"]["tool_calls"] == 2
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None and stats["outcome"] == "error"
+    assert stats["phase1_layout"] == bogus["layout"]
+
+
 def test_extract_values_names_the_keys_it_refused_and_how_many_more(workspace: Workspace) -> None:
     values = {f"Bogus{i}": {"text": "x", "locations": [{"page_number": 1}]} for i in range(8)}
     with pytest.raises(ValuesExtractionFailed, match=r"'Bogus5' and 2 more, expected roots"):

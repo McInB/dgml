@@ -841,6 +841,12 @@ def extract_values(
         # legal "nothing found" outcome (the serializer reads null as "not
         # extracted"), and leaf internals (a leaf without text, a collection
         # of malformed entries) stay the serializer's business, as before.
+        # Recorded before the refusal below can raise, so a refused run's
+        # --debug usage row and stats sidecar still carry what phase 1 did.
+        tool_calls_total += phase1_tool_calls
+        phase1_layout = phase1_args.get("layout") or None
+        if not isinstance(phase1_layout, dict):
+            phase1_layout = None
         submitted_keys = sorted(k for k, v in phase1_args["values"].items() if v is not None)
         kept = _prune_to_vocabulary(phase1_args["values"], vocab)
         if submitted_keys and not kept:
@@ -863,10 +869,6 @@ def extract_values(
         if phase1_tool_schema_mode == "permissive" or chunked:
             phase1_args["values"] = kept
         phase1_values = phase1_args["values"]
-        phase1_layout = phase1_args.get("layout") or None
-        if not isinstance(phase1_layout, dict):
-            phase1_layout = None
-        tool_calls_total += phase1_tool_calls
         # The merged extracted_value leaf shape lets a sloppy model blur the
         # grounded/computed boundary; normalize before phases 2/3 (and the
         # serializer) so their invariants hold regardless.
