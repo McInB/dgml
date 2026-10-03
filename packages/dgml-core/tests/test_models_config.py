@@ -114,11 +114,27 @@ def test_blank_tier_with_family_reverts_to_the_family_default(blank: str) -> Non
     assert cfg.advanced == PROVIDER_MODELS["anthropic"]["advanced"]
 
 
-def test_blank_tier_without_family_is_unset(caplog: pytest.LogCaptureFixture) -> None:
+def test_blank_tier_without_family_is_unset_and_warns(caplog: pytest.LogCaptureFixture) -> None:
     cfg = load_models_config(_merged({"standard": "s", "expert": ""}))
     assert cfg.expert is None
+    assert "[models].expert is blank" in _warned(caplog)
     assert cfg.resolve(Tier.EXPERT) == "s"  # normal nearest-tier fallback
     assert "falling back to 'standard'" in _warned(caplog)
+    # Deduped: a second load (every loader re-reads the config) stays quiet.
+    caplog.clear()
+    load_models_config(_merged({"standard": "s", "expert": ""}))
+    assert "is blank" not in _warned(caplog)
+
+
+def test_blank_tier_with_family_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
+    load_models_config(_merged({"family": "anthropic", "advanced": ""}))
+    assert _warned(caplog) == ""
+
+
+def test_padded_values_are_stripped() -> None:
+    cfg = load_models_config(_merged({"family": " google ", "expert": "  my/model\t"}))
+    assert cfg.expert == "my/model"
+    assert cfg.light == PROVIDER_MODELS["google"]["light"]
 
 
 @pytest.mark.parametrize("blank", ["", "   "])

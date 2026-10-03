@@ -102,6 +102,9 @@ _WARNED_TIER_FALLBACKS: set[tuple[Tier, Tier]] = set()
 # written several times per command.
 _WARNED_DISABLED: set[ConfigSection] = set()
 
+# Blank tiers with no family default to fall back to, already reported.
+_WARNED_BLANK_TIERS: set[Tier] = set()
+
 
 @dataclass(frozen=True)
 class ModelsConfig:
@@ -152,7 +155,7 @@ def _validate_optional_str(value: Any, field: str) -> str | None:
         return None
     if not isinstance(value, str):
         raise ModelsConfigInvalid(f"'models.{field}' must be a string if set")
-    return value if value.strip() else None
+    return value.strip() or None
 
 
 def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
@@ -170,7 +173,6 @@ def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
     family = _validate_optional_str(section.get("family"), "family")
     defaults: dict[str, str] = {}
     if family is not None:
-        family = family.strip()
         if family not in PROVIDER_MODELS:
             raise ModelsConfigInvalid(
                 f"'models.family' must be one of {', '.join(sorted(PROVIDER_MODELS))}; "
@@ -179,8 +181,18 @@ def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
         defaults = PROVIDER_MODELS[family]
     tiers: dict[str, str | None] = {}
     for t in TIERS:
-        explicit = _validate_optional_str(section.get(t.value), t.value)
+        raw = section.get(t.value)
+        explicit = _validate_optional_str(raw, t.value)
         tiers[t.value] = explicit if explicit is not None else defaults.get(t.value)
+        # A blank tier is a deliberate unset (see module docstring), but with no
+        # family default underneath it the result is a tier that silently falls
+        # back — say so, since a stray `expert = ""` looks exactly like one.
+        if raw is not None and tiers[t.value] is None and t not in _WARNED_BLANK_TIERS:
+            _WARNED_BLANK_TIERS.add(t)
+            logger.warning(
+                f"[dgml] [models].{t} is blank and no [models].family supplies a "
+                f"default; treating it as unset."
+            )
     return ModelsConfig(**tiers)
 
 

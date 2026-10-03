@@ -16,9 +16,10 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from dgml_core.default_config import PROVIDER_MODELS
+from dgml_core.default_config import PROVIDER_API_KEYS, PROVIDER_MODELS
 from dgml_core.errors import InvalidArgument, WorkspaceNotFound
 from dgml_core.storage import (
+    API_KEY_ENV_VARS,
     Workspace,
     canonical_provider,
     detect_provider,
@@ -325,6 +326,14 @@ def test_every_provider_is_reachable_by_auto_detection_or_a_flag() -> None:
     """
     for provider in PROVIDER_MODELS:
         assert canonical_provider(provider) == provider
+
+
+def test_every_provider_names_its_api_keys() -> None:
+    """`dgml init --provider X` looks X up in PROVIDER_API_KEYS after the config
+    is written, so a family in one table but not the other would crash there."""
+    assert set(PROVIDER_API_KEYS) == set(PROVIDER_MODELS)
+    for keys in PROVIDER_API_KEYS.values():
+        assert keys and set(keys) <= set(API_KEY_ENV_VARS)
 
 
 def test_canonical_provider_validates() -> None:

@@ -154,8 +154,9 @@ class CorruptMetadata(DgmlError):
 
 
 class ModelsConfigInvalid(DgmlError):
-    """The ``[models]`` block is malformed (a non-string value, or an unknown
-    ``family``)."""
+    """The ``[models]`` block is malformed.
+
+    A non-string value, a non-table section, or an unknown ``family``."""
 
     code = "MODELS_CONFIG_INVALID"
 

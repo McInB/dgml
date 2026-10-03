@@ -142,6 +142,19 @@ def _config_family(path: Path) -> str:
     return value
 
 
+def test_init_forced_provider_reports_keys_and_override_hint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The forced branch gets the same "how to go beyond the family" hint as
+    auto-detect, plus which keys the family needs."""
+    rc = main(_ws_args(tmp_path / "ws") + ["--verbose", "init", "--provider", "anthropic_google"])
+    assert rc == 0
+    report = caplog.text
+    assert "ANTHROPIC_API_KEY and GEMINI_API_KEY" in report
+    assert "override a single tier" in report
+    assert "--provider <" in report
+
+
 def test_init_rejects_the_old_mixed_provider_name(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

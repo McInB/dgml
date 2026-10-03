@@ -241,6 +241,7 @@ def _reset_warning_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
 
     models_config._WARNED_TIER_FALLBACKS.clear()
     models_config._WARNED_DISABLED.clear()
+    models_config._WARNED_BLANK_TIERS.clear()
     ocr._WARNED_NO_OCR_PROVIDER.clear()
     monkeypatch.setattr(rotation, "_WARNED_PILLOW_MISSING", False)
 
