@@ -26,6 +26,7 @@ from dgml_core.models_config import (
     ConfigSection,
     ModelsConfig,
     Tier,
+    expand_family,
     load_models_config,
     resolve_tiered_model,
 )
@@ -92,55 +93,33 @@ def test_load_rejects_non_table_section() -> None:
         load_models_config(_merged("standard"))
 
 
+def _expanded(models: dict[str, Any]) -> ModelsConfig:
+    """Load a single config layer the way the merge would: family expanded first."""
+    return load_models_config(_merged(expand_family(models)))
+
+
 @pytest.mark.parametrize("family", sorted(PROVIDER_MODELS))
 def test_family_fills_every_tier(family: str, caplog: pytest.LogCaptureFixture) -> None:
-    cfg = load_models_config(_merged({"family": family}))
+    cfg = _expanded({"family": family})
     for tier in TIERS:
         assert cfg.resolve(tier) == PROVIDER_MODELS[family][tier]
     assert _warned(caplog) == ""  # all tiers set → never a fallback warning
 
 
 def test_explicit_tier_overrides_its_family_default() -> None:
-    cfg = load_models_config(_merged({"family": "google", "expert": "my/model"}))
+    cfg = _expanded({"family": "google", "expert": "my/model"})
     assert cfg.expert == "my/model"
     assert cfg.light == PROVIDER_MODELS["google"]["light"]
 
 
-@pytest.mark.parametrize("blank", ["", "   "])
-def test_blank_tier_with_family_reverts_to_the_family_default(blank: str) -> None:
-    # The blank-out story: a higher config layer unsets an explicit tier a
-    # lower layer wrote, so the family default applies again.
-    cfg = load_models_config(_merged({"family": "anthropic", "advanced": blank}))
-    assert cfg.advanced == PROVIDER_MODELS["anthropic"]["advanced"]
+@pytest.mark.parametrize("models", [{}, {"light": "l"}, {"family": "nope"}, {"family": 1}])
+def test_expand_family_leaves_tables_without_a_known_family_alone(models: dict[str, Any]) -> None:
+    assert expand_family(models) is models
 
 
-def test_blank_tier_without_family_is_unset_and_warns(caplog: pytest.LogCaptureFixture) -> None:
-    cfg = load_models_config(_merged({"standard": "s", "expert": ""}))
-    assert cfg.expert is None
-    assert "[models].expert is blank" in _warned(caplog)
-    assert cfg.resolve(Tier.EXPERT) == "s"  # normal nearest-tier fallback
-    assert "falling back to 'standard'" in _warned(caplog)
-    # Deduped: a second load (every loader re-reads the config) stays quiet.
-    caplog.clear()
-    load_models_config(_merged({"standard": "s", "expert": ""}))
-    assert "is blank" not in _warned(caplog)
-
-
-def test_blank_tier_with_family_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
-    load_models_config(_merged({"family": "anthropic", "advanced": ""}))
-    assert _warned(caplog) == ""
-
-
-def test_padded_values_are_stripped() -> None:
-    cfg = load_models_config(_merged({"family": " google ", "expert": "  my/model\t"}))
-    assert cfg.expert == "my/model"
-    assert cfg.light == PROVIDER_MODELS["google"]["light"]
-
-
-@pytest.mark.parametrize("blank", ["", "   "])
-def test_blank_family_means_no_family(blank: str) -> None:
-    cfg = load_models_config(_merged({"family": blank, "light": "l"}))
-    assert cfg == ModelsConfig(light="l")
+def test_load_does_not_expand_family() -> None:
+    """Expansion is the merge's job (per layer); the loader only validates."""
+    assert load_models_config(_merged({"family": "google"})) == ModelsConfig()
 
 
 def test_unknown_family_is_rejected_naming_the_choices() -> None:
@@ -150,9 +129,10 @@ def test_unknown_family_is_rejected_naming_the_choices() -> None:
 
 
 @pytest.mark.parametrize("field", ["family", "advanced"])
-def test_non_string_values_are_rejected(field: str) -> None:
-    with pytest.raises(ModelsConfigInvalid, match=f"'models.{field}' must be a string"):
-        load_models_config(_merged({field: 123}))
+@pytest.mark.parametrize("value", [123, "", "   "])
+def test_non_string_or_blank_values_are_rejected(field: str, value: object) -> None:
+    with pytest.raises(ModelsConfigInvalid, match=f"'models.{field}' must be a non-empty string"):
+        load_models_config(_merged({field: value}))
 
 
 def test_missing_model_error_names_the_family_key() -> None:

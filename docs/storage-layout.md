@@ -508,12 +508,12 @@ falls back to the nearest set tier (nearest lower first, then higher) with a
 warning — so a minimal config that sets only, say, `standard` still resolves
 every task.
 
-Because the user config and workspace config deep-merge key by key (and TOML
-has no null), a tier or `family` set to `""` means **unset at this layer**: a
-workspace config with `advanced = ""` undoes a user-level explicit `advanced`,
-so the family default (or the normal nearest-tier fallback) applies again. This
-empty-string unset is specific to the `[models]` keys — per-task fields such as
-`generation.model` reject empty strings.
+`family` is shorthand for its four tiers *within its config layer*: tiers that
+layer leaves unset are filled from the family before the layers merge. So a
+workspace config (or `DGML_MODELS__FAMILY`) setting `family = "openai"` replaces
+explicit tiers in the user config, while tiers set in the same layer as the
+family, or a higher one, still override it. To drop a user-level pin in one
+workspace, restate the family there.
 
 Tiers name only models — they carry no credentials. Credentials are configured
 per task on the task's own section (e.g. `generation.api_key_env`,

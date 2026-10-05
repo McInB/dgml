@@ -25,16 +25,11 @@ a model sourced from a tier uses its task section's credentials, or falls back t
 litellm's per-provider env-var conventions when the section sets none.
 
 ``family`` picks a whole provider family's defaults: one of the
-:data:`~dgml_core.default_config.PROVIDER_MODELS` keys, expanded into all four
-tiers at load time. An explicitly set tier overrides its family default. A
-family-based config tracks dgml's shipped defaults across upgrades; explicit
+:data:`~dgml_core.default_config.PROVIDER_MODELS` keys. It is shorthand for that
+family's four tiers *within its config layer* (see :func:`expand_family`): tiers
+the same layer sets win, and the expanded tiers override any a lower layer set.
+A family-based config tracks dgml's shipped defaults across upgrades; explicit
 tiers are the pinning mechanism.
-
-A tier (or ``family``) set to an empty / whitespace-only string is treated as
-*unset at that config layer* — the layered deep-merge means an empty value is
-the only way a workspace config or env var can undo a value a lower layer set
-(TOML has no null). This applies only to the ``[models]`` keys; task-section
-fields like ``generation.model`` still reject empty strings.
 
 A tier that is unset falls back to the nearest set tier (nearest *lower* first,
 then higher), emitting a warning — so a minimal config that sets only, say,
@@ -102,9 +97,6 @@ _WARNED_TIER_FALLBACKS: set[tuple[Tier, Tier]] = set()
 # written several times per command.
 _WARNED_DISABLED: set[ConfigSection] = set()
 
-# Blank tiers with no family default to fall back to, already reported.
-_WARNED_BLANK_TIERS: set[Tier] = set()
-
 
 @dataclass(frozen=True)
 class ModelsConfig:
@@ -149,51 +141,42 @@ class ModelsConfig:
 
 
 def _validate_optional_str(value: Any, field: str) -> str | None:
-    """``None``, or a string. Empty / whitespace-only normalizes to ``None``:
-    the config layer explicitly *unset* the key (see module docstring)."""
     if value is None:
         return None
-    if not isinstance(value, str):
-        raise ModelsConfigInvalid(f"'models.{field}' must be a string if set")
-    return value.strip() or None
+    if not isinstance(value, str) or not value.strip():
+        raise ModelsConfigInvalid(f"'models.{field}' must be a non-empty string if set")
+    return value
+
+
+def expand_family(models: dict[str, Any]) -> dict[str, Any]:
+    """Return one config layer's ``[models]`` table with its ``family`` expanded
+    into the tiers the table leaves unset. Called per layer *before* the merge, so
+    a family overrides lower-layer tiers. A malformed or unknown family is left
+    as-is for :func:`load_models_config` to reject."""
+    family = models.get("family")
+    defaults = PROVIDER_MODELS.get(family) if isinstance(family, str) else None
+    return models if defaults is None else {**defaults, **models}
 
 
 def load_models_config(merged: dict[ConfigSection, Any]) -> ModelsConfig:
     """Build a :class:`ModelsConfig` from the merged config mapping's
     ``[models]`` section (an empty section yields an all-``None`` config).
 
-    ``family`` expands to that family's :data:`PROVIDER_MODELS` tiers here, at
-    load time; an explicitly set tier wins over its family default. The family
-    is never stored on the result."""
+    ``family`` is validated here but not expanded — :func:`expand_family` has
+    already done that per layer during the merge."""
     section = merged.get(ConfigSection.MODELS)
     if section is None:
         return ModelsConfig()
     if not isinstance(section, dict):
         raise ModelsConfigInvalid("'models' must be a table")
     family = _validate_optional_str(section.get("family"), "family")
-    defaults: dict[str, str] = {}
-    if family is not None:
-        if family not in PROVIDER_MODELS:
-            raise ModelsConfigInvalid(
-                f"'models.family' must be one of {', '.join(sorted(PROVIDER_MODELS))}; "
-                f"got {family!r}"
-            )
-        defaults = PROVIDER_MODELS[family]
-    tiers: dict[str, str | None] = {}
-    for t in TIERS:
-        raw = section.get(t.value)
-        explicit = _validate_optional_str(raw, t.value)
-        tiers[t.value] = explicit if explicit is not None else defaults.get(t.value)
-        # A blank tier is a deliberate unset (see module docstring), but with no
-        # family default underneath it the result is a tier that silently falls
-        # back — say so, since a stray `expert = ""` looks exactly like one.
-        if raw is not None and tiers[t.value] is None and t not in _WARNED_BLANK_TIERS:
-            _WARNED_BLANK_TIERS.add(t)
-            logger.warning(
-                f"[dgml] [models].{t} is blank and no [models].family supplies a "
-                f"default; treating it as unset."
-            )
-    return ModelsConfig(**tiers)
+    if family is not None and family not in PROVIDER_MODELS:
+        raise ModelsConfigInvalid(
+            f"'models.family' must be one of {', '.join(sorted(PROVIDER_MODELS))}; got {family!r}"
+        )
+    return ModelsConfig(
+        **{t.value: _validate_optional_str(section.get(t.value), t.value) for t in TIERS}
+    )
 
 
 def section_enabled(

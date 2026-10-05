@@ -361,11 +361,11 @@ def test_render_config_toml_is_valid_and_complete() -> None:
 def test_rendered_family_expands_to_the_provider_defaults() -> None:
     """Init-output → runtime round trip: the family-only [models] block that
     `dgml init` writes must resolve every tier to PROVIDER_MODELS[provider]."""
-    from dgml_core.models_config import ConfigSection, load_models_config
+    from dgml_core.models_config import ConfigSection, expand_family, load_models_config
 
     for provider, tiers in PROVIDER_MODELS.items():
         models = tomllib.loads(render_config_toml(provider))["models"]
-        cfg = load_models_config({ConfigSection.MODELS: models})
+        cfg = load_models_config({ConfigSection.MODELS: expand_family(models)})
         assert {t: getattr(cfg, t) for t in tiers} == tiers
 
 

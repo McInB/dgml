@@ -73,11 +73,9 @@ transcription/text-extraction, labeling/value-extraction, schema-generation
 respectively). The expansion uses dgml's curated per-family defaults, so a
 family-based config picks up updated defaults across dgml upgrades; set an
 explicit tier (`[models] advanced = "..."`) to override its family default and
-pin a model. Setting a tier (or `family`) to `""` unsets it *at that config
-layer* — e.g. a workspace config can blank out a user-level tier so the family
-default applies again. `DGML_MODELS__FAMILY=<provider>` overrides the family
-from the environment. (This empty-string unset applies only to `[models]` keys;
-task-section fields like `generation.model` still reject empty strings.)
+pin a model. A family expands within its own config layer, so it overrides
+tiers set in lower layers (e.g. a workspace `family` replaces user-level tiers).
+`DGML_MODELS__FAMILY=<provider>` overrides the family from the environment.
 
 - **`--provider {anthropic,anthropic_google,google,openai}`:** write that
   family. Omit to **auto-detect** from the API-key env vars that are set: both
