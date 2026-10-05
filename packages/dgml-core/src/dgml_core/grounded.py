@@ -1896,8 +1896,10 @@ def _is_layout(candidate: Any) -> bool:
     """Whether ``candidate`` is a ``layout`` the loop can use: a dict of
     per-array descriptors of the shape :func:`_layout_param_schema`
     declares (a known ``kind``, ``columns`` a list of names when present,
-    nothing else)."""
-    if not isinstance(candidate, dict):
+    nothing else). An empty dict describes no array, so it is not one: a
+    ``layout: {}`` on the call must not shadow a populated layout left
+    inside the mis-shaped ``values``."""
+    if not isinstance(candidate, dict) or not candidate:
         return False
     for descriptor in candidate.values():
         if not isinstance(descriptor, dict) or not set(descriptor) <= {"kind", "columns"}:

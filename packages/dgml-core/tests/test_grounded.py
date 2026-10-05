@@ -3464,6 +3464,23 @@ def test_repair_prefers_a_valid_inner_layout_over_an_invalid_outer_one() -> None
     assert repaired["layout"] == inner_layout
 
 
+def test_repair_prefers_a_populated_inner_layout_over_an_empty_outer_one() -> None:
+    """An empty ``layout: {}`` describes no array, so it does not shadow the
+    populated layout inside the envelope; phase 2 would otherwise lose the
+    table's column order."""
+    inner_layout = {"Items": {"kind": "table", "columns": ["Amount"]}}
+    args = {"values": {"values": _hello_title(), "layout": inner_layout}, "layout": {}}
+    repaired, label = _repair_submit_values_args(args, _TITLE_VOCAB)
+    assert label == "nested"
+    assert repaired["layout"] == inner_layout
+
+
+def test_repair_carries_no_layout_when_both_copies_are_empty() -> None:
+    args = {"values": {"values": _hello_title(), "layout": {}}, "layout": {}}
+    repaired, _ = _repair_submit_values_args(args, _TITLE_VOCAB)
+    assert "layout" not in repaired
+
+
 def test_repair_carries_a_string_bare_tree_s_layout_out_as_an_envelope_field() -> None:
     text = json.dumps({**_hello_title(), "layout": _TITLE_LAYOUT})
     repaired, label = _repair_submit_values_args({"values": text}, _TITLE_VOCAB)
