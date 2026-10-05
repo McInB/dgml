@@ -18,11 +18,11 @@ When ``dgml file add --auto-classify`` is used, this module:
 2. Gathers a small number of rendered page images from the new file plus
    the id/name/description of each existing DocSet.
 3. Calls the configured vision LLM via :mod:`litellm` with
-   ``tool_choice="required"``. What it may choose depends on the mode: by
-   default (``existing-or-new``) it picks between assign-to-existing and
-   propose-a-new-one; in ``existing`` mode it picks between
-   assign-to-existing and declining (no existing DocSet fits), so it never
-   creates a DocSet and never forces an off-type file into one.
+   ``tool_choice="required"``. What it may choose depends on the
+   :class:`ClassifyMode`: by default (``existing-or-new``) it picks between
+   assign-to-existing and propose-a-new-one; in ``existing`` mode it picks
+   between assign-to-existing and declining (no existing DocSet fits); in
+   ``existing-forced`` mode it may only assign, to the closest DocSet.
 
 The CLI treats every failure path here as a *soft fail*: the file record
 is kept, ``classification.error`` is populated in the response payload,
@@ -37,7 +37,7 @@ import json
 import os
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from .config import load_merged_config
 from .docsets import DocSetStore
@@ -77,10 +77,23 @@ class ClassifyMode(StrEnum):
     "does this belong in one of my DocSets?" and get "no" for an off-type
     document instead of a confident wrong answer. With no DocSets to choose
     from it raises :class:`~dgml_core.errors.NoExistingDocSets`.
+
+    ``EXISTING_FORCED`` is what ``EXISTING`` meant before it could decline:
+    the LLM must pick the closest existing DocSet even when the fit is poor,
+    so every file lands somewhere and an off-type document gets a confident
+    wrong answer. Use it only when the caller already knows every file belongs
+    in one of the workspace's DocSets. With a single DocSet the answer is
+    already determined and the LLM is not called; with none it raises
+    :class:`~dgml_core.errors.NoExistingDocSets`.
     """
 
     EXISTING = "existing"
+    EXISTING_FORCED = "existing-forced"
     EXISTING_OR_NEW = "existing-or-new"
+
+
+DecisionKind = Literal["existing", "new", "none"]
+"""What a :class:`ClassificationDecision` resolved to."""
 
 
 _NEW_DOCSET_INSTRUCTION_BULLETS = "\n".join(
@@ -130,9 +143,11 @@ class ClassificationDecision:
 
     For ``"existing"`` only ``existing_docset_id`` is populated; for ``"new"``
     only (``new_name``, ``new_description``, ``new_key_questions``); for
-    ``"none"`` neither. Validated at construction by :func:`classify_file`.
-    ``"new"`` is unreachable under :class:`ClassifyMode.EXISTING` and
-    ``"none"`` is unreachable outside it.
+    ``"none"`` neither, though ``reason`` may carry the LLM's one-line
+    explanation of why nothing fit. Validated at construction by
+    :func:`classify_file`. ``"new"`` is reachable only under
+    :class:`ClassifyMode.EXISTING_OR_NEW` and ``"none"`` only under
+    :class:`ClassifyMode.EXISTING`.
 
     ``confidence`` is populated only by the multi-attempt path — see
     :func:`propose_new_docset_for_files` with ``attempts >= 2``. It is the share
@@ -141,12 +156,13 @@ class ClassificationDecision:
     and unrelated to how confident the clusterer was about the grouping.
     """
 
-    decision: str  # "existing" | "new" | "none"
+    decision: DecisionKind
     existing_docset_id: str | None = None
     new_name: str | None = None
     new_description: str | None = None
     new_key_questions: tuple[str, ...] = ()
     confidence: float | None = None
+    reason: str | None = None
 
 
 def load_classification_config(workspace: Workspace) -> ClassificationConfig:
@@ -196,19 +212,24 @@ def classify_file(
     *,
     config: ClassificationConfig,
     docsets: list[DocSet] | None = None,
-    allow_new: bool = True,
+    mode: ClassifyMode = ClassifyMode.EXISTING_OR_NEW,
     debug: bool = False,
 ) -> ClassificationDecision:
     """Ask the configured vision LLM to classify ``file_id`` into a DocSet.
 
-    The LLM picks exactly one of two tools: assign the file to an existing
-    DocSet, or propose a new one (name + description).
+    The tools on offer, and so the possible decisions, depend on ``mode``:
 
-    ``allow_new=False`` (:class:`ClassifyMode.EXISTING`) swaps the propose tool
-    for a decline tool: the LLM assigns the file to an existing DocSet only when
-    one fits (judged against its description and key questions), and otherwise
-    returns decision ``"none"`` — the file stays unassigned. Because declining
-    is a possible answer, the LLM is called even when only one DocSet exists.
+    - :attr:`ClassifyMode.EXISTING_OR_NEW` (default): assign the file to an
+      existing DocSet (``"existing"``) or propose a new one (``"new"``).
+    - :attr:`ClassifyMode.EXISTING`: assign the file to an existing DocSet
+      that fits (``"existing"``) or decline (``"none"``) — the file stays
+      unassigned. Fit is judged by document type, from each DocSet's
+      description (or its name, when it has none); key questions only break
+      ties between DocSets that both fit. Because declining is a possible
+      answer, the LLM is called even when only one DocSet exists.
+    - :attr:`ClassifyMode.EXISTING_FORCED`: assign the file to the closest
+      existing DocSet (always ``"existing"``). With exactly one DocSet that is
+      the only possible answer, so the LLM is not called at all.
 
     ``docsets`` is the list of existing DocSets to classify against. When
     omitted it is read fresh from the workspace. Bulk callers (e.g.
@@ -221,27 +242,30 @@ def classify_file(
     (missing images, malformed LLM response, network error).
     Raises :class:`AuthError` when ``config.api_key_env`` names an env var
     that isn't set.
-    Raises :class:`NoExistingDocSets` when ``allow_new=False`` and the
-    workspace has no DocSets — there is no decision to make, and the assign
-    tool would have no valid id to enumerate.
+    Raises :class:`NoExistingDocSets` when ``mode`` only routes into existing
+    DocSets and the workspace has none — there is no decision to make, and the
+    assign tool would have no valid id to enumerate.
     """
     if docsets is None:
         docsets = DocSetStore(workspace).list_all()
-    if not allow_new:
+    if mode != ClassifyMode.EXISTING_OR_NEW:
         if not docsets:
             raise NoExistingDocSets(
                 "no DocSets to assign to; create one first, or allow "
                 "classification to propose a new DocSet"
             )
+        if mode == ClassifyMode.EXISTING_FORCED and len(docsets) == 1:
+            # Only one possible answer, so there is nothing to decide.
+            return ClassificationDecision(decision="existing", existing_docset_id=docsets[0].id)
     response = _vision_tool_call(
         workspace,
         [file_id],
         config=config,
-        prompt=_build_prompt(docsets, allow_new=allow_new),
-        tools=_build_tools(docsets, allow_new=allow_new),
+        prompt=_build_prompt(docsets, mode=mode),
+        tools=_build_tools(docsets, mode=mode),
         debug=debug,
     )
-    return _parse_response(response, docsets, allow_new=allow_new)
+    return _parse_response(response, docsets, mode=mode)
 
 
 def propose_new_docset_for_files(
@@ -440,7 +464,19 @@ def _build_prompt_new_only() -> str:
     )
 
 
-def _build_prompt(docsets: list[DocSet], *, allow_new: bool = True) -> str:
+_EXISTING_FIT_CRITERION = (
+    "Judge fit by document type: compare the new file with each existing "
+    "DocSet's description, or with its name alone when it has no description "
+    "— a name is enough to go on. Key questions, where a DocSet lists them, "
+    "are a tie-breaker: if more than one DocSet fits, prefer the one whose key "
+    "questions the new file's first pages answer. A DocSet with no key "
+    "questions can still be a match on its description or name."
+)
+
+
+def _build_prompt(
+    docsets: list[DocSet], *, mode: ClassifyMode = ClassifyMode.EXISTING_OR_NEW
+) -> str:
     lines = [
         "You are classifying a newly ingested document into a DocSet.",
         "",
@@ -450,29 +486,14 @@ def _build_prompt(docsets: list[DocSet], *, allow_new: bool = True) -> str:
         'structured questions ("what is X?", "when did Y happen?") could be '
         "answered from each of them.",
         "",
+        "Topical similarity is NOT enough. A property tax bill and a tax "
+        "abatement (PILOT) agreement both concern property taxes, but they "
+        "answer different questions (tax owed vs. abatement terms), so they "
+        "are **different** document types. Use the document type, not the topic.",
+        "",
+        "The rendered first pages of the new file are attached as images.",
+        "",
     ]
-    if allow_new:
-        lines.append(
-            "Topical similarity is NOT enough. A property tax bill and a tax "
-            "abatement (PILOT) agreement both concern property taxes, but they "
-            "answer different questions (tax owed vs. abatement terms), so they "
-            "belong in **different** DocSets. Use the document type, not the topic."
-        )
-    else:
-        lines.append(
-            "Topical similarity is NOT enough. A property tax bill and a tax "
-            "abatement (PILOT) agreement both concern property taxes, but they "
-            "answer different questions (tax owed vs. abatement terms), so a "
-            "DocSet of one is **not** a home for the other. Use the document "
-            "type, not the topic."
-        )
-    lines.extend(
-        [
-            "",
-            "The rendered first pages of the new file are attached as images.",
-            "",
-        ]
-    )
     if docsets:
         lines.append("Existing DocSets:")
         for ds in docsets:
@@ -487,7 +508,7 @@ def _build_prompt(docsets: list[DocSet], *, allow_new: bool = True) -> str:
     else:
         lines.append("There are no existing DocSets in this workspace yet.")
     lines.append("")
-    if allow_new:
+    if mode == ClassifyMode.EXISTING_OR_NEW:
         lines.append(
             f"Call `{_TOOL_ASSIGN}` only if the new file's first pages plausibly "
             "answer the same key questions as one of the existing DocSets above "
@@ -496,31 +517,51 @@ def _build_prompt(docsets: list[DocSet], *, allow_new: bool = True) -> str:
         )
         lines.append(_NEW_DOCSET_INSTRUCTION_BULLETS)
     else:
-        lines.append(
-            f"Call `{_TOOL_ASSIGN}` only if the new file's first pages plausibly "
-            "answer the same key questions as one of the existing DocSets above "
-            "(i.e. a single extraction schema would work for both). Otherwise "
-            f"call `{_TOOL_NO_MATCH}` — do not pick the closest DocSet just "
-            "because one has to be chosen; leaving the file unassigned is the "
-            "correct answer for a document of a different type."
-        )
+        lines.extend([_EXISTING_FIT_CRITERION, ""])
+        if mode == ClassifyMode.EXISTING:
+            lines.append(
+                f"Call `{_TOOL_ASSIGN}` if one of the existing DocSets above is "
+                "the new file's document type. Otherwise call "
+                f"`{_TOOL_NO_MATCH}` with a one-sentence reason — do not pick "
+                "the closest DocSet just because one has to be chosen; leaving "
+                "the file unassigned is the correct answer for a document of a "
+                "different type."
+            )
+        else:
+            lines.append(
+                f"Call `{_TOOL_ASSIGN}` with the existing DocSet closest to the "
+                "new file's document type. You must choose one: there is no "
+                "option to create a DocSet and no option to decline, so if none "
+                "matches exactly, pick whichever is closest rather than refusing."
+            )
     lines.extend(["", "Call exactly one tool."])
     return "\n".join(lines)
 
 
-def _build_tools(docsets: list[DocSet], *, allow_new: bool = True) -> list[dict[str, Any]]:
+def _build_tools(
+    docsets: list[DocSet], *, mode: ClassifyMode = ClassifyMode.EXISTING_OR_NEW
+) -> list[dict[str, Any]]:
     docset_id_schema: dict[str, Any] = {
         "type": "string",
-        "description": "The id of the existing DocSet that best fits the new file.",
+        "description": "The id of the existing DocSet to assign the new file to.",
     }
     if docsets:
         docset_id_schema["enum"] = [ds.id for ds in docsets]
+
+    if mode == ClassifyMode.EXISTING_FORCED:
+        assign_description = (
+            "Assign the new file to the existing DocSet closest to its document "
+            "type. This is the only available action, so a choice is required "
+            "even when no DocSet is a perfect fit."
+        )
+    else:
+        assign_description = "Assign the new file to the existing DocSet of its document type."
 
     assign_tool = {
         "type": "function",
         "function": {
             "name": _TOOL_ASSIGN,
-            "description": "Assign the new file to one of the existing DocSets.",
+            "description": assign_description,
             "parameters": {
                 "type": "object",
                 "properties": {"docset_id": docset_id_schema},
@@ -529,7 +570,12 @@ def _build_tools(docsets: list[DocSet], *, allow_new: bool = True) -> list[dict[
             },
         },
     }
-    return [assign_tool, _create_new_docset_tool() if allow_new else _no_matching_docset_tool()]
+    if mode == ClassifyMode.EXISTING_OR_NEW:
+        return [assign_tool, _create_new_docset_tool()]
+    if mode == ClassifyMode.EXISTING:
+        return [assign_tool, _no_matching_docset_tool()]
+    # The *sole* tool, which is what forces a choice under tool_choice="required".
+    return [assign_tool]
 
 
 def _no_matching_docset_tool() -> dict[str, Any]:
@@ -537,7 +583,10 @@ def _no_matching_docset_tool() -> dict[str, Any]:
 
     Offered by :func:`classify_file` in place of the create tool under
     :class:`ClassifyMode.EXISTING`, so ``tool_choice="required"`` still leaves
-    the LLM a way out other than a wrong assignment.
+    the LLM a way out other than a wrong assignment. The ``reason`` argument is
+    there for the caller (it is surfaced on the decision), and also keeps this
+    from being a no-argument tool, whose empty arguments some providers return
+    as ``""`` rather than ``"{}"``.
     """
     return {
         "type": "function",
@@ -545,9 +594,22 @@ def _no_matching_docset_tool() -> dict[str, Any]:
             "name": _TOOL_NO_MATCH,
             "description": (
                 "Leave the new file unassigned because none of the existing "
-                "DocSets fits its document type."
+                "DocSets is its document type."
             ),
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "One sentence: what kind of document the new file "
+                            "is, and why none of the existing DocSets fits it."
+                        ),
+                    },
+                },
+                "required": ["reason"],
+                "additionalProperties": False,
+            },
         },
     }
 
@@ -608,14 +670,21 @@ def _create_new_docset_tool() -> dict[str, Any]:
 
 
 def _parse_response(
-    response: Any, docsets: list[DocSet], *, allow_new: bool = True
+    response: Any,
+    docsets: list[DocSet],
+    *,
+    mode: ClassifyMode = ClassifyMode.EXISTING_OR_NEW,
 ) -> ClassificationDecision:
     """Parse the LLM's tool call into a :class:`ClassificationDecision`.
 
-    A call to a tool that wasn't offered is rejected rather than honored:
-    ``create_new_docset`` with ``allow_new=False`` would create the DocSet the
-    caller explicitly ruled out, and ``no_matching_docset`` with
-    ``allow_new=True`` would drop a file the caller asked to have placed.
+    A call to a tool that wasn't offered in ``mode`` is rejected rather than
+    honored: ``create_new_docset`` outside the default mode would create the
+    DocSet the caller explicitly ruled out, and ``no_matching_docset`` outside
+    :class:`ClassifyMode.EXISTING` would drop a file the caller asked to have
+    placed.
+
+    A decline's ``reason`` is informational, so a missing or blank one does not
+    fail the call: the decline itself is the answer.
     """
     name, args = _extract_single_tool_call(response)
 
@@ -632,19 +701,21 @@ def _parse_response(
         return ClassificationDecision(decision="existing", existing_docset_id=docset_id)
 
     if name == _TOOL_CREATE:
-        if not allow_new:
+        if mode != ClassifyMode.EXISTING_OR_NEW:
             raise ClassificationFailed(
-                f"LLM called {_TOOL_CREATE}, which is not offered in '{ClassifyMode.EXISTING}' mode"
+                f"LLM called {_TOOL_CREATE}, which is not offered in '{mode}' mode"
             )
         return _parse_new_docset_args(name, args)
 
     if name == _TOOL_NO_MATCH:
-        if allow_new:
+        if mode != ClassifyMode.EXISTING:
             raise ClassificationFailed(
                 f"LLM called {_TOOL_NO_MATCH}, which is only offered in "
                 f"'{ClassifyMode.EXISTING}' mode"
             )
-        return ClassificationDecision(decision="none")
+        reason = args.get("reason")
+        cleaned = reason.strip() if isinstance(reason, str) else ""
+        return ClassificationDecision(decision="none", reason=cleaned or None)
 
     raise ClassificationFailed(f"LLM returned unexpected tool name: {name!r}")
 
@@ -676,7 +747,11 @@ def _extract_single_tool_call(response: Any) -> tuple[str | None, dict[str, Any]
     name = getattr(getattr(call, "function", None), "name", None)
     raw_args = getattr(getattr(call, "function", None), "arguments", None)
     try:
-        args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args or {})
+        if isinstance(raw_args, str):
+            # Some providers send an argument-less call's arguments as "".
+            args = json.loads(raw_args) if raw_args.strip() else {}
+        else:
+            args = dict(raw_args or {})
     except (json.JSONDecodeError, TypeError) as exc:
         raise ClassificationFailed(f"LLM tool-call arguments not valid JSON: {exc}") from exc
     return name, args

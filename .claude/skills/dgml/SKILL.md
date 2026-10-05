@@ -152,9 +152,12 @@ jq -r '.results[] | "\(.classification.docset_name)\t\(.path)"' <<<"$payload"
 ```
 
 Files with `decision: "none"` are added but sit in no DocSet and are not
-extracted — list them with
-`jq -r '.results[] | select(.classification.decision == "none") | .path'`
-and route them yourself (or run `dgml cluster` over them).
+extracted. `.summary.unassigned` counts them (plus any file whose
+classification soft-failed); list them, with the LLM's reason, via
+`jq -r '.results[] | select(.classification.decision == "none") | "\(.path)\t\(.classification.reason)"'`
+and route them yourself (or run `dgml cluster` over them). Re-running the
+same command with `--on-conflict skip` does **not** retry them — existing
+files skip classification — so assign them with `docset add-file`.
 
 ⚠️ `--auto-classify` takes an *optional* MODE, so the parser eats the
 next token. Always put PATH **before** the flag (as above), or name the
@@ -166,8 +169,12 @@ Key contract points:
 - `--auto-classify` (bare) == `--auto-classify existing-or-new`: assign
   if something fits, else create. `--auto-classify existing` never
   creates: assign if something fits, else leave the file unassigned with
-  `decision: "none"` (no auto-extraction).
-- In `existing` mode against a workspace with **no** DocSets, the command
+  `decision: "none"` (no auto-extraction). Fit is judged on each DocSet's
+  description (or name, if it has none); key questions only break ties.
+  `--auto-classify existing-forced` is the old `existing`: it always
+  assigns to the closest DocSet — use it only when every file is known to
+  belong in one.
+- In `existing` / `existing-forced` mode against a workspace with **no** DocSets, the command
   is a **hard** error (exit 1, `NO_EXISTING_DOCSETS`) and makes no LLM
   call — there is nothing it could assign to. Seed the DocSets first.
 - A missing or invalid `classification` config is a **hard** error

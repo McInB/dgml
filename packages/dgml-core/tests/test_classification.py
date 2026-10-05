@@ -23,6 +23,7 @@ from dgml_core.classification import (
     DEFAULT_MAX_PAGES,
     ClassificationConfig,
     ClassificationDecision,
+    ClassifyMode,
     classify_file,
     load_classification_config,
     propose_new_docset_for_files,
@@ -592,7 +593,7 @@ def test_classify_file_no_existing_docsets_forces_new(workspace: Workspace) -> N
 
 
 # ---------------------------------------------------------------------------
-# classify_file with allow_new=False (ClassifyMode.EXISTING)
+# classify_file with mode=ClassifyMode.EXISTING
 # ---------------------------------------------------------------------------
 
 
@@ -609,14 +610,14 @@ def test_classify_file_existing_only_offers_assign_or_no_match(workspace: Worksp
     response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
 
     with patch("litellm.completion", return_value=response) as mock_completion:
-        classify_file(workspace, new_id, config=cfg, allow_new=False)
+        classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
 
     assert _tool_names(mock_completion) == ["assign_to_existing_docset", "no_matching_docset"]
     assert mock_completion.call_args.kwargs["tool_choice"] == "required"
 
 
 def test_classify_file_default_still_offers_create(workspace: Workspace) -> None:
-    """The default (allow_new=True) menu is unchanged."""
+    """The default (existing-or-new) menu is unchanged."""
     existing_id, new_id = _seed_for_classify(workspace)
     cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
     response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
@@ -635,7 +636,7 @@ def test_classify_file_existing_only_assigns(workspace: Workspace) -> None:
     response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
 
     with patch("litellm.completion", return_value=response):
-        decision = classify_file(workspace, new_id, config=cfg, allow_new=False)
+        decision = classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
 
     assert decision == ClassificationDecision(decision="existing", existing_docset_id=existing_id)
 
@@ -645,12 +646,45 @@ def test_classify_file_existing_only_declines_off_type_file(workspace: Workspace
     new-DocSet fields — rather than being forced into the closest DocSet."""
     _, new_id = _seed_for_classify(workspace)
     cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
-    response = _tool_call_response("no_matching_docset", {})
+    response = _tool_call_response("no_matching_docset", {"reason": "  A lease, not an invoice. "})
 
     with patch("litellm.completion", return_value=response):
-        decision = classify_file(workspace, new_id, config=cfg, allow_new=False)
+        decision = classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
+
+    assert decision == ClassificationDecision(decision="none", reason="A lease, not an invoice.")
+
+
+@pytest.mark.parametrize("raw_args", ["", "  ", "{}", '{"reason": "  "}'])
+def test_classify_file_existing_only_decline_tolerates_missing_reason(
+    workspace: Workspace, raw_args: str
+) -> None:
+    """The reason is informational: a decline without one — including a
+    provider that sends empty arguments as "" rather than "{}" — is still a
+    decline, not a ClassificationFailed."""
+    _, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    call = SimpleNamespace(function=SimpleNamespace(name="no_matching_docset", arguments=raw_args))
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[call]))]
+    )
+
+    with patch("litellm.completion", return_value=response):
+        decision = classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
 
     assert decision == ClassificationDecision(decision="none")
+
+
+def test_classify_file_existing_only_decline_tool_requires_reason(workspace: Workspace) -> None:
+    """The decline tool asks for a reason, so it is never an argument-less tool."""
+    existing_id, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
+
+    no_match = mock_completion.call_args.kwargs["tools"][1]["function"]
+    assert no_match["parameters"]["required"] == ["reason"]
 
 
 def test_classify_file_existing_only_single_docset_calls_llm(workspace: Workspace) -> None:
@@ -665,7 +699,7 @@ def test_classify_file_existing_only_single_docset_calls_llm(workspace: Workspac
     response = _tool_call_response("no_matching_docset", {})
 
     with patch("litellm.completion", return_value=response) as mock_completion:
-        decision = classify_file(workspace, "newfid", config=cfg, allow_new=False)
+        decision = classify_file(workspace, "newfid", config=cfg, mode=ClassifyMode.EXISTING)
 
     mock_completion.assert_called_once()
     assert decision == ClassificationDecision(decision="none")
@@ -698,7 +732,7 @@ def test_classify_file_existing_only_two_docsets_calls_llm(workspace: Workspace)
     response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
 
     with patch("litellm.completion", return_value=response) as mock_completion:
-        decision = classify_file(workspace, new_id, config=cfg, allow_new=False)
+        decision = classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
 
     mock_completion.assert_called_once()
     assert decision.existing_docset_id == existing_id
@@ -714,7 +748,7 @@ def test_classify_file_existing_only_raises_without_docsets(workspace: Workspace
 
     with patch("litellm.completion") as mock_completion:
         with pytest.raises(NoExistingDocSets):
-            classify_file(workspace, "lonefid", config=cfg, allow_new=False)
+            classify_file(workspace, "lonefid", config=cfg, mode=ClassifyMode.EXISTING)
     mock_completion.assert_not_called()
 
 
@@ -741,7 +775,7 @@ def test_classify_file_existing_only_rejects_create_call(workspace: Workspace) -
 
     with patch("litellm.completion", return_value=response):
         with pytest.raises(ClassificationFailed, match="not offered"):
-            classify_file(workspace, new_id, config=cfg, allow_new=False)
+            classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
 
 
 def test_classify_file_default_mode_rejects_no_match_call(workspace: Workspace) -> None:
@@ -767,7 +801,7 @@ def test_classify_file_existing_only_prompt_allows_declining(workspace: Workspac
     response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
 
     with patch("litellm.completion", return_value=response) as mock_completion:
-        classify_file(workspace, new_id, config=cfg, allow_new=False)
+        classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
 
     content = mock_completion.call_args.kwargs["messages"][0]["content"]
     prompt_text = next(c["text"] for c in content if c["type"] == "text")
@@ -780,6 +814,119 @@ def test_classify_file_existing_only_prompt_allows_declining(workspace: Workspac
     assert "no_matching_docset" in prompt_text
     assert "Topical similarity is NOT enough" in prompt_text
     assert "create_new_docset" not in prompt_text
+
+
+def _prompt_text(mock_completion: Any) -> str:
+    content = mock_completion.call_args.kwargs["messages"][0]["content"]
+    return str(next(c["text"] for c in content if c["type"] == "text"))
+
+
+def test_classify_file_existing_only_key_questions_break_ties(workspace: Workspace) -> None:
+    """Fit is judged on description (or name); key questions are a tie-breaker,
+    not a gate — so a DocSet created with only a name is still a candidate
+    rather than one the LLM is told to decline."""
+    named_only = DocSetStore(workspace).create(name="Invoices")
+    _seed_file(workspace, "newfid", filename="incoming.pdf")
+    _seed_page_image(workspace, "newfid", 1, b"\x89PNG\r\n\x1a\nfake-png")
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("assign_to_existing_docset", {"docset_id": named_only.id})
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        decision = classify_file(workspace, "newfid", config=cfg, mode=ClassifyMode.EXISTING)
+
+    assert decision.existing_docset_id == named_only.id
+    prompt_text = _prompt_text(mock_completion)
+    assert "name: Invoices" in prompt_text
+    assert "name alone when it has no description" in prompt_text
+    assert "tie-breaker" in prompt_text
+    assert "answer the same key questions" not in prompt_text
+
+
+def test_classify_file_tool_wording_does_not_ask_for_the_closest(workspace: Workspace) -> None:
+    """Outside existing-forced mode the assign tool must not ask for the
+    *best* or *closest* DocSet — that would pull the LLM away from declining."""
+    existing_id, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
+
+    assign = mock_completion.call_args.kwargs["tools"][0]["function"]
+    wording = (
+        assign["description"] + assign["parameters"]["properties"]["docset_id"]["description"]
+    ).lower()
+    assert "best" not in wording
+    assert "closest" not in wording
+
+
+# ---------------------------------------------------------------------------
+# classify_file with mode=ClassifyMode.EXISTING_FORCED
+# ---------------------------------------------------------------------------
+
+
+def test_classify_file_forced_offers_assign_alone(workspace: Workspace) -> None:
+    """Forced mode keeps the old existing-only menu: the assign tool is the
+    only tool, so tool_choice="required" forces a choice."""
+    existing_id, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with patch("litellm.completion", return_value=response) as mock_completion:
+        decision = classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING_FORCED)
+
+    assert _tool_names(mock_completion) == ["assign_to_existing_docset"]
+    assert decision == ClassificationDecision(decision="existing", existing_docset_id=existing_id)
+    prompt_text = _prompt_text(mock_completion)
+    assert "closest" in prompt_text
+    assert "no_matching_docset" not in prompt_text
+    assert "create_new_docset" not in prompt_text
+
+
+def test_classify_file_forced_single_docset_skips_llm(workspace: Workspace) -> None:
+    """With one DocSet forced mode has one possible answer, so no LLM call —
+    which also means a file with no rendered pages still gets assigned."""
+    only = DocSetStore(workspace).create(name="Invoices")
+    _seed_file(workspace, "nopagesfid")  # no page images
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+
+    with patch("litellm.completion") as mock_completion:
+        decision = classify_file(
+            workspace, "nopagesfid", config=cfg, mode=ClassifyMode.EXISTING_FORCED
+        )
+
+    mock_completion.assert_not_called()
+    assert decision == ClassificationDecision(decision="existing", existing_docset_id=only.id)
+
+
+def test_classify_file_forced_raises_without_docsets(workspace: Workspace) -> None:
+    _seed_file(workspace, "lonefid", filename="thing.pdf")
+    _seed_page_image(workspace, "lonefid", 1, b"\xff\xd8\xff\xe0fake")
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+
+    with patch("litellm.completion") as mock_completion:
+        with pytest.raises(NoExistingDocSets):
+            classify_file(workspace, "lonefid", config=cfg, mode=ClassifyMode.EXISTING_FORCED)
+    mock_completion.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "match"),
+    [
+        ("no_matching_docset", {"reason": "x"}, "only offered"),
+        ("create_new_docset", _create_new_args(), "not offered"),
+    ],
+)
+def test_classify_file_forced_rejects_unoffered_tools(
+    workspace: Workspace, tool: str, args: dict[str, Any], match: str
+) -> None:
+    _, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    response = _tool_call_response(tool, args)
+
+    with patch("litellm.completion", return_value=response):
+        with pytest.raises(ClassificationFailed, match=match):
+            classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING_FORCED)
 
 
 # ---------------------------------------------------------------------------
