@@ -4090,7 +4090,6 @@ def _file_add_bulk(args: argparse.Namespace, ws: Workspace, store: FileStore, fm
     pdfs = _gather_pdfs(directory, recursive=recursive, suffixes=_ingestible_suffixes(ws))
 
     classify_mode = _classify_mode(args)
-    auto_classify = classify_mode is not None
     config: ClassificationConfig | None = None
     docsets: list[DocSet] | None = None
     if classify_mode is not None:
@@ -4161,7 +4160,7 @@ def _file_add_bulk(args: argparse.Namespace, ws: Workspace, store: FileStore, fm
         entries.append(entry)
 
     summary: dict[str, Any] = {"total": len(pdfs), **counts}
-    if auto_classify:
+    if classify_mode is not None:
         summary["unassigned"] = unassigned
     payload: dict[str, Any] = {
         "directory": str(directory),
@@ -4254,7 +4253,7 @@ def _auto_classify(
     ``--auto-classify existing`` forbids creating a DocSet: the LLM either
     assigns the file to an existing DocSet that fits or declines, in which case
     the file is left unassigned (and not extracted) and the block reports
-    ``"decision": "none"`` plus the LLM's one-line ``reason``.
+    ``"decision": "none"`` plus the LLM's one-line ``decline_reason``.
     ``--auto-classify existing-forced`` also forbids creating one but always
     assigns, to the closest DocSet. In either mode, with no DocSets to choose
     from there is nothing to ask, so it is a **hard** error
@@ -4299,6 +4298,7 @@ def _auto_classify(
         "docset_created": False,
         "docset_name": None,
         "docset_key_questions": [],
+        "decline_reason": None,
         "error": None,
     }
 
@@ -4314,6 +4314,9 @@ def _auto_classify(
         block["error"] = f"{exc.code}: {exc}"
         return block
 
+    # ``docset_id`` is set only once the assignment is actually stored, so a
+    # failure partway through never reports a file as placed (or as unplaced)
+    # when the store says otherwise — bulk callers count ``unassigned`` from it.
     docset_store = DocSetStore(ws)
     try:
         if decision.decision == "existing":
@@ -4323,16 +4326,23 @@ def _auto_classify(
             # carries any error; the assignment itself stands).
             from dgml_core.extraction import add_file_and_extract
 
-            extraction_block = add_file_and_extract(
-                ws, decision.existing_docset_id, file_id, write_stats=debug, debug=debug
-            )
             existing = docset_store.get(decision.existing_docset_id)
-            block.update(
-                decision="existing",
-                docset_id=existing.id,
-                docset_name=existing.name,
-                docset_key_questions=list(existing.key_questions),
-            )
+            assigned = {
+                "decision": "existing",
+                "docset_id": existing.id,
+                "docset_name": existing.name,
+                "docset_key_questions": list(existing.key_questions),
+            }
+            try:
+                extraction_block = add_file_and_extract(
+                    ws, existing.id, file_id, write_stats=debug, debug=debug
+                )
+            except DgmlError:
+                # The assignment may have landed before the failure.
+                if file_id in docset_store.list_files(existing.id):
+                    block.update(assigned)
+                raise
+            block.update(assigned)
             if extraction_block is not None:
                 block["extraction"] = extraction_block
         elif decision.decision == "new":
@@ -4342,7 +4352,13 @@ def _auto_classify(
                 description=decision.new_description,
                 key_questions=list(decision.new_key_questions),
             )
-            docset_store.add_file(created.id, file_id)
+            try:
+                docset_store.add_file(created.id, file_id)
+            except DgmlError:
+                # Don't leave behind a DocSet created for a file it never got.
+                with contextlib.suppress(DgmlError):
+                    docset_store.delete(created.id)
+                raise
             if docsets is not None:
                 docsets.append(created)
             block.update(
@@ -4355,7 +4371,7 @@ def _auto_classify(
         elif decision.decision == "none":
             # No existing DocSet fits: leave the file unassigned so the
             # caller's own unknown-type handling runs.
-            block.update(decision="none", reason=decision.reason)
+            block.update(decision="none", decline_reason=decision.reason)
         else:
             assert_never(decision.decision)
     except DgmlError as exc:

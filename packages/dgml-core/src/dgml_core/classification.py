@@ -143,7 +143,7 @@ class ClassificationDecision:
 
     For ``"existing"`` only ``existing_docset_id`` is populated; for ``"new"``
     only (``new_name``, ``new_description``, ``new_key_questions``); for
-    ``"none"`` neither, though ``reason`` may carry the LLM's one-line
+    ``"none"`` neither, though ``reason`` carries the LLM's one-line
     explanation of why nothing fit. Validated at construction by
     :func:`classify_file`. ``"new"`` is reachable only under
     :class:`ClassifyMode.EXISTING_OR_NEW` and ``"none"`` only under
@@ -473,6 +473,12 @@ _EXISTING_FIT_CRITERION = (
     "questions can still be a match on its description or name."
 )
 
+_TOPIC_VS_TYPE_EXAMPLE = (
+    "A property tax bill and a tax abatement (PILOT) agreement both concern "
+    "property taxes, but they answer different questions (tax owed vs. "
+    "abatement terms)"
+)
+
 
 def _build_prompt(
     docsets: list[DocSet], *, mode: ClassifyMode = ClassifyMode.EXISTING_OR_NEW
@@ -481,19 +487,57 @@ def _build_prompt(
         "You are classifying a newly ingested document into a DocSet.",
         "",
         "A DocSet groups documents of the **same document type** — documents "
-        "that could plausibly share a single extraction schema. Two documents "
-        "belong in the same DocSet if, and only if, the same set of "
-        'structured questions ("what is X?", "when did Y happen?") could be '
-        "answered from each of them.",
-        "",
-        "Topical similarity is NOT enough. A property tax bill and a tax "
-        "abatement (PILOT) agreement both concern property taxes, but they "
-        "answer different questions (tax owed vs. abatement terms), so they "
-        "are **different** document types. Use the document type, not the topic.",
-        "",
-        "The rendered first pages of the new file are attached as images.",
-        "",
+        "that could plausibly share a single extraction schema.",
     ]
+    # Each mode gets its own fit rubric. The "if, and only if" key-question
+    # gate only suits the default mode: the existing-only modes judge fit by
+    # description or name (a DocSet may have no key questions to compare), and
+    # existing-forced must not be told to refuse a choice it is required to make.
+    if mode == ClassifyMode.EXISTING_OR_NEW:
+        lines[-1] += (
+            " Two documents belong in the same DocSet if, and only if, the same "
+            'set of structured questions ("what is X?", "when did Y happen?") '
+            "could be answered from each of them."
+        )
+        lines.extend(
+            [
+                "",
+                "Topical similarity is NOT enough. " + _TOPIC_VS_TYPE_EXAMPLE + " so "
+                "they belong in **different** DocSets. Use the document type, not "
+                "the topic.",
+            ]
+        )
+    elif mode == ClassifyMode.EXISTING:
+        lines.extend(
+            [
+                "",
+                _EXISTING_FIT_CRITERION,
+                "",
+                "Topical similarity is NOT enough. " + _TOPIC_VS_TYPE_EXAMPLE + " so "
+                "they are **different** document types. Use the document type, not "
+                "the topic.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                _EXISTING_FIT_CRITERION,
+                "",
+                "Treat fit as a matter of degree, not a pass/fail gate: you will be "
+                "asked to choose the closest DocSet from a fixed list, so judge by "
+                "document type rather than by topic. " + _TOPIC_VS_TYPE_EXAMPLE + ", "
+                "so a DocSet of one is a poor home for the other — prefer a DocSet "
+                "whose own document type is nearest the new file's.",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "The rendered first pages of the new file are attached as images.",
+            "",
+        ]
+    )
     if docsets:
         lines.append("Existing DocSets:")
         for ds in docsets:
@@ -516,24 +560,22 @@ def _build_prompt(
             f"call `{_TOOL_CREATE}` with:"
         )
         lines.append(_NEW_DOCSET_INSTRUCTION_BULLETS)
+    elif mode == ClassifyMode.EXISTING:
+        lines.append(
+            f"Call `{_TOOL_ASSIGN}` if one of the existing DocSets above is "
+            "the new file's document type. Otherwise call "
+            f"`{_TOOL_NO_MATCH}` with a one-sentence reason — do not pick "
+            "the closest DocSet just because one has to be chosen; leaving "
+            "the file unassigned is the correct answer for a document of a "
+            "different type."
+        )
     else:
-        lines.extend([_EXISTING_FIT_CRITERION, ""])
-        if mode == ClassifyMode.EXISTING:
-            lines.append(
-                f"Call `{_TOOL_ASSIGN}` if one of the existing DocSets above is "
-                "the new file's document type. Otherwise call "
-                f"`{_TOOL_NO_MATCH}` with a one-sentence reason — do not pick "
-                "the closest DocSet just because one has to be chosen; leaving "
-                "the file unassigned is the correct answer for a document of a "
-                "different type."
-            )
-        else:
-            lines.append(
-                f"Call `{_TOOL_ASSIGN}` with the existing DocSet closest to the "
-                "new file's document type. You must choose one: there is no "
-                "option to create a DocSet and no option to decline, so if none "
-                "matches exactly, pick whichever is closest rather than refusing."
-            )
+        lines.append(
+            f"Call `{_TOOL_ASSIGN}` with the existing DocSet closest to the "
+            "new file's document type. You must choose one: there is no "
+            "option to create a DocSet and no option to decline, so if none "
+            "matches exactly, pick whichever is closest rather than refusing."
+        )
     lines.extend(["", "Call exactly one tool."])
     return "\n".join(lines)
 
@@ -583,10 +625,8 @@ def _no_matching_docset_tool() -> dict[str, Any]:
 
     Offered by :func:`classify_file` in place of the create tool under
     :class:`ClassifyMode.EXISTING`, so ``tool_choice="required"`` still leaves
-    the LLM a way out other than a wrong assignment. The ``reason`` argument is
-    there for the caller (it is surfaced on the decision), and also keeps this
-    from being a no-argument tool, whose empty arguments some providers return
-    as ``""`` rather than ``"{}"``.
+    the LLM a way out other than a wrong assignment. The required ``reason`` is
+    surfaced on the decision as the caller's audit trail.
     """
     return {
         "type": "function",
@@ -683,8 +723,9 @@ def _parse_response(
     :class:`ClassifyMode.EXISTING` would drop a file the caller asked to have
     placed.
 
-    A decline's ``reason`` is informational, so a missing or blank one does not
-    fail the call: the decline itself is the answer.
+    A decline must carry a non-empty ``reason``, like every other tool's
+    required argument: a model that declines without saying why is treated as
+    a malformed response, not as a confident ``"none"`` with no audit trail.
     """
     name, args = _extract_single_tool_call(response)
 
@@ -714,8 +755,9 @@ def _parse_response(
                 f"'{ClassifyMode.EXISTING}' mode"
             )
         reason = args.get("reason")
-        cleaned = reason.strip() if isinstance(reason, str) else ""
-        return ClassificationDecision(decision="none", reason=cleaned or None)
+        if not isinstance(reason, str) or not reason.strip():
+            raise ClassificationFailed(f"{_TOOL_NO_MATCH} call missing a non-empty 'reason'")
+        return ClassificationDecision(decision="none", reason=reason.strip())
 
     raise ClassificationFailed(f"LLM returned unexpected tool name: {name!r}")
 
@@ -746,14 +788,21 @@ def _extract_single_tool_call(response: Any) -> tuple[str | None, dict[str, Any]
     call = tool_calls[0]
     name = getattr(getattr(call, "function", None), "name", None)
     raw_args = getattr(getattr(call, "function", None), "arguments", None)
+    args: Any
     try:
         if isinstance(raw_args, str):
             # Some providers send an argument-less call's arguments as "".
             args = json.loads(raw_args) if raw_args.strip() else {}
         else:
             args = dict(raw_args or {})
-    except (json.JSONDecodeError, TypeError) as exc:
+    except (TypeError, ValueError) as exc:  # JSONDecodeError is a ValueError
         raise ClassificationFailed(f"LLM tool-call arguments not valid JSON: {exc}") from exc
+    if not isinstance(args, dict):
+        # Valid JSON that isn't an object ("null", "[]", '"x"') has no
+        # arguments to read; fail it here rather than on a later .get().
+        raise ClassificationFailed(
+            f"LLM tool-call arguments must be a JSON object, got {type(args).__name__}"
+        )
     return name, args
 
 

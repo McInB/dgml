@@ -461,6 +461,9 @@ def test_classify_file_prompt_lists_existing_key_questions(workspace: Workspace)
         assert q in prompt_text
     # And the prompt frames the criterion in extraction-schema terms.
     assert "extraction schema" in prompt_text or "key questions" in prompt_text
+    # The default mode keeps its strict key-question gate.
+    assert "if, and only if" in prompt_text
+    assert "Topical similarity is NOT enough" in prompt_text
 
 
 def test_classify_file_malformed_json_arguments(workspace: Workspace) -> None:
@@ -654,13 +657,12 @@ def test_classify_file_existing_only_declines_off_type_file(workspace: Workspace
     assert decision == ClassificationDecision(decision="none", reason="A lease, not an invoice.")
 
 
-@pytest.mark.parametrize("raw_args", ["", "  ", "{}", '{"reason": "  "}'])
-def test_classify_file_existing_only_decline_tolerates_missing_reason(
+@pytest.mark.parametrize("raw_args", ["", "  ", "{}", '{"reason": "  "}', '{"reason": 3}'])
+def test_classify_file_existing_only_decline_requires_reason(
     workspace: Workspace, raw_args: str
 ) -> None:
-    """The reason is informational: a decline without one — including a
-    provider that sends empty arguments as "" rather than "{}" — is still a
-    decline, not a ClassificationFailed."""
+    """A decline must say why, like every other tool's required argument: one
+    without a usable reason is a malformed response, not a silent "none"."""
     _, new_id = _seed_for_classify(workspace)
     cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
     call = SimpleNamespace(function=SimpleNamespace(name="no_matching_docset", arguments=raw_args))
@@ -668,10 +670,30 @@ def test_classify_file_existing_only_decline_tolerates_missing_reason(
         choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[call]))]
     )
 
-    with patch("litellm.completion", return_value=response):
-        decision = classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
+    with (
+        patch("litellm.completion", return_value=response),
+        pytest.raises(ClassificationFailed, match="non-empty 'reason'"),
+    ):
+        classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
 
-    assert decision == ClassificationDecision(decision="none")
+
+@pytest.mark.parametrize("raw_args", ["null", "[]", '"x"', "3"])
+def test_classify_file_rejects_non_object_arguments(workspace: Workspace, raw_args: str) -> None:
+    """Valid JSON that isn't an object is a malformed response — a
+    ClassificationFailed the CLI soft-fails — not an AttributeError that would
+    escape the soft-fail handler and abort a bulk run."""
+    _, new_id = _seed_for_classify(workspace)
+    cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
+    call = SimpleNamespace(function=SimpleNamespace(name="no_matching_docset", arguments=raw_args))
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[call]))]
+    )
+
+    with (
+        patch("litellm.completion", return_value=response),
+        pytest.raises(ClassificationFailed, match="must be a JSON object"),
+    ):
+        classify_file(workspace, new_id, config=cfg, mode=ClassifyMode.EXISTING)
 
 
 def test_classify_file_existing_only_decline_tool_requires_reason(workspace: Workspace) -> None:
@@ -696,13 +718,13 @@ def test_classify_file_existing_only_single_docset_calls_llm(workspace: Workspac
     _seed_file(workspace, "newfid", filename="incoming.pdf")
     _seed_page_image(workspace, "newfid", 1, b"\x89PNG\r\n\x1a\nfake-png")
     cfg = ClassificationConfig(model=DEFAULT_TEST_MODEL)
-    response = _tool_call_response("no_matching_docset", {})
+    response = _tool_call_response("no_matching_docset", {"reason": "Not an invoice."})
 
     with patch("litellm.completion", return_value=response) as mock_completion:
         decision = classify_file(workspace, "newfid", config=cfg, mode=ClassifyMode.EXISTING)
 
     mock_completion.assert_called_once()
-    assert decision == ClassificationDecision(decision="none")
+    assert decision == ClassificationDecision(decision="none", reason="Not an invoice.")
 
 
 def test_classify_file_single_docset_still_calls_llm_in_default_mode(
@@ -814,6 +836,9 @@ def test_classify_file_existing_only_prompt_allows_declining(workspace: Workspac
     assert "no_matching_docset" in prompt_text
     assert "Topical similarity is NOT enough" in prompt_text
     assert "create_new_docset" not in prompt_text
+    # Fit is judged by description or name; the key-question gate of the
+    # default mode would contradict that for a DocSet with no key questions.
+    assert "if, and only if" not in prompt_text
 
 
 def _prompt_text(mock_completion: Any) -> str:
@@ -881,6 +906,11 @@ def test_classify_file_forced_offers_assign_alone(workspace: Workspace) -> None:
     assert "closest" in prompt_text
     assert "no_matching_docset" not in prompt_text
     assert "create_new_docset" not in prompt_text
+    # A choice is required, so the prompt must not also tell the LLM an
+    # off-type file belongs nowhere — fit is a matter of degree here.
+    assert "matter of degree" in prompt_text
+    assert "Topical similarity is NOT enough" not in prompt_text
+    assert "if, and only if" not in prompt_text
 
 
 def test_classify_file_forced_single_docset_skips_llm(workspace: Workspace) -> None:

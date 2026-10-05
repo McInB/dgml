@@ -154,7 +154,7 @@ jq -r '.results[] | "\(.classification.docset_name)\t\(.path)"' <<<"$payload"
 Files with `decision: "none"` are added but sit in no DocSet and are not
 extracted. `.summary.unassigned` counts them (plus any file whose
 classification soft-failed); list them, with the LLM's reason, via
-`jq -r '.results[] | select(.classification.decision == "none") | "\(.path)\t\(.classification.reason)"'`
+`jq -r '.results[] | select(.classification.decision == "none") | "\(.path)\t\(.classification.decline_reason)"'`
 and route them yourself (or run `dgml cluster` over them). Re-running the
 same command with `--on-conflict skip` does **not** retry them — existing
 files skip classification — so assign them with `docset add-file`.
@@ -173,7 +173,8 @@ Key contract points:
   description (or name, if it has none); key questions only break ties.
   `--auto-classify existing-forced` is the old `existing`: it always
   assigns to the closest DocSet — use it only when every file is known to
-  belong in one.
+  belong in one. With a single DocSet, `existing` still makes one LLM call
+  per file (it may decline); `existing-forced` makes none.
 - In `existing` / `existing-forced` mode against a workspace with **no** DocSets, the command
   is a **hard** error (exit 1, `NO_EXISTING_DOCSETS`) and makes no LLM
   call — there is nothing it could assign to. Seed the DocSets first.

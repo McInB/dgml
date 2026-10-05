@@ -29,6 +29,8 @@ from unittest.mock import patch
 import pytest
 from dgml.cli import main
 from dgml_core import layout
+from dgml_core.docsets import DocSetStore
+from dgml_core.errors import FileNotFound, InvalidArgument
 from dgml_core.migrations import (
     WORKSPACE_SCHEMA_VERSION,
     pending_migrations,
@@ -1970,6 +1972,61 @@ def test_file_add_auto_classify_creates_new_docset(
 
 
 @needs_gs
+def test_file_add_auto_classify_new_docset_rolled_back_when_assign_fails(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A DocSet created for a file that then can't be assigned to it is deleted
+    rather than left behind empty, and the block reports no DocSet."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    write_classification_config(Workspace(root=ws), {"model": "gemini/gemini-2.5-flash-lite"})
+    response = _tool_response(
+        "create_new_docset",
+        {"name": "Receipts", "description": "expense receipts", "key_questions": ["Who?"]},
+    )
+
+    with (
+        patch("litellm.completion", return_value=response),
+        patch.object(DocSetStore, "add_file", side_effect=FileNotFound("gone")),
+    ):
+        rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--auto-classify"])
+    assert rc == 0
+    cls = _read_stdout(capsys)["classification"]
+    assert cls["docset_id"] is None
+    assert cls["docset_created"] is False
+    assert cls["error"] is not None
+
+    rc = main(_ws_args(ws) + ["docset", "list"])
+    assert rc == 0
+    assert _read_stdout(capsys)["docsets"] == []
+
+
+@needs_gs
+def test_file_add_auto_classify_reports_assignment_that_landed_before_failure(
+    tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """If the assignment is stored and a later step fails, the block still
+    names the DocSet — so a bulk run doesn't count the file as unassigned."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    existing_id = _seed_docset_and_config(ws, capsys)
+    response = _tool_response("assign_to_existing_docset", {"docset_id": existing_id})
+
+    with (
+        patch("litellm.completion", return_value=response),
+        patch.object(DocSetStore, "has_schema", side_effect=InvalidArgument("boom")),
+    ):
+        rc = main(_ws_args(ws) + ["file", "add", str(sample_pdf), "--auto-classify"])
+    assert rc == 0
+    cls = _read_stdout(capsys)["classification"]
+    assert cls["docset_id"] == existing_id
+    assert cls["decision"] == "existing"
+    assert cls["error"] is not None
+
+
+@needs_gs
 def test_file_add_auto_classify_assigns_existing_docset(
     tmp_path: Path, sample_pdf: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2200,6 +2257,7 @@ def test_file_add_auto_classify_existing_assigns(
     assert cls["decision"] == "existing"
     assert cls["docset_id"] == existing_id
     assert cls["docset_created"] is False
+    assert cls["decline_reason"] is None
     assert cls["error"] is None
     offered = [t["function"]["name"] for t in mock_completion.call_args.kwargs["tools"]]
     assert offered == ["assign_to_existing_docset", "no_matching_docset"]
@@ -2243,7 +2301,7 @@ def test_file_add_auto_classify_existing_leaves_off_type_file_unassigned(
     cls = payload["classification"]
     assert cls["performed"] is True
     assert cls["decision"] == "none"
-    assert cls["reason"] == "A lease, not a contract."
+    assert cls["decline_reason"] == "A lease, not a contract."
     assert cls["docset_id"] is None
     assert cls["docset_name"] is None
     assert cls["docset_created"] is False
@@ -3872,7 +3930,7 @@ def test_file_add_directory_auto_classify_existing_mixes_assign_and_none(
     assert first["decision"] == "existing"
     assert first["docset_id"] == only_id
     assert second["decision"] == "none"
-    assert second["reason"] == "Not a contract."
+    assert second["decline_reason"] == "Not a contract."
     assert second["docset_id"] is None
     for cls in (first, second):
         assert cls["docset_created"] is False

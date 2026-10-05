@@ -1709,7 +1709,12 @@ The flag takes an optional `MODE`:
 > what `existing-forced` means now: every file was assigned and `decision`
 > was always `"existing"`. `existing` can now return `decision: "none"` with
 > `docset_id: null`. Callers that relied on forced assignment should switch
-> to `existing-forced`.
+> to `existing-forced`. It also changes cost: `existing` against a
+> one-DocSet workspace used to make no LLM call, and now makes one per file
+> (declining is a possible answer, so the model has to look). A file whose
+> pages failed to render, which used to be assigned there, now gets
+> `classification.error` instead. `existing-forced` keeps the old
+> no-call path for a single DocSet.
 
 Use `existing` when the workspace's DocSets are curated and an ingest run
 must not grow new ones — otherwise one odd file anchors a one-document
@@ -1773,7 +1778,7 @@ The LLM is forced to pick exactly one of two tools:
 `--auto-classify existing` swaps `create_new_docset` for
 `no_matching_docset(reason)`: the LLM assigns when a DocSet is the new
 file's document type, and otherwise declines, giving `decision: "none"` and
-a one-sentence `reason`. Fit is judged by each DocSet's description, or by
+a one-sentence `decline_reason`. Fit is judged by each DocSet's description, or by
 its name alone when it has none. Key questions only break ties between
 DocSets that both fit, so a DocSet created with just a `--name` is still a
 candidate. The model is called even when the workspace holds a single DocSet,
@@ -1811,9 +1816,16 @@ The `classification` payload block:
     "What is the invoice total?",
     "What is the invoice date?"
   ],
+  "decline_reason": null,
   "error": null
 }
 ```
+
+`docset_id` is set only once the file is actually stored in that DocSet, so
+a block with an `error` and a non-null `docset_id` means the assignment
+landed and a later step failed; a `null` one means the file is in no DocSet.
+If a newly created DocSet can't take the file, the DocSet is deleted again
+rather than left behind empty.
 
 `docset_key_questions` echoes the assigned DocSet's `key_questions`
 (empty list for DocSets created without them). When `decision`
@@ -1822,19 +1834,22 @@ persisted on the freshly-created DocSet.
 
 Under `--auto-classify existing` `decision` is never `"new"`. When no
 DocSet fits it is `"none"`, the File is left unassigned, no `extraction`
-block is added, the DocSet fields stay empty, and `reason` carries the
-LLM's one-sentence explanation (`null` if it gave none):
+block is added, the DocSet fields stay empty, and `decline_reason` carries
+the LLM's one-sentence explanation. `decline_reason` is present on every
+performed block and `null` unless `decision` is `"none"`; a decline that
+comes back without a reason is treated as a malformed response
+(`CLASSIFICATION_FAILED` in `error`), so a `"none"` always says why:
 
 ```json
 "classification": {
   "performed": true,
   "model": "gemini/gemini-flash-lite-latest",
   "decision": "none",
-  "reason": "This is a commercial lease, not a vendor invoice or a safety datasheet.",
   "docset_id": null,
   "docset_created": false,
   "docset_name": null,
   "docset_key_questions": [],
+  "decline_reason": "This is a commercial lease, not a vendor invoice or a safety datasheet.",
   "error": null
 }
 ```
