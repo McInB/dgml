@@ -628,6 +628,12 @@ Field rules:
   its tier; when unset, litellm uses its per-provider env var.
 - `max_tool_iters` — optional positive int, default 20. Cap on
   `get_page_words` tool calls per extraction.
+- `values_reasoning_effort` — optional, default `"medium"`. The reasoning budget
+  of the value-extraction call: one of `"none"`, `"minimal"`, `"low"`,
+  `"medium"`, `"high"`, `"xhigh"` (passed to the provider through litellm), or
+  `"default"` to send no reasoning effort and take the provider's own default.
+  It is the largest cost and latency dial on extraction, and the right setting
+  differs by model. Location grounding is not affected.
 
 ### `generation` (required for `dgml docset generate`)
 

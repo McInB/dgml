@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -34,11 +35,13 @@ from dgml_core.errors import (
 )
 from dgml_core.extraction_schema import parse_rnc
 from dgml_core.extraction_xml import dgml_xml_to_values
+from dgml_core.files import FileStore
 from dgml_core.grounded import (
     _SCHEMA_TREE_MAX_DEPTH,
     DEFAULT_MAX_TOOL_ITERS,
     GroundedConfig,
     _field_node_schema,
+    _pdf_bytes,
     _submit_schema_tool,
     _to_page_pixels,
     extract_values,
@@ -303,6 +306,47 @@ def test_load_config_defaults(workspace: Workspace) -> None:
     assert config.schema_api_key_env is None
     assert config.values_api_key_env is None
     assert config.max_tool_iters == DEFAULT_MAX_TOOL_ITERS
+    # Unset, the values reasoning effort is the module's measured default.
+    assert config.values_reasoning_effort == "medium"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("low", "low"),
+        ("high", "high"),
+        ("none", "none"),  # litellm's own value: sent, asks the provider for no thinking
+        ("default", None),  # send no reasoning effort at all
+    ],
+)
+def test_load_config_reads_values_reasoning_effort(
+    workspace: Workspace, raw: str, expected: str | None
+) -> None:
+    _write_grounded_config(
+        workspace,
+        {
+            "schema_model": DEFAULT_SCHEMA_MODEL,
+            "values_model": DEFAULT_VALUES_MODEL,
+            "values_reasoning_effort": raw,
+        },
+    )
+    assert load_grounded_config(workspace).values_reasoning_effort == expected
+
+
+@pytest.mark.parametrize("raw", ["turbo", "", "Low", 3, True])
+def test_load_config_rejects_unknown_values_reasoning_effort(
+    workspace: Workspace, raw: object
+) -> None:
+    _write_grounded_config(
+        workspace,
+        {
+            "schema_model": DEFAULT_SCHEMA_MODEL,
+            "values_model": DEFAULT_VALUES_MODEL,
+            "values_reasoning_effort": raw,
+        },
+    )
+    with pytest.raises(GroundedConfigInvalid, match="values_reasoning_effort"):
+        load_grounded_config(workspace)
 
 
 def test_load_config_rejects_empty_api_key_env(workspace: Workspace) -> None:
@@ -671,6 +715,80 @@ def test_lower_values_budget_does_not_reach_location_grounding(workspace: Worksp
     assert m.call_count == 2
     assert m.call_args_list[0].kwargs["reasoning_effort"] == "medium"
     assert m.call_args_list[1].kwargs["reasoning_effort"] == "high"
+
+
+def _extract_with_grounding_call(workspace: Workspace, config: GroundedConfig) -> list[Any]:
+    """One extraction whose text phase 2 cannot match, so both LLM calls run:
+    value extraction (phase 1) and location grounding (phase 3). Returns the
+    two ``litellm.completion`` calls."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)  # only contains "Hello", "world"
+    _seed_page_image(workspace, fid, 1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Goodnight", "locations": [{"page_number": 1}]}}
+    phase3_args = {"locations": [{"id": "a", "bounding_boxes": [[100, 56, 200, 76]]}]}
+    with patch(
+        "litellm.completion",
+        side_effect=[
+            _tool_call_response("submit_values", {"values": phase1_values}, call_id="p1"),
+            _tool_call_response("submit_locations", phase3_args, call_id="p3"),
+        ],
+    ) as m:
+        extract_values(workspace, ds_id, fid, config=config)
+    assert m.call_count == 2
+    return list(m.call_args_list)
+
+
+def test_configured_values_effort_reaches_value_extraction_only(workspace: Workspace) -> None:
+    """``values_reasoning_effort`` sets the budget of the value-extraction call
+    and nothing else: location grounding keeps the module default. A Gemini
+    values model makes both calls observable (Anthropic drops the setting on
+    the forced grounding call either way)."""
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model=DEFAULT_VALUES_MODEL,
+        values_reasoning_effort="low",
+    )
+    phase1, phase3 = _extract_with_grounding_call(workspace, config)
+    assert phase1.kwargs["reasoning_effort"] == "low"
+    assert phase3.kwargs["reasoning_effort"] == "high"
+
+
+def test_values_effort_default_sends_no_reasoning_effort(workspace: Workspace) -> None:
+    """``None`` (the config's ``"default"``) leaves the value-extraction budget
+    to the provider: the field is absent from that request, and still present
+    on location grounding, which this setting does not govern."""
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model=DEFAULT_VALUES_MODEL,
+        values_reasoning_effort=None,
+    )
+    phase1, phase3 = _extract_with_grounding_call(workspace, config)
+    assert "reasoning_effort" not in phase1.kwargs
+    assert phase3.kwargs["reasoning_effort"] == "high"
+
+
+def test_configured_values_effort_reaches_anthropic_value_extraction(
+    workspace: Workspace,
+) -> None:
+    """Value extraction runs with ``tool_choice`` auto, so an Anthropic values
+    model receives the configured effort too (the wrapper only drops it on a
+    forced tool call)."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    response = _tool_call_response("submit_values", {"values": phase1_values})
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model="anthropic/claude-sonnet-5",
+        values_reasoning_effort="low",
+    )
+    with patch("litellm.completion", return_value=response) as m:
+        extract_values(workspace, ds_id, fid, config=config)
+    assert m.call_args_list[0].kwargs["reasoning_effort"] == "low"
 
 
 def test_generate_schema_rejects_empty_file_list(workspace: Workspace) -> None:
@@ -2523,6 +2641,29 @@ def test_phase3_never_cached(workspace: Workspace) -> None:
         assert _cache_control_paths(call.kwargs["messages"]) == []
 
 
+def test_extract_values_refuses_a_stored_schema_whose_invariant_cannot_resolve(
+    workspace: Workspace,
+) -> None:
+    """A schema stored before the load-time check (written here around
+    ``set_schema``, which now refuses it) still reads back, but an extraction
+    with it fails before any model call instead of never checking the rule."""
+    from dgml_core.errors import SchemaInvalid
+
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    bad = _TITLE_RNC.replace("title =\n", "## Invariant: count(Missing)\ntitle =\n", 1)
+    assert bad != _TITLE_RNC
+    workspace.blobs.put_blob(layout.docset_extraction_schema_key(ds_id), bad.encode("utf-8"))
+    assert DocSetStore(workspace).get_schema(ds_id) == bad
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion") as completion:
+        with pytest.raises(SchemaInvalid, match="names no collection"):
+            extract_values(workspace, ds_id, fid, config=config)
+    assert completion.call_count == 0
+
+
 # ---------------------------------------------------------------------------
 # phase 3 and a page the file does not have (dgml-io/dgml#155)
 # ---------------------------------------------------------------------------
@@ -2884,3 +3025,46 @@ def test_extract_values_repeats_the_latest_conversion_error(workspace: Workspace
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with pytest.raises(ConversionFailed, match=r"converting it failed: second attempt$"):
         extract_values(workspace, ds_id, fid, config=config)
+
+
+def test_pdf_bytes_reads_a_source_stored_with_an_uppercase_suffix(
+    workspace: Workspace, sample_pdf: Path
+) -> None:
+    """`file add` lowercases the suffix to validate a source, so `INVOICE.PDF`
+    is accepted as a PDF and stored under that name; the extraction lookup
+    used to match the stored key against `.pdf` case-sensitively and refuse
+    the file as having no source PDF."""
+    upper = sample_pdf.with_name("INVOICE.PDF")
+    upper.write_bytes(sample_pdf.read_bytes())
+    record = FileStore(workspace).add(upper).record
+    assert record.original_filename == "INVOICE.PDF"
+
+    assert _pdf_bytes(workspace, record.id) == upper.read_bytes()
+
+    # The negative side is unchanged: a record whose only blob is not a PDF
+    # under any casing still has no source PDF.
+    _seed_file(workspace, "f2bbbbbbbbbb", filename="doc.docx")
+    with pytest.raises(FileNotFound, match=r"file 'f2bbbbbbbbbb' has no source PDF$"):
+        _pdf_bytes(workspace, "f2bbbbbbbbbb")
+
+
+def test_pdf_bytes_reads_the_pdf_converted_from_a_source(workspace: Workspace) -> None:
+    """A convertible source's PDF is the `<stem>.pdf` sibling `file add` persists."""
+    fid = "f3cccccccccc"
+    _seed_file(workspace, fid, filename="report.docx", pdf_bytes=b"the docx")
+    workspace.blobs.put_blob(layout.file_pdf_key(fid, "report.docx"), b"%PDF converted")
+
+    assert _pdf_bytes(workspace, fid) == b"%PDF converted"
+
+
+def test_pdf_bytes_does_not_read_another_pdf_under_the_file_prefix(workspace: Workspace) -> None:
+    """The PDF is read only at its derived key. A filename is not unique in the
+    workspace, so a PDF found elsewhere under the file's prefix is not taken
+    for it: the file has no source PDF."""
+    fid = "f4dddddddddd"
+    _seed_file(workspace, fid, filename="doc.pdf")
+    workspace.blobs.delete_blobs(layout.file_source_key(fid, "doc.pdf"))
+    workspace.blobs.put_blob(layout.file_source_key(fid, "other.pdf"), b"%PDF other")
+
+    with pytest.raises(FileNotFound, match=r"file 'f4dddddddddd' has no source PDF$"):
+        _pdf_bytes(workspace, fid)

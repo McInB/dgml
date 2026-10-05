@@ -6,7 +6,15 @@ flag-driven (no interactive prompts) and idempotent where reasonable.
 
 ## Conventions
 
-- **stdout** carries the success payload as a JSON object.
+- **stdout** carries the success payload as a JSON object. When stdout or
+  stderr is a pipe or a file it is written as UTF-8 whatever the locale, and
+  even when `PYTHONIOENCODING` names another encoding, so a wrapper that
+  captures either must decode it as UTF-8. A terminal keeps its own encoding.
+  A character a stream cannot encode (or a lone surrogate, e.g. from a file
+  name) never fails the command: in `--format json` output it is written as a
+  JSON `\u` escape, so the payload stays valid JSON; in `--format text`,
+  `--help` and stderr diagnostics it is written as a Python backslash escape
+  such as `→`.
 - **stderr** carries error envelopes:
   ```json
   { "error": { "code": "FILE_NOT_FOUND", "message": "..." } }
@@ -1208,8 +1216,8 @@ Two formats are involved:
 
 The LLM is configurable like every other model-using command — via the
 `grounded` section of the workspace `config.toml` (`schema_model`,
-`values_model`, API keys, `max_tool_iters`), with per-call overrides on the
-commands below.
+`values_model`, `values_reasoning_effort`, API keys, `max_tool_iters`), with
+per-call overrides on the commands below.
 
 ### `dgml extraction generate-schema <docset_id> [--from-file ID ...] [--schema-model M]`
 
@@ -1291,7 +1299,7 @@ fields, prompts for where to find one value. Returns
 Return the DocSet's extraction guidance as `{docset_id, guidance}`. Errors
 `GUIDANCE_NOT_FOUND` if none is set.
 
-### `dgml extraction extract <docset_id> <file_id> [--values-model M]`
+### `dgml extraction extract <docset_id> <file_id> [--values-model M] [--values-effort E]`
 
 Extract values from a file against the DocSet schema and write a `dg:extraction`
 element into the file's core `<stem>.dgml.xml`. Runs a three-phase pipeline
@@ -1300,6 +1308,11 @@ a generated document tree the extraction is added alongside it
 (`mode: full-extraction`); otherwise a minimal core file is created
 (`mode: extraction`). `extraction_stats.json` is written only under the global
 `--debug` flag. Errors `SCHEMA_NOT_FOUND` if the DocSet has no schema.
+
+`--values-effort` overrides `grounded.values_reasoning_effort` for this call:
+`none`, `minimal`, `low`, `medium` (the default), `high`, `xhigh`, or `default`
+to send no reasoning effort and take the provider's own default. Any other value
+is refused before the model is called.
 
 ```json
 {
@@ -1407,6 +1420,18 @@ values are never adjusted to satisfy one — and results land in
 `extraction_stats.json` as `invariants_checked` / `invariants_violated`, with
 each violation's text under `invariant_violations`. A field or collection that
 wasn't extracted is skipped rather than counted, since every field is nullable.
+
+The path is checked against the schema when the schema is stored
+(`set-schema`) and when an extraction runs with it: a collection the schema
+does not have, a path that ends at a field, a sum leaf its entries do not
+carry (or that is not a value field), or a path that runs through a
+collection (the second limit below) is a `SCHEMA_INVALID` error naming what
+the schema does have, rather than an annotation that is accepted and then
+silently never checked. A schema stored before this check still reads back;
+`set-schema` with the corrected path is the remedy. Under a schema with one
+root the path may leave that root out (`sum(LineItems[].LineAmount)` on a
+`CommercialInvoice` schema reads as `CommercialInvoice.LineItems`); with
+several roots it must start at one.
 
 Two limits are deliberate and decide whether a rule is expressible: an
 invariant is **one term** (`sum(A[].x) + sum(B[].y)` has no form — a rule

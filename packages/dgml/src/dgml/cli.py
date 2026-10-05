@@ -20,6 +20,7 @@ non-interactive flag-driven commands.
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import hashlib
 import json
@@ -94,7 +95,12 @@ _log = logging.getLogger(__name__)
 def _emit(payload: dict[str, Any], fmt: str, stream: IO[str] | None = None) -> None:
     out = stream or sys.stdout
     if fmt == "json":
-        json.dump(payload, out, indent=2, ensure_ascii=False)
+        # A stream on another encoding (a terminal on a code page) gets ASCII
+        # with JSON escapes, so the payload stays valid JSON there too; a
+        # UTF-8 stream, or one with no encoding of its own, gets the characters.
+        encoding = getattr(out, "encoding", None)
+        escape = isinstance(encoding, str) and not _is_utf8(encoding)
+        json.dump(payload, out, indent=2, ensure_ascii=escape)
         out.write("\n")
     else:
         out.write(_render_text(payload))
@@ -1261,7 +1267,66 @@ def _configure_logging(args: argparse.Namespace) -> None:
         log.setLevel(level)
 
 
+def _is_utf8(encoding: object) -> bool:
+    """Whether ``encoding`` (a stream's ``encoding`` attribute) names UTF-8."""
+    if not isinstance(encoding, str):
+        return False
+    try:
+        return codecs.lookup(encoding).name == "utf-8"
+    except LookupError:
+        return False
+
+
+def _configure_stream_encodings() -> None:
+    """Never let a stream's encoding kill a command.
+
+    Help text, error envelopes and JSON payloads carry characters outside
+    cp1252. An interactive Windows console already gets UTF-8 (Python writes
+    to it through the wide console API), but a redirected or piped stream
+    gets the locale encoding, and its default ``strict`` handler turned the
+    first such character into a ``UnicodeEncodeError`` from inside argparse:
+    ``dgml --help | more`` and every wrapper that captured the output crashed
+    on a stock Windows machine.
+
+    A piped or redirected stdout or stderr gets UTF-8, since its reader is a
+    program that wants the payload intact. A pipe or file gets UTF-8 even
+    when ``PYTHONIOENCODING`` names another encoding; a terminal keeps its
+    own. That is the contract for wrappers: what they capture is always
+    UTF-8, whatever the locale or the environment says. A terminal keeps its
+    code page, since UTF-8 bytes would show as mojibake there. Every stream,
+    including one that is UTF-8 already, gets ``backslashreplace``, so a
+    character the encoding lacks, or a lone surrogate from a file name,
+    prints as an escape rather than crashing or silently becoming ``?``;
+    :func:`_emit` keeps JSON valid on a non-UTF-8 stream by escaping
+    non-ASCII itself, and a lone surrogate on a UTF-8 stream lands as a
+    backslash escape that JSON accepts. A stream without ``reconfigure`` is
+    left alone; one whose ``isatty`` is missing or fails is treated as
+    redirected. stdin is not touched. ``main`` is the console
+    entry point, so the change lasts for the process; a host that calls
+    ``main()`` in-process on its own streams will find them reconfigured.
+    ``PYTHONUTF8=1`` has the same effect and stays the way to get it for
+    other tools in the same shell.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        utf8 = _is_utf8(getattr(stream, "encoding", None))
+        try:
+            tty = bool(stream.isatty())
+        except (AttributeError, ValueError, OSError):
+            tty = False
+        try:
+            if tty or utf8:
+                reconfigure(errors="backslashreplace")
+            else:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (ValueError, OSError):
+            pass  # a closed or detached stream; nothing to fix
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_stream_encodings()
     parser = _build_parser()
     args = parser.parse_args(argv)
     fmt: str = args.format
@@ -2580,6 +2645,14 @@ def _add_extraction_subparsers(
         default=None,
         help="Override grounded.values_model for this call (LiteLLM model string).",
     )
+    ex_extract.add_argument(
+        "--values-effort",
+        default=None,
+        help=(
+            "Override grounded.values_reasoning_effort for this call: none, minimal, "
+            "low, medium, high, xhigh, or 'default' to send no reasoning effort."
+        ),
+    )
 
     ex_get_values = extraction.add_parser(
         "get-values",
@@ -2628,7 +2701,12 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
 
     from dgml_core.extraction_schema import parse_rnc, rnc_to_json_schema
     from dgml_core.extraction_xml import dgml_xml_to_values
-    from dgml_core.grounded import extract_values, generate_schema, load_grounded_config
+    from dgml_core.grounded import (
+        extract_values,
+        generate_schema,
+        load_grounded_config,
+        parse_values_reasoning_effort,
+    )
 
     store = DocSetStore(ws)
     sub = args.extraction_command
@@ -2698,6 +2776,13 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         config = load_grounded_config(ws)
         if args.values_model:
             config = replace(config, values_model=args.values_model)
+        if args.values_effort is not None:
+            config = replace(
+                config,
+                values_reasoning_effort=parse_values_reasoning_effort(
+                    args.values_effort, source="--values-effort"
+                ),
+            )
         result = extract_values(
             ws,
             args.docset_id,
