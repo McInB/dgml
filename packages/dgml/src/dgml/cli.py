@@ -1320,9 +1320,8 @@ _PROVIDER_CHOICES = "|".join(sorted(PROVIDER_MODELS))
 
 # How to go beyond the family-only config `dgml init` writes.
 _INIT_OVERRIDE_HINT = (
-    '[dgml init] override a single tier ([models] advanced = "...") or a task '
-    '(e.g. [generation] label_model = "..."); switch families with '
-    f"dgml init --provider <{_PROVIDER_CHOICES}>."
+    '[dgml init] override a task with its own field (e.g. [generation] label_model = "..."); '
+    f"switch families with dgml init --provider <{_PROVIDER_CHOICES}>."
 )
 
 

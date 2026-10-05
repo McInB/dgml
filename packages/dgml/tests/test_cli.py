@@ -151,7 +151,7 @@ def test_init_forced_provider_reports_keys_and_override_hint(
     assert rc == 0
     report = caplog.text
     assert "ANTHROPIC_API_KEY and GEMINI_API_KEY" in report
-    assert "override a single tier" in report
+    assert "override a task" in report
     assert "--provider <" in report
 
 
