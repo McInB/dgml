@@ -686,12 +686,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "After adding, use the configured vision LLM to assign the file "
             "to a DocSet. MODE is 'existing-or-new' (the default when the flag "
             "is passed bare): assign to an existing DocSet if one fits, "
-            "otherwise create a new one. 'existing' never creates a DocSet — "
-            "the LLM must pick the best-fitting existing one, and is required "
-            "to choose even when the fit is poor. Use 'existing' ONLY when you "
-            "already know the file belongs in one of the workspace's DocSets: "
-            "an off-type document is assigned to the closest DocSet anyway, "
-            "not flagged. With no DocSets to choose from it is an error "
+            "otherwise create a new one. 'existing' never creates a DocSet: it "
+            "assigns to an existing DocSet if one fits, otherwise leaves the "
+            "file unassigned and reports decision 'none' (no auto-extraction). "
+            "With no DocSets to choose from it is an error "
             "(NO_EXISTING_DOCSETS, exit 1). Note MODE is consumed greedily, so "
             "put PATH before this flag (or pass MODE explicitly). Requires a "
             "'classification' section in <workspace>/config.toml; a missing or "
@@ -4056,9 +4054,10 @@ def _gather_pdfs(directory: Path, *, recursive: bool, suffixes: frozenset[str]) 
 def _require_existing_docsets(docsets: list[DocSet]) -> None:
     """Guard the ``--auto-classify existing`` precondition.
 
-    That mode must place the file in an existing DocSet, so an empty workspace
-    admits no outcome at all. Raising beats degrading to "unassigned", which is
-    the very thing the mode is chosen to avoid.
+    That mode can only route into existing DocSets, so in an empty workspace
+    there is nothing to ask the LLM: every file would come back unassigned.
+    Raising up front surfaces the misconfiguration instead of a run of
+    ``"none"`` decisions.
     """
     if not docsets:
         raise NoExistingDocSets(
@@ -4182,10 +4181,9 @@ def _file_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         config: ClassificationConfig | None = None
         docsets: list[DocSet] | None = None
         if classify_mode is not None and not allow_new:
-            # Assign-only mode has to land the file in an existing DocSet, so
-            # both its preconditions are checked *before* ingesting: erroring
-            # out after the add would leave behind exactly the unassigned file
-            # this mode exists to prevent. Same order as the bulk path.
+            # Existing-only mode's preconditions are checked *before*
+            # ingesting, so a misconfigured request errors out without leaving
+            # a stray file behind. Same order as the bulk path.
             config = load_classification_config(ws)
             docsets = DocSetStore(ws).list_all()
             _require_existing_docsets(docsets)
@@ -4237,9 +4235,10 @@ def _auto_classify(
     Returns the ``classification`` block embedded in ``dgml file add`` output.
 
     ``allow_new=False`` (``--auto-classify existing``) forbids creating a
-    DocSet and always assigns: the LLM is given only the assign tool and must
-    return the best-fitting DocSet even when the fit is poor. With no DocSets
-    to choose from the mode has no possible outcome, so it is a **hard** error
+    DocSet: the LLM either assigns the file to an existing DocSet that fits or
+    declines, in which case the file is left unassigned (and not extracted)
+    and the block reports ``"decision": "none"``. With no DocSets to choose
+    from there is nothing to ask, so it is a **hard** error
     (``NO_EXISTING_DOCSETS``) — a precondition on the request rather than a
     failure of the classification call. Callers check it via
     :func:`_require_existing_docsets` before adding any file; the re-raise
@@ -4290,8 +4289,7 @@ def _auto_classify(
         )
     except NoExistingDocSets:
         # A precondition on the request, not a failure of the call — callers
-        # check it before ingesting anything. Kept hard even if one didn't:
-        # soft-failing would leave the unassigned file this mode prevents.
+        # check it before ingesting anything. Kept hard even if one didn't.
         raise
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
@@ -4335,6 +4333,10 @@ def _auto_classify(
                 docset_name=created.name,
                 docset_key_questions=list(created.key_questions),
             )
+        elif decision.decision == "none":
+            # No existing DocSet fits: leave the file unassigned so the
+            # caller's own unknown-type handling runs.
+            block["decision"] = "none"
         else:  # unreachable — classify_file returns only these three
             raise AssertionError(f"unhandled classification decision: {decision.decision}")
     except DgmlError as exc:
