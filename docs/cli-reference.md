@@ -1398,9 +1398,15 @@ payloads. Chunking is strictly that escalation: an ordinary run is never
 offered the continuation tool or the `done` flag, so it can't split output
 that fits in one call. `extraction_stats.json` records both under
 `phases.phase1`: `chunk_calls` (1 = ordinary single submission),
-`truncated_retries`, and `envelope_repairs`. The last counts `submit_values`
+`truncated_retries`, `envelope_repairs`, and `no_tool_call_retries`.
+`envelope_repairs` counts `submit_values`
 calls that arrived with the tool's argument envelope repeated one level down,
 or serialized as a JSON string, and were unwrapped before the tree was read.
+`no_tool_call_retries` counts phase-1 turns that ended with plain text and no
+tool call: each is answered with a reminder to call `submit_values` and the
+model is asked again, the last of two retries with that tool forced. A third
+text-only turn fails the run, and the error quotes the reply's
+`finish_reason` and opening text.
 A submission of which the vocabulary keeps nothing (no key names a schema
 root, or every named root carries a value of the wrong kind) is refused as an
 extraction error rather than written as an empty result; an empty tree, or

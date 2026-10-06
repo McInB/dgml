@@ -37,6 +37,7 @@ from dgml_core.extraction_schema import parse_rnc
 from dgml_core.extraction_xml import dgml_xml_to_values
 from dgml_core.files import FileStore
 from dgml_core.grounded import (
+    _MAX_NO_TOOL_CALL_RETRIES,
     _SCHEMA_TREE_MAX_DEPTH,
     DEFAULT_MAX_TOOL_ITERS,
     GroundedConfig,
@@ -208,9 +209,11 @@ def _truncated_response() -> SimpleNamespace:
     )
 
 
-def _no_tool_call_response() -> SimpleNamespace:
-    msg = SimpleNamespace(content="I have no tools.", tool_calls=[])
-    return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+def _no_tool_call_response(
+    content: str | None = "I have no tools.", finish_reason: str | None = None
+) -> SimpleNamespace:
+    msg = SimpleNamespace(content=content, tool_calls=[])
+    return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason=finish_reason)])
 
 
 # ---------------------------------------------------------------------------
@@ -1360,6 +1363,7 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
         "chunk_calls",
         "truncated_retries",
         "envelope_repairs",
+        "no_tool_call_retries",
         "cost_usd",
         "prompt_tokens",
         "completion_tokens",
@@ -1370,6 +1374,7 @@ def test_extract_values_writes_stats_file(workspace: Workspace) -> None:
     assert stats["phases"]["phase1"]["chunk_calls"] == 1
     assert stats["phases"]["phase1"]["truncated_retries"] == 0
     assert stats["phases"]["phase1"]["envelope_repairs"] == 0
+    assert stats["phases"]["phase1"]["no_tool_call_retries"] == 0
     assert set(stats["phases"]["phase2"].keys()) == {"duration_s"}
     assert set(stats["phases"]["phase3"].keys()) == {
         "duration_s",
@@ -1416,9 +1421,84 @@ def test_extract_values_no_tool_call_errors(workspace: Workspace) -> None:
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
 
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
-    with patch("litellm.completion", return_value=_no_tool_call_response()):
-        with pytest.raises(ValuesExtractionFailed):
+    reply = _no_tool_call_response("Here are the values: title is Hello world.", "stop")
+    with patch("litellm.completion", return_value=reply) as mock_completion:
+        with pytest.raises(ValuesExtractionFailed) as excinfo:
             extract_values(workspace, ds_id, fid, config=config)
+
+    # The first reply plus one retry per allowed text-only turn, then the error
+    # names the stop reason and quotes the reply so the cause is visible.
+    assert mock_completion.call_count == 1 + _MAX_NO_TOOL_CALL_RETRIES
+    message = str(excinfo.value)
+    assert "model returned no tool call" in message
+    assert f"after {_MAX_NO_TOOL_CALL_RETRIES} retries" in message
+    assert "finish_reason='stop'" in message
+    assert "title is Hello world" in message
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
+    assert stats["outcome"] == "error"
+    assert stats["phases"]["phase1"]["no_tool_call_retries"] == _MAX_NO_TOOL_CALL_RETRIES
+
+
+def test_extract_values_retries_after_a_text_only_reply(workspace: Workspace) -> None:
+    """A reply with no tool call is answered with a reminder and the model is
+    asked again under auto tool choice; a submission on that turn completes."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    responses = [
+        _no_tool_call_response("The title is Hello world.", "stop"),
+        _tool_call_response("submit_values", {"values": phase1_values}),
+    ]
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=responses) as mock_completion:
+        extract_values(workspace, ds_id, fid, config=config)
+
+    assert mock_completion.call_count == 2
+    _, retry_kwargs = mock_completion.call_args_list[1]
+    assert "tool_choice" not in retry_kwargs
+    # The history list is shared and grows after the call, so read the retry
+    # turns by position after the system + user prefix rather than from the end.
+    reply, nudge = retry_kwargs["messages"][2:4]
+    assert reply == {"role": "assistant", "content": "The title is Hello world."}
+    assert nudge["role"] == "user"
+    assert "submit_values" in nudge["content"]
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
+    assert stats["outcome"] == "ok"
+    assert stats["phases"]["phase1"]["no_tool_call_retries"] == 1
+    assert workspace.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc"))
+
+
+def test_extract_values_forces_submit_values_on_the_last_retry(workspace: Workspace) -> None:
+    """The last allowed retry forces ``submit_values``; an empty reply is not
+    kept in the history (some providers reject an empty assistant turn)."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    responses = [
+        *[_no_tool_call_response(None) for _ in range(_MAX_NO_TOOL_CALL_RETRIES)],
+        _tool_call_response("submit_values", {"values": phase1_values}),
+    ]
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=responses) as mock_completion:
+        extract_values(workspace, ds_id, fid, config=config)
+
+    calls = mock_completion.call_args_list
+    assert len(calls) == 1 + _MAX_NO_TOOL_CALL_RETRIES
+    for _, kwargs in calls[:-1]:
+        assert "tool_choice" not in kwargs
+    _, forced_kwargs = calls[-1]
+    assert forced_kwargs["tool_choice"]["function"]["name"] == "submit_values"
+    assert not any(
+        m["role"] == "assistant" and not m.get("tool_calls") for m in forced_kwargs["messages"]
+    )
 
 
 def test_extract_values_unknown_tool_errors(workspace: Workspace) -> None:

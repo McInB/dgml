@@ -52,6 +52,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -205,11 +206,24 @@ _DEFAULT_TIMEOUT_SECONDS = 1800
 # across instances of the document kind, few enough to keep cost bounded.
 DEFAULT_SCHEMA_SAMPLE_SIZE = 3
 
+logger = logging.getLogger(__name__)
+
 _TOOL_GET_PAGE_WORDS = "get_page_words"
 _TOOL_SUBMIT_SCHEMA = "submit_schema"
 _TOOL_SUBMIT_VALUES = "submit_values"
 _TOOL_APPEND_ENTRIES = "append_entries"
 _TOOL_SUBMIT_LOCATIONS = "submit_locations"
+
+# Phase-1 turns that may end with plain text (no tool call) before the run
+# fails. Under tool_choice="auto" a model sometimes answers in prose, asks a
+# question, or writes the submission as JSON text instead of calling the
+# tool. The first such turn is answered with a reminder to call
+# submit_values; the last retry forces that tool outright. Both count
+# against max_tool_iters.
+_MAX_NO_TOOL_CALL_RETRIES = 2
+
+# How much of a text-only reply the error message quotes.
+_NO_TOOL_CALL_REPLY_PREVIEW_CHARS = 500
 
 
 # ---- Config ---------------------------------------------------------------
@@ -738,7 +752,7 @@ def extract_values(
     phase1_tool_schema_mode = "inlined"
     phase1_chunk_calls = 0
     phase1_truncated_retries = 0
-    phase1_counters = {"envelope_repairs": 0}
+    phase1_counters = {"envelope_repairs": 0, "no_tool_call_retries": 0}
 
     try:
         # --- Phase 1: text + page numbers, no bboxes (LLM) ----------
@@ -1027,6 +1041,7 @@ def extract_values(
                     phase1_chunk_calls=phase1_chunk_calls,
                     phase1_truncated_retries=phase1_truncated_retries,
                     phase1_envelope_repairs=phase1_counters["envelope_repairs"],
+                    phase1_no_tool_call_retries=phase1_counters["no_tool_call_retries"],
                 )
         except Exception:
             pass
@@ -1095,6 +1110,7 @@ def _write_extraction_stats(
     phase1_chunk_calls: int,
     phase1_truncated_retries: int,
     phase1_envelope_repairs: int,
+    phase1_no_tool_call_retries: int,
 ) -> None:
     """Write ``extraction_stats.json`` into the file's marker directory.
 
@@ -1120,6 +1136,9 @@ def _write_extraction_stats(
                 # submit_values calls whose envelope had to be repaired before
                 # the tree could be read (see _repair_submit_values_args).
                 "envelope_repairs": phase1_envelope_repairs,
+                # turns that ended with no tool call and were retried with a
+                # reminder (the last one with submit_values forced).
+                "no_tool_call_retries": phase1_no_tool_call_retries,
                 **phase1_totals,
             },
             "phase2": {"duration_s": phase2_duration},
@@ -1993,8 +2012,9 @@ def _run_extract_loop(
     so the surrounding ``extract_values`` records a single usage row across
     both phases, and ``counters["envelope_repairs"]`` for every submission
     whose argument envelope had to be unwrapped first (see
-    :func:`_repair_submit_values_args`, which decides against ``vocab``);
-    both survive a loop that fails after the repair.
+    :func:`_repair_submit_values_args`, which decides against ``vocab``),
+    and ``counters["no_tool_call_retries"]`` for every turn that ended with
+    no tool call and was retried; all survive a loop that fails afterwards.
 
     Two submission protocols:
 
@@ -2015,6 +2035,12 @@ def _run_extract_loop(
     A turn that stops with ``finish_reason == "length"`` raises
     :class:`_OutputTruncated` so the caller can retry with an explicit
     chunking directive.
+
+    A turn that ends with no tool call is retried up to
+    :data:`_MAX_NO_TOOL_CALL_RETRIES` times: the reply is kept in the
+    history, a reminder to call ``submit_values`` follows it, and the last
+    retry forces that tool. Past that the run fails with the reply's
+    ``finish_reason`` and opening text in the error, so the cause is visible.
     """
     # Phase 1 uses tool_choice="auto" (the default in call_with_tools) so
     # the model can call get_page_words between turns. With auto choice
@@ -2038,6 +2064,9 @@ def _run_extract_loop(
     tool_calls_run = 0
     chunk_calls = 0
     acc_args: dict[str, Any] | None = None  # accumulated submit_values args
+    no_tool_call_retries = 0
+    # Set for the one call after the last allowed text-only turn.
+    tool_choice: dict[str, Any] | None = None
 
     def _ack(call_id: str, name: str, payload: dict[str, Any]) -> None:
         messages.append(
@@ -2055,11 +2084,14 @@ def _run_extract_loop(
             # per-file PDF are byte-identical for every file in the docset, so
             # each file after the first reads that prefix instead of re-sending
             # it. ``call_with_tools`` no-ops the marker for non-Anthropic models.
-            result = call_with_tools(llm_config, messages=messages, tools=tools, cache=True)
+            result = call_with_tools(
+                llm_config, messages=messages, tools=tools, tool_choice=tool_choice, cache=True
+            )
         except Exception as exc:
             raise ValuesExtractionFailed(
                 f"extraction call failed: {type(exc).__name__}: {exc}"
             ) from exc
+        tool_choice = None
 
         add_partial(totals, result.usage)
 
@@ -2080,10 +2112,35 @@ def _run_extract_loop(
             )
 
         if not result.tool_calls:
-            raise ValuesExtractionFailed(
-                "model returned no tool call; the run is required to end "
-                f"with a {_TOOL_SUBMIT_VALUES!r} call carrying the final values"
+            if no_tool_call_retries >= _MAX_NO_TOOL_CALL_RETRIES:
+                raise ValuesExtractionFailed(
+                    "model returned no tool call; the run is required to end "
+                    f"with a {_TOOL_SUBMIT_VALUES!r} call carrying the final values "
+                    f"(after {no_tool_call_retries} retries; last reply: "
+                    f"{_describe_text_reply(result.finish_reason, result.content)})"
+                )
+            no_tool_call_retries += 1
+            counters["no_tool_call_retries"] += 1
+            logger.info(
+                "file %s: phase-1 reply had no tool call (%s); retry %d of %d%s",
+                file_id,
+                _describe_text_reply(result.finish_reason, result.content),
+                no_tool_call_retries,
+                _MAX_NO_TOOL_CALL_RETRIES,
+                " with submit_values forced"
+                if no_tool_call_retries == _MAX_NO_TOOL_CALL_RETRIES
+                else "",
             )
+            # Keep the reply so the model sees what it said; an empty assistant
+            # turn is rejected by some providers, so it is dropped instead.
+            if isinstance(result.content, str) and result.content.strip():
+                messages.append({"role": "assistant", "content": result.content})
+            messages.append(
+                {"role": "user", "content": prompt(PromptKey.VALUES_PHASE1_NUDGE_SUBMIT)}
+            )
+            if no_tool_call_retries == _MAX_NO_TOOL_CALL_RETRIES:
+                tool_choice = {"type": "function", "function": {"name": _TOOL_SUBMIT_VALUES}}
+            continue
 
         messages.append(_serialize_assistant_message(result.message))
 
@@ -2169,6 +2226,16 @@ def _run_extract_loop(
         f"extraction exceeded max_tool_iters={max_tool_iters} "
         f"without producing a {_TOOL_SUBMIT_VALUES!r} call"
     )
+
+
+def _describe_text_reply(finish_reason: str | None, content: Any) -> str:
+    """Summarize a text-only model reply for an error message: its
+    ``finish_reason`` and the opening of its text, whitespace collapsed."""
+    text = " ".join(content.split()) if isinstance(content, str) else ""
+    if len(text) > _NO_TOOL_CALL_REPLY_PREVIEW_CHARS:
+        text = text[:_NO_TOOL_CALL_REPLY_PREVIEW_CHARS] + "..."
+    shown = json.dumps(text) if text else "no text"
+    return f"finish_reason={finish_reason!r}, {shown}"
 
 
 def _normalize_leaf_provenance(values: Any) -> None:
