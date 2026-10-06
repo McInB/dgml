@@ -1404,9 +1404,11 @@ calls that arrived with the tool's argument envelope repeated one level down,
 or serialized as a JSON string, and were unwrapped before the tree was read.
 `no_tool_call_retries` counts phase-1 turns that ended with plain text and no
 tool call: each is answered with a reminder to call `submit_values` and the
-model is asked again, the last of two retries with that tool forced. A third
-text-only turn fails the run, and the error quotes the reply's
-`finish_reason` and opening text.
+model is asked again, the last of two retries with that tool forced. A
+chunked run that already recorded part of its submission is told to continue
+with `append_entries` instead and is never forced, since a resent full tree
+would duplicate its entries. A third text-only turn fails the run, and the
+error quotes the reply's `finish_reason` and opening text.
 A submission of which the vocabulary keeps nothing (no key names a schema
 root, or every named root carries a value of the wrong kind) is refused as an
 extraction error rather than written as an empty result; an empty tree, or

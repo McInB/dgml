@@ -2039,8 +2039,11 @@ def _run_extract_loop(
     A turn that ends with no tool call is retried up to
     :data:`_MAX_NO_TOOL_CALL_RETRIES` times: the reply is kept in the
     history, a reminder to call ``submit_values`` follows it, and the last
-    retry forces that tool. Past that the run fails with the reply's
-    ``finish_reason`` and opening text in the error, so the cause is visible.
+    retry forces that tool. A chunked run that already recorded part of its
+    submission is reminded to continue with ``append_entries`` instead and
+    is never forced, since a resent full tree would duplicate its entries.
+    Past that the run fails with the reply's ``finish_reason`` and opening
+    text in the error, so the cause is visible.
     """
     # Phase 1 uses tool_choice="auto" (the default in call_with_tools) so
     # the model can call get_page_words between turns. With auto choice
@@ -2121,24 +2124,31 @@ def _run_extract_loop(
                 )
             no_tool_call_retries += 1
             counters["no_tool_call_retries"] += 1
+            # A chunked run that already recorded a done=false submission is
+            # mid-sequence: lists merge by concatenation, so a resent full tree
+            # would duplicate every entry already recorded. Point the model at
+            # append_entries instead, and never force a full submit_values.
+            continuing = chunked and acc_args is not None
+            force = no_tool_call_retries == _MAX_NO_TOOL_CALL_RETRIES and not continuing
             logger.info(
                 "file %s: phase-1 reply had no tool call (%s); retry %d of %d%s",
                 file_id,
                 _describe_text_reply(result.finish_reason, result.content),
                 no_tool_call_retries,
                 _MAX_NO_TOOL_CALL_RETRIES,
-                " with submit_values forced"
-                if no_tool_call_retries == _MAX_NO_TOOL_CALL_RETRIES
-                else "",
+                " with submit_values forced" if force else "",
             )
             # Keep the reply so the model sees what it said; an empty assistant
             # turn is rejected by some providers, so it is dropped instead.
             if isinstance(result.content, str) and result.content.strip():
                 messages.append({"role": "assistant", "content": result.content})
-            messages.append(
-                {"role": "user", "content": prompt(PromptKey.VALUES_PHASE1_NUDGE_SUBMIT)}
+            nudge = (
+                PromptKey.VALUES_PHASE1_NUDGE_CONTINUE
+                if continuing
+                else PromptKey.VALUES_PHASE1_NUDGE_SUBMIT
             )
-            if no_tool_call_retries == _MAX_NO_TOOL_CALL_RETRIES:
+            messages.append({"role": "user", "content": prompt(nudge)})
+            if force:
                 tool_choice = {"type": "function", "function": {"name": _TOOL_SUBMIT_VALUES}}
             continue
 

@@ -3299,6 +3299,62 @@ def test_run_extract_loop_keeps_the_repair_count_when_a_later_turn_fails(
     assert counters["envelope_repairs"] == 1
 
 
+def test_run_extract_loop_mid_chunk_text_reply_continues_without_forcing(
+    workspace: Workspace,
+) -> None:
+    """A text-only turn after a recorded ``done: false`` submission is told to
+    continue with ``append_entries`` and is never forced to ``submit_values``:
+    lists merge by concatenation, so a forced full resend would duplicate the
+    entries already recorded."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    counters = {"envelope_repairs": 0, "no_tool_call_retries": 0}
+    first_entry = {"A": {"text": "1"}}
+    second_entry = {"A": {"text": "2"}}
+    responses = [
+        _tool_call_response(
+            "submit_values",
+            {"values": {**_hello_title(), "Items": [first_entry]}, "done": False},
+            call_id="p1",
+        ),
+        *[_no_tool_call_response("Still working.") for _ in range(_MAX_NO_TOOL_CALL_RETRIES)],
+        _tool_call_response(
+            "append_entries",
+            {"path": "Items", "entries": [second_entry], "done": True},
+            call_id="p2",
+        ),
+    ]
+    with patch("litellm.completion", side_effect=responses) as mock_completion:
+        args, _, chunk_calls = _run_extract_loop(
+            workspace=workspace,
+            file_id=fid,
+            messages=[{"role": "user", "content": "extract"}],
+            tools=[],
+            model=DEFAULT_VALUES_MODEL,
+            api_key=None,
+            api_base=None,
+            max_tool_iters=6,
+            totals=_empty_totals(),
+            vocab=_TITLE_VOCAB,
+            counters=counters,
+            chunked=True,
+        )
+
+    for _, kwargs in mock_completion.call_args_list:
+        assert "tool_choice" not in kwargs
+    nudges = [
+        m["content"]
+        for m in mock_completion.call_args_list[-1][1]["messages"]
+        if m["role"] == "user" and m["content"] != "extract"
+    ]
+    assert len(nudges) == _MAX_NO_TOOL_CALL_RETRIES
+    assert all("append_entries" in n and "do not resubmit" in n for n in nudges)
+    assert args["values"]["Items"] == [first_entry, second_entry]
+    assert chunk_calls == 2
+    assert counters["no_tool_call_retries"] == _MAX_NO_TOOL_CALL_RETRIES
+
+
 def test_extract_values_records_the_phase1_duration_on_the_refusal(
     workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
