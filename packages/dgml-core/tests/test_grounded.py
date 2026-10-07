@@ -210,9 +210,12 @@ def _truncated_response() -> SimpleNamespace:
 
 
 def _no_tool_call_response(
-    content: str | None = "I have no tools.", finish_reason: str | None = None
+    content: str | None = "I have no tools.",
+    finish_reason: str | None = None,
+    *,
+    reasoning_content: str | None = None,
 ) -> SimpleNamespace:
-    msg = SimpleNamespace(content=content, tool_calls=[])
+    msg = SimpleNamespace(content=content, tool_calls=[], reasoning_content=reasoning_content)
     return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason=finish_reason)])
 
 
@@ -1414,13 +1417,23 @@ def test_extract_values_write_stats_false_suppresses_file(workspace: Workspace) 
     assert workspace.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc"))
 
 
+# Phase 1 leaves only Anthropic on auto tool choice, so the text-only retry
+# path is exercised with an Anthropic values model.
+ANTHROPIC_VALUES_MODEL = DEFAULT_SCHEMA_MODEL
+
+
+def _submit_hello_title() -> SimpleNamespace:
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    return _tool_call_response("submit_values", {"values": phase1_values})
+
+
 def test_extract_values_no_tool_call_errors(workspace: Workspace) -> None:
     fid = "f1aaaaaaaaaa"
     _seed_file(workspace, fid)
     _seed_page_text(workspace, fid, page=1)
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
 
-    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=ANTHROPIC_VALUES_MODEL)
     reply = _no_tool_call_response("Here are the values: title is Hello world.", "stop")
     with patch("litellm.completion", return_value=reply) as mock_completion:
         with pytest.raises(ValuesExtractionFailed) as excinfo:
@@ -1431,7 +1444,7 @@ def test_extract_values_no_tool_call_errors(workspace: Workspace) -> None:
     assert mock_completion.call_count == 1 + _MAX_NO_TOOL_CALL_RETRIES
     message = str(excinfo.value)
     assert "model returned no tool call" in message
-    assert f"after {_MAX_NO_TOOL_CALL_RETRIES} retries" in message
+    assert f"after {_MAX_NO_TOOL_CALL_RETRIES} retries on this attempt" in message
     assert "finish_reason='stop'" in message
     assert "title is Hello world" in message
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
@@ -1448,12 +1461,11 @@ def test_extract_values_retries_after_a_text_only_reply(workspace: Workspace) ->
     _seed_page_text(workspace, fid, page=1)
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
 
-    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
     responses = [
         _no_tool_call_response("The title is Hello world.", "stop"),
-        _tool_call_response("submit_values", {"values": phase1_values}),
+        _submit_hello_title(),
     ]
-    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=ANTHROPIC_VALUES_MODEL)
     with patch("litellm.completion", side_effect=responses) as mock_completion:
         extract_values(workspace, ds_id, fid, config=config)
 
@@ -1466,6 +1478,8 @@ def test_extract_values_retries_after_a_text_only_reply(workspace: Workspace) ->
     assert reply == {"role": "assistant", "content": "The title is Hello world."}
     assert nudge["role"] == "user"
     assert "submit_values" in nudge["content"]
+    # Phase 1 offers no other tool, so the reminder must not name one.
+    assert "get_page_words" not in nudge["content"]
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None
     assert stats["outcome"] == "ok"
@@ -1473,32 +1487,124 @@ def test_extract_values_retries_after_a_text_only_reply(workspace: Workspace) ->
     assert workspace.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc"))
 
 
-def test_extract_values_forces_submit_values_on_the_last_retry(workspace: Workspace) -> None:
-    """The last allowed retry forces ``submit_values``; an empty reply is not
-    kept in the history (some providers reject an empty assistant turn)."""
+def test_extract_values_never_forces_a_retry_on_anthropic(workspace: Workspace) -> None:
+    """Retries stay on auto (a forced choice would switch off Claude's
+    thinking), and an empty reply is not kept in the history (some providers
+    reject an empty assistant turn)."""
     fid = "f1aaaaaaaaaa"
     _seed_file(workspace, fid)
     _seed_page_text(workspace, fid, page=1)
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
 
-    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
     responses = [
-        *[_no_tool_call_response(None) for _ in range(_MAX_NO_TOOL_CALL_RETRIES)],
-        _tool_call_response("submit_values", {"values": phase1_values}),
+        *[_no_tool_call_response(None, "stop") for _ in range(_MAX_NO_TOOL_CALL_RETRIES)],
+        _submit_hello_title(),
     ]
-    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=ANTHROPIC_VALUES_MODEL)
     with patch("litellm.completion", side_effect=responses) as mock_completion:
         extract_values(workspace, ds_id, fid, config=config)
 
     calls = mock_completion.call_args_list
     assert len(calls) == 1 + _MAX_NO_TOOL_CALL_RETRIES
-    for _, kwargs in calls[:-1]:
+    for _, kwargs in calls:
         assert "tool_choice" not in kwargs
-    _, forced_kwargs = calls[-1]
-    assert forced_kwargs["tool_choice"]["function"]["name"] == "submit_values"
     assert not any(
-        m["role"] == "assistant" and not m.get("tool_calls") for m in forced_kwargs["messages"]
+        m["role"] == "assistant" and not m.get("tool_calls") for m in calls[-1][1]["messages"]
     )
+
+
+def test_extract_values_requires_a_tool_call_off_anthropic(workspace: Workspace) -> None:
+    """Providers that keep their reasoning under a forced choice get
+    ``tool_choice="required"`` on every phase-1 call."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", return_value=_submit_hello_title()) as mock_completion:
+        extract_values(workspace, ds_id, fid, config=config)
+
+    phase1_calls = [
+        kwargs
+        for _, kwargs in mock_completion.call_args_list
+        if any(t["function"]["name"] == "submit_values" for t in kwargs.get("tools", []))
+    ]
+    assert phase1_calls
+    assert all(kwargs["tool_choice"] == "required" for kwargs in phase1_calls)
+
+
+@pytest.mark.parametrize("finish_reason", ["content_filter", None])
+def test_extract_values_does_not_retry_an_abnormal_stop(
+    workspace: Workspace, finish_reason: str | None
+) -> None:
+    """A text-only turn that did not stop normally fails at once: a content
+    filter or refusal would end the same way again."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=ANTHROPIC_VALUES_MODEL)
+    reply = _no_tool_call_response("I can't help with that.", finish_reason)
+    with patch("litellm.completion", return_value=reply) as mock_completion:
+        with pytest.raises(ValuesExtractionFailed, match="after 0 retries"):
+            extract_values(workspace, ds_id, fid, config=config)
+
+    assert mock_completion.call_count == 1
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
+    assert stats["phases"]["phase1"]["no_tool_call_retries"] == 0
+
+
+def test_extract_values_reports_a_reasoning_only_reply(workspace: Workspace) -> None:
+    """A reply whose only content is reasoning (the budget went to thinking)
+    is told apart from a truly empty one in the error."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=ANTHROPIC_VALUES_MODEL)
+    reply = _no_tool_call_response(None, "stop", reasoning_content="Let me think about...")
+    with patch("litellm.completion", return_value=reply):
+        with pytest.raises(ValuesExtractionFailed) as excinfo:
+            extract_values(workspace, ds_id, fid, config=config)
+
+    message = str(excinfo.value)
+    assert "no text" in message
+    assert "reasoning only" in message
+
+
+def test_run_extract_loop_retries_do_not_spend_the_turn_budget(workspace: Workspace) -> None:
+    """With ``max_tool_iters=1`` a text-only turn is still retried, and the
+    submission on the retry completes rather than exhausting the budget."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    responses = [
+        _no_tool_call_response("One moment.", "stop"),
+        _tool_call_response("submit_values", {"values": _hello_title()}),
+    ]
+    counters = {"envelope_repairs": 0, "no_tool_call_retries": 0}
+    with patch("litellm.completion", side_effect=responses):
+        args, _, chunk_calls = _run_extract_loop(
+            workspace=workspace,
+            file_id=fid,
+            messages=[{"role": "user", "content": "extract"}],
+            tools=[],
+            model=ANTHROPIC_VALUES_MODEL,
+            api_key=None,
+            api_base=None,
+            max_tool_iters=1,
+            totals=_empty_totals(),
+            vocab=_TITLE_VOCAB,
+            counters=counters,
+        )
+
+    assert args["values"] == _hello_title()
+    assert chunk_calls == 1
+    assert counters["no_tool_call_retries"] == 1
 
 
 def test_extract_values_unknown_tool_errors(workspace: Workspace) -> None:
@@ -3318,7 +3424,10 @@ def test_run_extract_loop_mid_chunk_text_reply_continues_without_forcing(
             {"values": {**_hello_title(), "Items": [first_entry]}, "done": False},
             call_id="p1",
         ),
-        *[_no_tool_call_response("Still working.") for _ in range(_MAX_NO_TOOL_CALL_RETRIES)],
+        *[
+            _no_tool_call_response("Still working.", "stop")
+            for _ in range(_MAX_NO_TOOL_CALL_RETRIES)
+        ],
         _tool_call_response(
             "append_entries",
             {"path": "Items", "entries": [second_entry], "done": True},
@@ -3331,7 +3440,7 @@ def test_run_extract_loop_mid_chunk_text_reply_continues_without_forcing(
             file_id=fid,
             messages=[{"role": "user", "content": "extract"}],
             tools=[],
-            model=DEFAULT_VALUES_MODEL,
+            model=ANTHROPIC_VALUES_MODEL,
             api_key=None,
             api_base=None,
             max_tool_iters=6,

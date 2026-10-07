@@ -299,13 +299,13 @@ extraction_values_phase1_retry_chunked: |-
   reference entries appended afterwards.
 
 # Sent as a user turn when a phase-1 reply carries no tool call (plain text
-# instead of a submission), before the loop retries the model.
+# instead of a submission), before the loop retries the model. Phase 1 offers
+# only submit_values (plus append_entries when chunked), so name no other tool.
 extraction_values_phase1_nudge_submit: |-
   Your last reply contained no tool call. Extraction results are only
   read from tool calls; text replies are discarded. Do not answer in
-  prose and do not ask questions. Call ``get_page_words`` if you still
-  need to read a page, then finish by calling ``submit_values`` with the
-  final values, following the schema exactly.
+  prose and do not ask questions. Call ``submit_values`` with the final
+  values, following the schema exactly.
 
 # The same reminder for a chunked run that already recorded a submit_values
 # call with done=false: it must continue the sequence, not resend the tree.

@@ -1403,12 +1403,20 @@ that fits in one call. `extraction_stats.json` records both under
 calls that arrived with the tool's argument envelope repeated one level down,
 or serialized as a JSON string, and were unwrapped before the tree was read.
 `no_tool_call_retries` counts phase-1 turns that ended with plain text and no
-tool call: each is answered with a reminder to call `submit_values` and the
-model is asked again, the last of two retries with that tool forced. A
-chunked run that already recorded part of its submission is told to continue
-with `append_entries` instead and is never forced, since a resent full tree
-would duplicate its entries. A third text-only turn fails the run, and the
-error quotes the reply's `finish_reason` and opening text.
+tool call. Phase 1 sends `tool_choice="required"` to every provider except
+Anthropic, so these occur only on Claude models, which stay on auto because a
+forced tool choice switches off their extended thinking. A text-only turn
+that stopped normally is answered with a reminder to call `submit_values` (or,
+for a chunked run that already recorded part of its submission, to continue
+with `append_entries`, since a resent full tree would duplicate its entries)
+and the model is asked again. Retries are never forced, so the turn that
+produces the values keeps its thinking budget, and they do not count against
+`max_tool_iters`. A third text-only turn in one attempt, or any text-only turn
+that did not stop normally (a content filter or refusal stop), fails the run;
+the error quotes the reply's opening text, its `finish_reason`, and whether it
+was reasoning only. The counter totals every attempt of the run (a truncation
+or schema retry starts a new attempt), so it can exceed the per-attempt limit
+the error reports.
 A submission of which the vocabulary keeps nothing (no key names a schema
 root, or every named root carries a value of the wrong kind) is refused as an
 extraction error rather than written as an empty result; an empty tree, or
