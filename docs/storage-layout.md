@@ -1198,6 +1198,11 @@ When a File is assigned to a DocSet, an `assignment.json` is written to
 `{ docset_id, file_id, assigned_at }`. The pair directory also holds that
 pair's generated artifacts (`<stem>.dgml.xml`, `extraction_stats.json`).
 
+Library callers look assignments up in either direction through `DocSetStore`
+rather than the store directly: `list_files(docset_id)` gives a DocSet's files,
+and `docsets_for_file(file_id)` gives a File's DocSets, each with its
+`assigned_at` (`null` for assignments carried over by a layout migration).
+
 Earlier revisions recorded the assignment as the *bare existence* of that
 directory, with no file inside. That could not survive its own deletion —
 removing the record meant removing the directory, and therefore the generated
