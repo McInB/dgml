@@ -676,7 +676,8 @@ uv run dgml extraction get-guidance "$ds" | jq -r .guidance
 #    NOTE: once the schema is set, assigning a file (docset add-file /
 #    --auto-classify / cluster into an existing docset) auto-extracts it —
 #    check the payload's `extraction` block; run `extract` manually only for
-#    files assigned before the schema existed or to re-extract.
+#    files assigned before the schema existed or to re-extract. The file must
+#    already be assigned to the docset (FILE_NOT_FOUND otherwise).
 uv run dgml extraction extract "$ds" "$fid" | jq '{mode, tool_calls, field_count, xml_key}'
 
 # 3) Read them back. Default is values-shape JSON (projected from dg:extraction);

@@ -143,12 +143,15 @@ class DocSetStore:
         if not file_id.strip():
             raise InvalidArgument("file id must not be empty")
         self._require_docset(docset_id)
-        if (
-            self.ws.docs.get_doc(layout.Collection.ASSIGNMENTS, layout.pair_id(docset_id, file_id))
-            is None
-        ):
+        if not self.is_assigned(docset_id, file_id):
             raise FileNotFound(f"file '{file_id}' is not assigned to docset '{docset_id}'")
         WorkspaceOps(self.ws).unassign(docset_id, file_id)
+
+    def is_assigned(self, docset_id: str, file_id: str) -> bool:
+        return (
+            self.ws.docs.get_doc(layout.Collection.ASSIGNMENTS, layout.pair_id(docset_id, file_id))
+            is not None
+        )
 
     # ---- extraction schema (docsets/<id>/extraction-schema.rnc, RELAX NG Compact) --
 

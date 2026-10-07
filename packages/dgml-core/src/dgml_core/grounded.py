@@ -647,13 +647,14 @@ class ExtractionResult:
     core file was created with only the ``dg:extraction`` element.
     ``tool_calls`` is the count of ``get_page_words`` grounding lookups the
     model performed before finalizing — a rough proxy for how much grounding it
-    leaned on.
+    leaned on. ``model`` is the values model that produced it.
     """
 
     values: dict[str, Any]
     tool_calls: int
     xml_key: str
     mode: str
+    model: str
 
 
 def extract_values(
@@ -699,6 +700,12 @@ def extract_values(
     """
     store = DocSetStore(workspace)
     rnc_schema = store.get_schema(docset_id)  # RNC text; raises SchemaNotFound
+    # The .dgml.xml is written under the (docset, file) pair's prefix, which only the
+    # docset's file list reaches — so an unassigned file would get an orphan artifact.
+    if not store.is_assigned(docset_id, file_id):
+        raise FileNotFound(
+            f"file '{file_id}' is not assigned to docset '{docset_id}'; assign it first"
+        )
     # A stored schema is not re-checked on read; here it is about to be used.
     vocab = check_invariant_paths(parse_rnc(rnc_schema))
     schema = rnc_to_json_schema(rnc_schema)
@@ -927,7 +934,11 @@ def extract_values(
         workspace.blobs.put_blob(xml_key, doc.encode("utf-8"))
         outcome = OUTCOME_OK
         return ExtractionResult(
-            values=final_values, tool_calls=tool_calls_total, xml_key=xml_key, mode=mode
+            values=final_values,
+            tool_calls=tool_calls_total,
+            xml_key=xml_key,
+            mode=mode,
+            model=config.values_model,
         )
     except ValuesExtractionFailed as exc:
         error_msg = str(exc)
