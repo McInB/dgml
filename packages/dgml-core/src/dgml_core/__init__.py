@@ -123,7 +123,7 @@ from .migrations import (
     stamp_schema_version,
     workspace_schema_version,
 )
-from .models import DocSet, FileRecord
+from .models import DocSet, DocSetAssignment, FileRecord
 from .ocr import (
     BUILTIN_OCR_PROVIDERS,
     OcrConfig,
@@ -245,6 +245,7 @@ __all__ = [
     "DgmlError",
     "DocConverter",
     "DocSet",
+    "DocSetAssignment",
     "DocSetNotFound",
     "DocSetStore",
     "DocStore",
