@@ -219,21 +219,24 @@ _TOOL_SUBMIT_LOCATIONS = "submit_locations"
 
 # Phase-1 turns per attempt that may end with plain text (no tool call)
 # before the attempt fails. Reachable only where phase 1 runs on auto tool
-# choice (see _run_extract_loop): on Anthropic, and on an endpoint that
-# rejected "required". There a model sometimes answers in prose, asks a
-# question, or writes the submission as JSON text instead of calling the
-# tool. Each such turn is answered with a reminder and retried, still on
-# auto. Retries do not spend max_tool_iters.
+# choice (see _run_extract_loop): on Anthropic, on an endpoint that rejected
+# "required", and where litellm's drop_params removed it. There a model
+# sometimes answers in prose, asks a question, or writes the submission as
+# JSON text instead of calling the tool. Each such turn is answered with a
+# reminder and retried, still on auto. Retries do not spend max_tool_iters.
 _MAX_NO_TOOL_CALL_RETRIES = 2
 
 # How much of a text-only reply the error message quotes.
 _NO_TOOL_CALL_REPLY_PREVIEW_CHARS = 500
 
-# (model, api_base) endpoints shown to refuse tool_choice="required": a request
-# sent with it was rejected and the same request on auto then succeeded. Later
+# (model, api_base, reasoning_effort) endpoints shown to refuse
+# tool_choice="required": a request sent with it was rejected and the same
+# request on auto then succeeded. The effort is part of the key because a
+# Claude model behind an unrecognised alias rejects "required" only together
+# with thinking. Later
 # attempts against them start on auto instead of re-sending a doomed request,
 # and the warning is emitted once, when an endpoint is added.
-_REQUIRED_TOOL_CHOICE_REJECTED: set[tuple[str, str | None]] = set()
+_REQUIRED_TOOL_CHOICE_REJECTED: set[tuple[str, str | None, str | None]] = set()
 
 
 # ---- Config ---------------------------------------------------------------
@@ -2048,7 +2051,9 @@ def _run_extract_loop(
     chunking directive.
 
     Every provider but Anthropic gets ``tool_choice="required"`` on every
-    call, so a text-only turn cannot happen there. A call that an endpoint
+    call, so a text-only turn cannot happen there, unless litellm's global
+    ``drop_params`` silently removes the parameter for a provider it believes
+    lacks it (the call then runs on auto, as it did before "required"). A call that an endpoint
     rejects as an invalid request is resent once on auto; when that succeeds,
     the endpoint is remembered as refusing ``"required"`` (warned about once)
     and this and later attempts against it run on auto. On auto (Anthropic,
@@ -2089,7 +2094,7 @@ def _run_extract_loop(
     chunk_calls = 0
     acc_args: dict[str, Any] | None = None  # accumulated submit_values args
     no_tool_call_retries = 0
-    endpoint = (model, api_base)
+    endpoint = (model, api_base, reasoning_effort)
     tool_choice = (
         None
         if is_anthropic_model(model) or endpoint in _REQUIRED_TOOL_CHOICE_REJECTED
@@ -2293,7 +2298,7 @@ def _run_extract_loop(
 
 
 def _remember_required_tool_choice_rejected(
-    endpoint: tuple[str, str | None], exc: BaseException
+    endpoint: tuple[str, str | None, str | None], exc: BaseException
 ) -> None:
     """Record that *endpoint* refuses ``tool_choice="required"`` and warn the
     first time.

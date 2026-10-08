@@ -1402,16 +1402,18 @@ that fits in one call. `extraction_stats.json` records both under
 `envelope_repairs` counts `submit_values`
 calls that arrived with the tool's argument envelope repeated one level down,
 or serialized as a JSON string, and were unwrapped before the tree was read.
-`no_tool_call_retries` counts phase-1 turns that ended with plain text and no
-tool call. Phase 1 sends `tool_choice="required"` to every provider except
+`no_tool_call_retries` counts the reminder retries given to phase-1 turns that
+ended with plain text and no tool call (the turn that finally fails a run is
+not counted). Phase 1 sends `tool_choice="required"` to every provider except
 Anthropic, so these occur only where phase 1 runs on auto: on Claude models,
 which stay on auto because a forced tool choice switches off their extended
-thinking, and on an endpoint that rejects `"required"` as an invalid request
-(HTTP 400/422). Such a call is resent once on auto; when the resend succeeds,
-the endpoint is remembered for the rest of the process (later attempts start on
-auto) and a warning names the model once. Timeouts, auth, rate-limit,
-context-window and content-policy errors are never resent this way. A text-only turn
-that stopped normally is answered with a reminder to call `submit_values` (or,
+thinking; where litellm silently drops the parameter for a provider it
+believes lacks it; and on an endpoint that rejects `"required"` as an invalid
+request (HTTP 400/422). Such a call is resent once on auto; when the resend
+succeeds, the endpoint is remembered for the rest of the process (later
+attempts start on auto) and a warning names the model once. Timeouts, auth,
+rate-limit, context-window and content-policy errors are never resent this way.
+A text-only turn that stopped normally is answered with a reminder to call `submit_values` (or,
 for a chunked run that already recorded part of its submission, to continue
 with `append_entries`, since a resent full tree would duplicate its entries)
 and the model is asked again. Retries are never forced, so the turn that
