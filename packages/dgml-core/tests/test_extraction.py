@@ -20,6 +20,7 @@ values model/effort) and defaults stats off.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
 
@@ -54,8 +55,18 @@ def _docset(workspace: Workspace, *, schema: bool = True) -> str:
     return ds.id
 
 
-def _use_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("dgml_core.grounded.load_grounded_config", lambda ws: _CONFIG)
+def _use_config(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Stand in for the loader; applies a ``values_model`` override like the real
+    one and records the kwargs it was called with."""
+    seen: dict[str, Any] = {}
+
+    def fake_load(ws: Workspace, **kw: Any) -> GroundedConfig:
+        seen.update(kw)
+        model = kw.get("values_model")
+        return replace(_CONFIG, values_model=model) if model else _CONFIG
+
+    monkeypatch.setattr("dgml_core.grounded.load_grounded_config", fake_load)
+    return seen
 
 
 def _capture_extract(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -104,12 +115,15 @@ def test_uses_workspace_config_and_defaults_stats_off(
 
 def test_model_and_effort_overrides(workspace: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
     ds_id = _docset(workspace)
-    _use_config(monkeypatch)
+    loaded = _use_config(monkeypatch)
     seen = _capture_extract(monkeypatch)
 
     result = extract_file(
         workspace, ds_id, "fileaaaaaaaa", values_model="test/other", values_effort="low"
     )
+    # The override goes through the loader so credentials resolve for the new
+    # model, rather than being swapped in after the fact.
+    assert loaded == {"values_model": "test/other"}
     assert seen["config"].values_model == "test/other"
     assert seen["config"].values_reasoning_effort == "low"
     assert result.model == "test/other"

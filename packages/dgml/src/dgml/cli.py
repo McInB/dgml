@@ -2584,7 +2584,11 @@ def _add_extraction_subparsers(
     ex_gen.add_argument(
         "--schema-model",
         default=None,
-        help="Override grounded.schema_model for this call (LiteLLM model string).",
+        help=(
+            "Override grounded.schema_model for this call (LiteLLM model string). "
+            "Credentials resolve as if it were set in config; a tier's key and "
+            "api_base never carry over."
+        ),
     )
 
     ex_set = extraction.add_parser(
@@ -2645,7 +2649,8 @@ def _add_extraction_subparsers(
         default=None,
         help=(
             "Override grounded.values_model for this call (LiteLLM model string). "
-            "The configured values-side API key and base still apply."
+            "Credentials resolve as if it were set in config; a tier's key and "
+            "api_base never carry over."
         ),
     )
     ex_extract.add_argument(
@@ -2700,8 +2705,6 @@ def _coerce_schema_to_rnc(raw: str, path: Path, workspace_name: str, docset_name
 
 def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     """Dispatch the `extraction` command group."""
-    from dataclasses import replace
-
     from dgml_core.extraction import extract_file
     from dgml_core.extraction_schema import parse_rnc, rnc_to_json_schema
     from dgml_core.extraction_xml import dgml_xml_to_values
@@ -2716,9 +2719,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
 
     if sub == "generate-schema":
         ds = store.get(args.docset_id)  # raises DocSetNotFound
-        config = load_grounded_config(ws)
-        if args.schema_model:
-            config = replace(config, schema_model=args.schema_model)
+        config = load_grounded_config(ws, schema_model=args.schema_model or None)
         file_ids = args.from_files or store.list_files(args.docset_id)
         if not file_ids:
             return _emit_error(

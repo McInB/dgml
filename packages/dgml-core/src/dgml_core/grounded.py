@@ -294,12 +294,31 @@ def parse_values_reasoning_effort(raw: Any, *, source: str) -> str | None:
     raise GroundedConfigInvalid(f"{source} must be one of {accepted} if set (got {raw!r})")
 
 
-def load_grounded_config(workspace: Workspace) -> GroundedConfig:
+def load_grounded_config(
+    workspace: Workspace,
+    *,
+    schema_model: str | None = None,
+    values_model: str | None = None,
+) -> GroundedConfig:
     """Resolve the two grounded models (schema generation → ``expert`` tier,
     value extraction → ``advanced`` tier) and their credentials from the merged
     config's ``[grounded]`` section and ``[models]`` tiers. A model set on the
-    section overrides its tier."""
+    section overrides its tier.
+
+    ``schema_model`` / ``values_model`` are per-call overrides and resolve
+    exactly as if written in ``[grounded]``: the section's own ``schema_*`` /
+    ``values_*`` credentials still apply, and nothing a tier carries does.
+    """
     merged = load_merged_config(workspace)
+    overrides = {
+        key: model
+        for key, model in (("schema_model", schema_model), ("values_model", values_model))
+        if model is not None
+    }
+    if overrides:
+        section = merged.get(ConfigSection.GROUNDED)
+        base: dict[str, Any] = section if isinstance(section, dict) else {}
+        merged = {**merged, ConfigSection.GROUNDED: {**base, **overrides}}
     schema = resolve_tiered_model(
         merged,
         section_name=ConfigSection.GROUNDED,

@@ -292,6 +292,40 @@ def test_load_config_section_overrides_tier(workspace: Workspace) -> None:
     assert config.values_model == "openai/gpt-5"  # override wins
 
 
+def test_load_config_call_override_resolves_like_section(workspace: Workspace) -> None:
+    # A per-call override resolves as if written in [grounded]: the section's
+    # own credentials apply to it, and it wins over both the section and the tier.
+    from .conftest import write_config
+
+    write_config(
+        workspace,
+        {
+            "models": {"advanced": "gemini/gemini-2.5-pro", "expert": "anthropic/claude-opus-4-8"},
+            "grounded": {
+                "values_model": "openai/gpt-5",
+                "values_api_key_env": "MY_KEY",
+                "values_api_base": "https://proxy.example",
+            },
+        },
+    )
+    config = load_grounded_config(
+        workspace, values_model="anthropic/claude-sonnet-5", schema_model="openai/gpt-5.4"
+    )
+    assert config.values_model == "anthropic/claude-sonnet-5"
+    assert (config.values_api_key, config.values_api_key_env) == (None, "MY_KEY")
+    assert config.values_api_base == "https://proxy.example"
+    assert config.schema_model == "openai/gpt-5.4"
+    assert (config.schema_api_key, config.schema_api_key_env, config.schema_api_base) == (
+        None,
+        None,
+        None,
+    )
+
+    # An empty override is a config error, not a silent fallback.
+    with pytest.raises(GroundedConfigInvalid):
+        load_grounded_config(workspace, values_model="")
+
+
 def test_load_config_rejects_non_positive_max_iters(workspace: Workspace) -> None:
     _write_grounded_config(
         workspace,

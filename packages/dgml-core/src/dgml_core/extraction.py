@@ -136,16 +136,15 @@ def extract_file(
     ``values_model`` and ``values_effort`` override the workspace's
     ``grounded.values_model`` / ``grounded.values_reasoning_effort`` for this call;
     ``values_effort`` takes the config's values (``"default"`` sends none).
-    ``values_model`` swaps only the model: the configured values-side credentials
-    (``grounded.values_api_key`` / ``values_api_key_env`` / ``values_api_base``)
-    still apply, so an override is meant for another model of the same provider.
+    ``values_model`` resolves as if it were set in ``[grounded]``: the section's
+    own ``values_api_key`` / ``values_api_key_env`` / ``values_api_base`` still
+    apply, and a tier's credentials never carry over to the new model
+    (see :func:`~dgml_core.grounded.load_grounded_config`).
     ``write_stats`` defaults to off, matching the CLI.
     """
     from .grounded import extract_values, load_grounded_config, parse_values_reasoning_effort
 
-    config = load_grounded_config(ws)
-    if values_model:
-        config = replace(config, values_model=values_model)
+    config = load_grounded_config(ws, values_model=values_model)
     if values_effort is not None:
         config = replace(
             config,
