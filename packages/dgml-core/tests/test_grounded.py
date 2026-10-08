@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -781,9 +782,9 @@ def test_values_effort_default_sends_no_reasoning_effort(workspace: Workspace) -
 def test_configured_values_effort_reaches_anthropic_value_extraction(
     workspace: Workspace,
 ) -> None:
-    """Value extraction runs with ``tool_choice`` auto, so an Anthropic values
-    model receives the configured effort too (the wrapper only drops it on a
-    forced tool call)."""
+    """Value extraction leaves an Anthropic values model on ``tool_choice``
+    auto (other providers get ``"required"``), so it receives the configured
+    effort too (the wrapper only drops it on a forced tool call)."""
     fid = "f1aaaaaaaaaa"
     _seed_file(workspace, fid)
     _seed_page_text(workspace, fid, page=1)
@@ -1525,13 +1526,179 @@ def test_extract_values_requires_a_tool_call_off_anthropic(workspace: Workspace)
     with patch("litellm.completion", return_value=_submit_hello_title()) as mock_completion:
         extract_values(workspace, ds_id, fid, config=config)
 
-    phase1_calls = [
+    phase1_calls = _phase1_calls(mock_completion)
+    assert phase1_calls
+    assert all(kwargs["tool_choice"] == "required" for kwargs in phase1_calls)
+
+
+def _rejection(message: str) -> Exception:
+    import litellm.exceptions
+
+    return litellm.exceptions.BadRequestError(
+        message, model="gemini-2.5-pro", llm_provider="gemini"
+    )
+
+
+def _phase1_calls(mock_completion: Any) -> list[dict[str, Any]]:
+    return [
         kwargs
         for _, kwargs in mock_completion.call_args_list
         if any(t["function"]["name"] == "submit_values" for t in kwargs.get("tools", []))
     ]
-    assert phase1_calls
-    assert all(kwargs["tool_choice"] == "required" for kwargs in phase1_calls)
+
+
+def test_extract_values_falls_back_to_auto_when_required_is_rejected(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An endpoint that rejects ``tool_choice="required"`` is resent on auto,
+    stays on auto for the rest of the attempt (a later text-only turn gets the
+    reminder retry), and is warned about once."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    responses = [
+        _rejection("tool_choice 'required' is not supported by this endpoint"),
+        _no_tool_call_response("The title is Hello world.", "stop"),
+        _submit_hello_title(),
+    ]
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with caplog.at_level(logging.WARNING, logger="dgml_core.grounded"):
+        with patch("litellm.completion", side_effect=responses) as mock_completion:
+            extract_values(workspace, ds_id, fid, config=config)
+
+    calls = _phase1_calls(mock_completion)
+    assert [c.get("tool_choice") for c in calls] == ["required", None, None]
+    warnings = [r for r in caplog.records if "rejected tool_choice='required'" in r.message]
+    assert len(warnings) == 1
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
+    assert stats["outcome"] == "ok"
+    assert stats["phases"]["phase1"]["no_tool_call_retries"] == 1
+
+
+def test_required_rejection_warns_once_per_endpoint(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every attempt probes "required" again (an unrelated 400 on one file must
+    not switch a whole run to auto), but the warning is emitted once."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    responses = [_rejection("tool_choice unsupported"), _submit_hello_title()] * 2
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with caplog.at_level(logging.WARNING, logger="dgml_core.grounded"):
+        with patch("litellm.completion", side_effect=responses) as mock_completion:
+            extract_values(workspace, ds_id, fid, config=config)
+            extract_values(workspace, ds_id, fid, config=config)
+
+    calls = _phase1_calls(mock_completion)
+    assert [c.get("tool_choice") for c in calls] == ["required", None, "required", None]
+    warnings = [r for r in caplog.records if "rejected tool_choice='required'" in r.message]
+    assert len(warnings) == 1
+
+
+def test_unrelated_rejection_fails_with_the_auto_attempts_error(workspace: Workspace) -> None:
+    """A 400 that is not about tool choice fails on the auto resend too, and the
+    error reported is that resend's, the request ``main`` would have sent."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    responses = [
+        _rejection("could not process document (first)"),
+        _rejection("could not process document (auto)"),
+    ]
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=responses) as mock_completion:
+        with pytest.raises(ValuesExtractionFailed) as excinfo:
+            extract_values(workspace, ds_id, fid, config=config)
+
+    assert mock_completion.call_count == 2
+    message = str(excinfo.value)
+    assert message.startswith("extraction call failed: BadRequestError")
+    assert "(auto)" in message
+    assert "(first)" not in message
+
+
+@pytest.mark.parametrize("kind", ["timeout", "context_window", "content_policy", "auth"])
+def test_non_rejection_errors_do_not_fall_back(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Errors that no tool-choice change can fix are never resent on auto:
+    every phase-1 call carries ``"required"`` and the run fails as before."""
+    import litellm.exceptions
+
+    # A timeout is retried with backoff inside the wrapper; skip the sleeps.
+    monkeypatch.setattr("dgml_core.llm.time.sleep", lambda _s: None)
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    m, p = "gemini-2.5-pro", "gemini"
+    exc = {
+        "timeout": litellm.exceptions.Timeout("request timed out", model=m, llm_provider=p),
+        "context_window": litellm.exceptions.ContextWindowExceededError(
+            "too long", model=m, llm_provider=p
+        ),
+        "content_policy": litellm.exceptions.ContentPolicyViolationError(
+            "blocked", model=m, llm_provider=p
+        ),
+        "auth": litellm.exceptions.AuthenticationError("bad key", model=m, llm_provider=p),
+    }[kind]
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=exc) as mock_completion:
+        with pytest.raises(ValuesExtractionFailed, match="extraction call failed"):
+            extract_values(workspace, ds_id, fid, config=config)
+
+    calls = _phase1_calls(mock_completion)
+    assert calls
+    assert all(c["tool_choice"] == "required" for c in calls)
+
+
+def test_schema_overflow_rejection_keeps_the_permissive_fallback(workspace: Workspace) -> None:
+    """Gemini's "too many states" 400 is not resent on auto; it still reaches
+    the caller's permissive-schema retry, which keeps "required"."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    responses = [
+        _rejection("The specified schema produces too many states for serving"),
+        _submit_hello_title(),
+    ]
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=responses) as mock_completion:
+        extract_values(workspace, ds_id, fid, config=config)
+
+    calls = _phase1_calls(mock_completion)
+    assert [c["tool_choice"] for c in calls] == ["required", "required"]
+    submit_tool = next(t for t in calls[1]["tools"] if t["function"]["name"] == "submit_values")
+    assert "properties" not in submit_tool["function"]["parameters"]["properties"]["values"]
+    stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
+    assert stats is not None
+    assert stats["phase1_tool_schema"] == "permissive"
+
+
+def test_anthropic_rejection_is_not_resent(workspace: Workspace) -> None:
+    """Anthropic never gets "required", so a 400 there has nothing to fall back
+    from and fails on the first call, as before."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=ANTHROPIC_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=_rejection("bad request")) as mock_completion:
+        with pytest.raises(ValuesExtractionFailed, match="bad request"):
+            extract_values(workspace, ds_id, fid, config=config)
+    assert mock_completion.call_count == 1
 
 
 @pytest.mark.parametrize("finish_reason", ["content_filter", None])

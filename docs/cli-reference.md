@@ -1404,8 +1404,12 @@ calls that arrived with the tool's argument envelope repeated one level down,
 or serialized as a JSON string, and were unwrapped before the tree was read.
 `no_tool_call_retries` counts phase-1 turns that ended with plain text and no
 tool call. Phase 1 sends `tool_choice="required"` to every provider except
-Anthropic, so these occur only on Claude models, which stay on auto because a
-forced tool choice switches off their extended thinking. A text-only turn
+Anthropic, so these occur only where phase 1 runs on auto: on Claude models,
+which stay on auto because a forced tool choice switches off their extended
+thinking, and on an endpoint that rejects `"required"` as an invalid request
+(HTTP 400/422). Such a call is resent once on auto, the attempt stays on auto,
+and a warning names the model once per endpoint; timeouts, auth, rate-limit,
+context-window and content-policy errors are never resent this way. A text-only turn
 that stopped normally is answered with a reminder to call `submit_values` (or,
 for a chunked run that already recorded part of its submission, to continue
 with `append_entries`, since a resent full tree would duplicate its entries)
