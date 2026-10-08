@@ -1202,6 +1202,10 @@ Library callers look assignments up in either direction through `DocSetStore`
 rather than the store directly: `list_files(docset_id)` gives a DocSet's files,
 and `docsets_for_file(file_id)` gives a File's DocSets, each with its
 `assigned_at` (`null` for assignments carried over by a layout migration).
+`docsets_for_file` tolerates a bad manifest the way `list_all()` does: a DocSet
+whose `docset.json` is missing or cannot be parsed is left out (with a warning)
+rather than raised, and only files assigned to that DocSet are affected;
+`dgml check` reports it.
 
 Earlier revisions recorded the assignment as the *bare existence* of that
 directory, with no file inside. That could not survive its own deletion —

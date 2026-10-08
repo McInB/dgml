@@ -14,8 +14,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from . import layout
 from .errors import (
+    CorruptMetadata,
     DocSetNotFound,
     FileNotFound,
     GuidanceNotFound,
@@ -28,6 +31,8 @@ from .ids import new_id
 from .models import DocSet, DocSetAssignment
 from .storage import Workspace
 from .workspace_ops import WorkspaceOps
+
+logger = logging.getLogger(__name__)
 
 
 class DocSetStore:
@@ -125,8 +130,13 @@ class DocSetStore:
         """Return the DocSets *file_id* is assigned to, each with its ``assigned_at``.
 
         The inverse of :meth:`list_files`. Sorted by docset id, so the order does
-        not depend on the storage backend. An assignment whose DocSet document is
-        gone (e.g. an ``add_file`` racing a docset delete) is skipped."""
+        not depend on the storage backend. An assignment whose DocSet is gone
+        (e.g. an ``add_file`` racing a docset delete) or whose manifest cannot
+        be parsed is skipped, with the same tolerance :meth:`list_all` has, so
+        one corrupt manifest cannot hide the file's other, healthy DocSets.
+        Each manifest is read on its own rather than through ``list_all`` so a
+        bad manifest only affects the files assigned to that DocSet. ``dgml
+        check`` is where a corrupt manifest gets reported."""
         if not file_id.strip():
             raise InvalidArgument("file id must not be empty")
         if self.ws.docs.get_doc(layout.Collection.FILES, file_id) is None:
@@ -135,7 +145,17 @@ class DocSetStore:
         for assignment in self.ws.docs.find_docs(
             layout.Collection.ASSIGNMENTS, {"file_id": file_id}
         ):
-            data = self.ws.docs.get_doc(layout.Collection.DOCSETS, str(assignment["docset_id"]))
+            docset_id = str(assignment["docset_id"])
+            try:
+                data = self.ws.docs.get_doc(layout.Collection.DOCSETS, docset_id)
+            except CorruptMetadata:
+                logger.warning(
+                    "docset '%s' has a corrupt manifest; left out of the docsets for "
+                    "file '%s' (run `dgml check`)",
+                    docset_id,
+                    file_id,
+                )
+                continue
             if data is None:
                 continue
             assigned_at = assignment.get("assigned_at")

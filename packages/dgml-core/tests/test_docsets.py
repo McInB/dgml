@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from dgml_core import layout
 from dgml_core.docsets import DocSetStore
@@ -469,6 +471,54 @@ def test_docsets_for_file_skips_dangling_assignment(workspace: Workspace) -> Non
         layout.pair_id("gonedocset01", fid),
         {"docset_id": "gonedocset01", "file_id": fid, "assigned_at": "2026-01-01T00:00:00Z"},
     )
+    assert [r.docset.id for r in store.docsets_for_file(fid)] == [did]
+
+
+def test_docsets_for_file_skips_corrupt_docset_like_list_all(workspace: Workspace) -> None:
+    """A corrupt ``docset.json`` reads as absent, as it does for ``list_all`` —
+    it must not raise and hide the file's other, healthy DocSets."""
+    store, did, fid = _assigned_pair(workspace)
+    broken = store.create(name="Broken")
+    store.add_file(broken.id, fid)
+    (workspace.root / "docsets" / broken.id / "docset.json").write_text(
+        '{"id": "truncated', encoding="utf-8"
+    )
+
+    assert [ds.id for ds in store.list_all()] == [did]
+    assert [r.docset.id for r in store.docsets_for_file(fid)] == [did]
+
+
+def test_docsets_for_file_warns_about_the_skipped_docset(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    store, _did, fid = _assigned_pair(workspace)
+    broken = store.create(name="Broken")
+    store.add_file(broken.id, fid)
+    (workspace.root / "docsets" / broken.id / "docset.json").write_text("{", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="dgml_core.docsets"):
+        store.docsets_for_file(fid)
+
+    [record] = caplog.records
+    assert broken.id in record.getMessage()
+    assert fid in record.getMessage()
+
+
+def test_docsets_for_file_unaffected_by_malformed_manifest_elsewhere(
+    workspace: Workspace,
+) -> None:
+    """A bad manifest only breaks lookups for files assigned to that DocSet.
+
+    This is why the DocSets are read one assignment at a time rather than via
+    ``list_all``: a manifest that parses but is malformed (valid JSON, no
+    ``name``) raises from ``list_all`` and would otherwise fail this lookup for
+    every file in the workspace."""
+    store, did, fid = _assigned_pair(workspace)
+    unrelated = store.create(name="Unrelated")
+    workspace.docs.put_doc("docsets", unrelated.id, {"id": unrelated.id})
+
+    with pytest.raises(KeyError):
+        store.list_all()
     assert [r.docset.id for r in store.docsets_for_file(fid)] == [did]
 
 
