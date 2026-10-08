@@ -2584,7 +2584,11 @@ def _add_extraction_subparsers(
     ex_gen.add_argument(
         "--schema-model",
         default=None,
-        help="Override grounded.schema_model for this call (LiteLLM model string).",
+        help=(
+            "Override grounded.schema_model for this call (LiteLLM model string). "
+            "Credentials resolve as if it were set in config; a tier's key and "
+            "api_base never carry over."
+        ),
     )
 
     ex_set = extraction.add_parser(
@@ -2643,7 +2647,11 @@ def _add_extraction_subparsers(
     ex_extract.add_argument(
         "--values-model",
         default=None,
-        help="Override grounded.values_model for this call (LiteLLM model string).",
+        help=(
+            "Override grounded.values_model for this call (LiteLLM model string). "
+            "Credentials resolve as if it were set in config; a tier's key and "
+            "api_base never carry over."
+        ),
     )
     ex_extract.add_argument(
         "--values-effort",
@@ -2713,9 +2721,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
 
     if sub == "generate-schema":
         ds = store.get(args.docset_id)  # raises DocSetNotFound
-        config = load_grounded_config(ws)
-        if args.schema_model:
-            config = replace(config, schema_model=args.schema_model)
+        config = load_grounded_config(ws, schema_model=args.schema_model or None)
         file_ids = args.from_files or store.list_files(args.docset_id)
         if not file_ids:
             return _emit_error(
