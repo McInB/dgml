@@ -2643,7 +2643,10 @@ def _add_extraction_subparsers(
     ex_extract.add_argument(
         "--values-model",
         default=None,
-        help="Override grounded.values_model for this call (LiteLLM model string).",
+        help=(
+            "Override grounded.values_model for this call (LiteLLM model string). "
+            "The configured values-side API key and base still apply."
+        ),
     )
     ex_extract.add_argument(
         "--values-effort",

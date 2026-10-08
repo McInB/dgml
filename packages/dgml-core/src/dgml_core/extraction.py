@@ -42,7 +42,7 @@ def _auto_extract(
     docset_id: str,
     file_id: str,
     *,
-    write_stats: bool = True,
+    write_stats: bool = False,
     debug: bool = False,
 ) -> dict[str, Any]:
     """Run LLM-backed value extraction on a freshly-assigned file.
@@ -92,7 +92,7 @@ def add_file_and_extract(
     docset_id: str,
     file_id: str,
     *,
-    write_stats: bool = True,
+    write_stats: bool = False,
     debug: bool = False,
 ) -> dict[str, Any] | None:
     """Assign ``file_id`` to ``docset_id``; auto-extract if the DocSet has a schema.
@@ -102,9 +102,10 @@ def add_file_and_extract(
     policy matches the existing ``dgml docset add-file`` contract.
 
     ``write_stats`` and ``debug`` are forwarded to
-    :func:`dgml_core.grounded.extract_values` — CLI callers pass
-    ``args.debug`` for both, so ``extraction_stats.json`` and LLM usage rows
-    are persisted only under ``--debug``.
+    :func:`dgml_core.grounded.extract_values`. Both default to off, like
+    :func:`extract_file`; CLI callers pass ``args.debug`` for both, so
+    ``extraction_stats.json`` and LLM usage rows are persisted only under
+    ``--debug``.
     """
     store = DocSetStore(ws)
     store.add_file(docset_id, file_id)
@@ -125,15 +126,19 @@ def extract_file(
 ) -> ExtractionResult:
     """Extract ``file_id`` against ``docset_id``'s schema now — ``dgml extraction extract``.
 
-    The file must already be assigned to the docset (:class:`FileNotFound`
-    otherwise) and the docset must have a schema (:class:`SchemaNotFound`);
-    assignment and schema can be set in either order before this runs. Unlike
-    :func:`add_file_and_extract` this is a hard-failing call that returns the
-    :class:`ExtractionResult`.
+    The workspace's grounded config is loaded first (:class:`GroundedConfigMissing`
+    / :class:`GroundedConfigInvalid`). Then the docset must have a schema
+    (:class:`SchemaNotFound`) and the file must already be assigned to it
+    (:class:`FileNotFound`); schema and assignment can be set in either order
+    before this runs. Unlike :func:`add_file_and_extract` this is a hard-failing
+    call that returns the :class:`ExtractionResult`.
 
     ``values_model`` and ``values_effort`` override the workspace's
     ``grounded.values_model`` / ``grounded.values_reasoning_effort`` for this call;
     ``values_effort`` takes the config's values (``"default"`` sends none).
+    ``values_model`` swaps only the model: the configured values-side credentials
+    (``grounded.values_api_key`` / ``values_api_key_env`` / ``values_api_base``)
+    still apply, so an override is meant for another model of the same provider.
     ``write_stats`` defaults to off, matching the CLI.
     """
     from .grounded import extract_values, load_grounded_config, parse_values_reasoning_effort

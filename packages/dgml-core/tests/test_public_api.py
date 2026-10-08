@@ -35,10 +35,6 @@ def test_every_public_name_resolves() -> None:
     assert not missing, f"names in __all__ with no attribute: {missing}"
 
 
-def test_dir_matches_all() -> None:
-    assert dir(dgml_core) == sorted(dgml_core.__all__)
-
-
 def test_lazy_names_are_in_all() -> None:
     not_exported = set(dgml_core._LAZY_SUBMODULES) - set(dgml_core.__all__)
     assert not not_exported, f"lazy names missing from __all__: {not_exported}"

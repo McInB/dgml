@@ -966,8 +966,12 @@ def extract_values(
         # tree (full-extraction), or written as a standalone dg:chunk when no
         # tree exists yet (extraction).
         # Read again after phase 3, as before: a file deleted meanwhile
-        # raises here rather than getting an orphan XML written for it.
+        # raises here rather than getting an orphan XML written for it. Same
+        # for the assignment: `unassign` during the LLM phases cleared the
+        # pair's prefix, and writing now would recreate an orphan under it.
         stem = Path(FileStore(workspace).get(file_id).original_filename).stem
+        if not store.is_assigned(docset_id, file_id):
+            raise FileNotFound(f"file '{file_id}' is no longer assigned to docset '{docset_id}'")
         xml_key = layout.dgml_xml_key(docset_id, file_id, stem)
         existing = (
             workspace.blobs.get_blob(xml_key).decode("utf-8")
