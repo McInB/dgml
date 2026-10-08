@@ -978,7 +978,8 @@ def test_extract_values_direct_submit(workspace: Workspace) -> None:
 
 def test_extract_values_unassigned_during_llm_phase_writes_nothing(workspace: Workspace) -> None:
     """A `docset remove-file` that lands while the LLM phases run must not be
-    undone by the final write: the pair prefix it cleared stays empty."""
+    undone by the final writes: neither the XML blob nor the stats doc
+    (`write_stats=True`, as under `--debug`) comes back under the pair."""
     fid = "f1aaaaaaaaaa"
     _seed_file(workspace, fid)
     _seed_page_text(workspace, fid, page=1)
@@ -994,9 +995,13 @@ def test_extract_values_unassigned_during_llm_phase_writes_nothing(workspace: Wo
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with patch("litellm.completion", side_effect=unassign_then_answer):
         with pytest.raises(FileNotFound, match="no longer assigned"):
-            extract_values(workspace, ds_id, fid, config=config)
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
 
     assert not workspace.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc"))
+    assert (
+        workspace.docs.get_doc(layout.Collection.EXTRACTION_STATS, layout.pair_id(ds_id, fid))
+        is None
+    )
 
 
 def test_extract_values_full_extraction_embeds_in_existing_tree(workspace: Workspace) -> None:
