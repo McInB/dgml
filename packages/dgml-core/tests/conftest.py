@@ -242,7 +242,7 @@ def _reset_warning_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
     models_config._WARNED_TIER_FALLBACKS.clear()
     models_config._WARNED_DISABLED.clear()
     ocr._WARNED_NO_OCR_PROVIDER.clear()
-    grounded._WARNED_REQUIRED_REJECTED.clear()
+    grounded._REQUIRED_TOOL_CHOICE_REJECTED.clear()
     monkeypatch.setattr(rotation, "_WARNED_PILLOW_MISSING", False)
 
 

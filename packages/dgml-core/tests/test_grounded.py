@@ -1578,17 +1578,22 @@ def test_extract_values_falls_back_to_auto_when_required_is_rejected(
     assert stats["phases"]["phase1"]["no_tool_call_retries"] == 1
 
 
-def test_required_rejection_warns_once_per_endpoint(
+def test_required_rejection_is_remembered_per_endpoint(
     workspace: Workspace, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Every attempt probes "required" again (an unrelated 400 on one file must
-    not switch a whole run to auto), but the warning is emitted once."""
+    """Once "required" is shown to be the cause (the auto resend succeeded),
+    later extractions against the same endpoint start on auto instead of
+    re-sending a doomed request, and the warning is emitted once."""
     fid = "f1aaaaaaaaaa"
     _seed_file(workspace, fid)
     _seed_page_text(workspace, fid, page=1)
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
 
-    responses = [_rejection("tool_choice unsupported"), _submit_hello_title()] * 2
+    responses = [
+        _rejection("tool_choice unsupported"),
+        _submit_hello_title(),
+        _submit_hello_title(),
+    ]
     config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
     with caplog.at_level(logging.WARNING, logger="dgml_core.grounded"):
         with patch("litellm.completion", side_effect=responses) as mock_completion:
@@ -1596,12 +1601,14 @@ def test_required_rejection_warns_once_per_endpoint(
             extract_values(workspace, ds_id, fid, config=config)
 
     calls = _phase1_calls(mock_completion)
-    assert [c.get("tool_choice") for c in calls] == ["required", None, "required", None]
+    assert [c.get("tool_choice") for c in calls] == ["required", None, None]
     warnings = [r for r in caplog.records if "rejected tool_choice='required'" in r.message]
     assert len(warnings) == 1
 
 
-def test_unrelated_rejection_fails_with_the_auto_attempts_error(workspace: Workspace) -> None:
+def test_unrelated_rejection_fails_with_the_auto_attempts_error(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
     """A 400 that is not about tool choice fails on the auto resend too, and the
     error reported is that resend's, the request ``main`` would have sent."""
     fid = "f1aaaaaaaaaa"
@@ -1623,6 +1630,12 @@ def test_unrelated_rejection_fails_with_the_auto_attempts_error(workspace: Works
     assert message.startswith("extraction call failed: BadRequestError")
     assert "(auto)" in message
     assert "(first)" not in message
+    # The auto resend failed too, so "required" was not shown to be the cause:
+    # nothing is warned about or remembered, and the next run probes it again.
+    assert not any("rejected tool_choice='required'" in r.message for r in caplog.records)
+    with patch("litellm.completion", return_value=_submit_hello_title()) as again:
+        extract_values(workspace, ds_id, fid, config=config)
+    assert _phase1_calls(again)[0]["tool_choice"] == "required"
 
 
 @pytest.mark.parametrize("kind", ["timeout", "context_window", "content_policy", "auth"])
@@ -1701,7 +1714,7 @@ def test_anthropic_rejection_is_not_resent(workspace: Workspace) -> None:
     assert mock_completion.call_count == 1
 
 
-@pytest.mark.parametrize("finish_reason", ["content_filter", None])
+@pytest.mark.parametrize("finish_reason", ["content_filter", "refusal"])
 def test_extract_values_does_not_retry_an_abnormal_stop(
     workspace: Workspace, finish_reason: str | None
 ) -> None:
@@ -1722,6 +1735,21 @@ def test_extract_values_does_not_retry_an_abnormal_stop(
     stats = workspace.docs.get_doc("extraction_stats", f"{ds_id}/{fid}")
     assert stats is not None
     assert stats["phases"]["phase1"]["no_tool_call_retries"] == 0
+
+
+def test_extract_values_retries_a_text_reply_with_no_finish_reason(workspace: Workspace) -> None:
+    """OpenAI-compatible servers often report no ``finish_reason``; that is not
+    an abnormal stop, so the turn gets the reminder retry."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    responses = [_no_tool_call_response("Here you go.", None), _submit_hello_title()]
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=ANTHROPIC_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=responses) as mock_completion:
+        extract_values(workspace, ds_id, fid, config=config)
+    assert mock_completion.call_count == 2
 
 
 def test_extract_values_reports_a_reasoning_only_reply(workspace: Workspace) -> None:

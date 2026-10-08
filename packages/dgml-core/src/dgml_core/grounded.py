@@ -218,19 +218,22 @@ _TOOL_APPEND_ENTRIES = "append_entries"
 _TOOL_SUBMIT_LOCATIONS = "submit_locations"
 
 # Phase-1 turns per attempt that may end with plain text (no tool call)
-# before the attempt fails. Only reachable on Anthropic, the one provider
-# phase 1 leaves on tool_choice="auto" (see _run_extract_loop): there a model
-# sometimes answers in prose, asks a question, or writes the submission as
-# JSON text instead of calling the tool. Each such turn is answered with a
-# reminder and retried, still on auto. Retries do not spend max_tool_iters.
+# before the attempt fails. Reachable only where phase 1 runs on auto tool
+# choice (see _run_extract_loop): on Anthropic, and on an endpoint that
+# rejected "required". There a model sometimes answers in prose, asks a
+# question, or writes the submission as JSON text instead of calling the
+# tool. Each such turn is answered with a reminder and retried, still on
+# auto. Retries do not spend max_tool_iters.
 _MAX_NO_TOOL_CALL_RETRIES = 2
 
 # How much of a text-only reply the error message quotes.
 _NO_TOOL_CALL_REPLY_PREVIEW_CHARS = 500
 
-# (model, api_base) pairs already warned about refusing tool_choice="required",
-# so a docset-wide run warns once per endpoint rather than once per file.
-_WARNED_REQUIRED_REJECTED: set[tuple[str, str | None]] = set()
+# (model, api_base) endpoints shown to refuse tool_choice="required": a request
+# sent with it was rejected and the same request on auto then succeeded. Later
+# attempts against them start on auto instead of re-sending a doomed request,
+# and the warning is emitted once, when an endpoint is added.
+_REQUIRED_TOOL_CHOICE_REJECTED: set[tuple[str, str | None]] = set()
 
 
 # ---- Config ---------------------------------------------------------------
@@ -2045,10 +2048,12 @@ def _run_extract_loop(
     chunking directive.
 
     Every provider but Anthropic gets ``tool_choice="required"`` on every
-    call, so a text-only turn cannot happen there. An endpoint that rejects
-    ``"required"`` as an invalid request is resent once on auto and stays on
-    auto for the rest of the attempt, warned about once per endpoint. On Anthropic (auto, see
-    below) a text-only turn that stopped normally is retried up to
+    call, so a text-only turn cannot happen there. A call that an endpoint
+    rejects as an invalid request is resent once on auto; when that succeeds,
+    the endpoint is remembered as refusing ``"required"`` (warned about once)
+    and this and later attempts against it run on auto. On auto (Anthropic,
+    see below, or such an endpoint) a text-only turn that stopped normally
+    (``finish_reason`` ``"stop"``, or none reported) is retried up to
     :data:`_MAX_NO_TOOL_CALL_RETRIES` times per attempt, outside the
     ``max_tool_iters`` budget: the reply is kept in the history and a
     reminder to call ``submit_values`` follows it (or, for a chunked run that
@@ -2084,7 +2089,12 @@ def _run_extract_loop(
     chunk_calls = 0
     acc_args: dict[str, Any] | None = None  # accumulated submit_values args
     no_tool_call_retries = 0
-    tool_choice = None if is_anthropic_model(model) else "required"
+    endpoint = (model, api_base)
+    tool_choice = (
+        None
+        if is_anthropic_model(model) or endpoint in _REQUIRED_TOOL_CHOICE_REJECTED
+        else "required"
+    )
 
     def _ack(call_id: str, name: str, payload: dict[str, Any]) -> None:
         messages.append(
@@ -2112,19 +2122,23 @@ def _run_extract_loop(
                 # without forced tool choice, or Claude behind an alias that
                 # is_anthropic_model cannot recognise, which then rejects
                 # thinking under a forced choice). Resend once on auto, which
-                # is what phase 1 sent before "required", and stay on it for
-                # the rest of this attempt. Only a request rejection qualifies:
-                # a timeout or rate limit would only be repeated, and a schema
-                # overflow belongs to the caller's permissive-schema fallback.
+                # is what phase 1 sent before "required". Only a request
+                # rejection qualifies: a timeout or rate limit would only be
+                # repeated, and a schema overflow belongs to the caller's
+                # permissive-schema fallback. A failing resend raises its own
+                # error, the one the auto request alone would have produced.
                 if not (
                     tool_choice == "required"
                     and is_request_rejection(exc)
                     and not _is_tool_schema_too_large(exc)
                 ):
                     raise
-                _warn_required_tool_choice_rejected(model, api_base, exc)
-                tool_choice = None
                 result = call_with_tools(llm_config, messages=messages, tools=tools, cache=True)
+                # The same request succeeded once tool choice was left to the
+                # model, so "required" was the cause: stay on auto for this
+                # attempt and start later ones there.
+                _remember_required_tool_choice_rejected(endpoint, exc)
+                tool_choice = None
         except Exception as exc:
             raise ValuesExtractionFailed(
                 f"extraction call failed: {type(exc).__name__}: {exc}"
@@ -2152,7 +2166,12 @@ def _run_extract_loop(
             # Only a normal stop is worth a reminder: a content filter or a
             # refusal stop would end the same way again, and each retry
             # resends the document.
-            if result.finish_reason != "stop" or no_tool_call_retries >= _MAX_NO_TOOL_CALL_RETRIES:
+            # No finish_reason at all is common on OpenAI-compatible servers
+            # and says nothing abnormal happened, so it is retried too.
+            if (
+                result.finish_reason not in ("stop", None)
+                or no_tool_call_retries >= _MAX_NO_TOOL_CALL_RETRIES
+            ):
                 raise ValuesExtractionFailed(
                     "model returned no tool call; the run is required to end "
                     f"with a {_TOOL_SUBMIT_VALUES!r} call carrying the final values "
@@ -2273,17 +2292,18 @@ def _run_extract_loop(
     )
 
 
-def _warn_required_tool_choice_rejected(
-    model: str, api_base: str | None, exc: BaseException
+def _remember_required_tool_choice_rejected(
+    endpoint: tuple[str, str | None], exc: BaseException
 ) -> None:
-    """Warn, once per endpoint, that phase 1 fell back to auto tool choice.
+    """Record that *endpoint* refuses ``tool_choice="required"`` and warn the
+    first time.
 
     On auto a model may end a turn without a tool call, which the reminder
     retries cover but cannot rule out, so the fallback is worth surfacing."""
-    key = (model, api_base)
-    if key in _WARNED_REQUIRED_REJECTED:
+    if endpoint in _REQUIRED_TOOL_CHOICE_REJECTED:
         return
-    _WARNED_REQUIRED_REJECTED.add(key)
+    _REQUIRED_TOOL_CHOICE_REJECTED.add(endpoint)
+    model = endpoint[0]
     logger.warning(
         "values model %r rejected tool_choice='required' (%s: %s); phase-1 "
         "extraction falls back to auto tool choice for it",
