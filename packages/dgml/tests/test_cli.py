@@ -5750,6 +5750,9 @@ def test_extraction_extract_values_effort_overrides_config(
     values = {"VendorName": {"text": "Acme", "locations": []}}  # empty locs → no phase 3
     response = _tool_response("submit_values", {"values": values})
     wsx = Workspace(root=ws)
+    # `extract` requires the assignment; the plain store call avoids the
+    # auto-extract `docset add-file` would run now that the schema is set.
+    DocSetStore(wsx).add_file(ds_id, fid)
 
     def _extract(*flags: str) -> dict[str, Any]:
         if wsx.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc")):
@@ -5804,6 +5807,8 @@ def test_extraction_extract_records_usage_under_debug(
 
     def _fresh_file() -> str:
         _seed_file_dir(ws, "fileusage0001", pages=1)
+        # Plain assignment (no auto-extract): `extract` requires it.
+        DocSetStore(Workspace(root=ws)).add_file(ds_id, "fileusage0001")
         return "fileusage0001"
 
     values = {"VendorName": {"text": "Acme", "locations": []}}  # empty locs → no phase 3

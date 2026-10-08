@@ -294,12 +294,31 @@ def parse_values_reasoning_effort(raw: Any, *, source: str) -> str | None:
     raise GroundedConfigInvalid(f"{source} must be one of {accepted} if set (got {raw!r})")
 
 
-def load_grounded_config(workspace: Workspace) -> GroundedConfig:
+def load_grounded_config(
+    workspace: Workspace,
+    *,
+    schema_model: str | None = None,
+    values_model: str | None = None,
+) -> GroundedConfig:
     """Resolve the two grounded models (schema generation → ``expert`` tier,
     value extraction → ``advanced`` tier) and their credentials from the merged
     config's ``[grounded]`` section and ``[models]`` tiers. A model set on the
-    section overrides its tier."""
+    section overrides its tier.
+
+    ``schema_model`` / ``values_model`` are per-call overrides and resolve
+    exactly as if written in ``[grounded]``: the section's own ``schema_*`` /
+    ``values_*`` credentials still apply, and nothing a tier carries does.
+    """
     merged = load_merged_config(workspace)
+    overrides = {
+        key: model
+        for key, model in (("schema_model", schema_model), ("values_model", values_model))
+        if model is not None
+    }
+    if overrides:
+        section = merged.get(ConfigSection.GROUNDED)
+        base: dict[str, Any] = section if isinstance(section, dict) else {}
+        merged = {**merged, ConfigSection.GROUNDED: {**base, **overrides}}
     schema = resolve_tiered_model(
         merged,
         section_name=ConfigSection.GROUNDED,
@@ -674,13 +693,14 @@ class ExtractionResult:
     core file was created with only the ``dg:extraction`` element.
     ``tool_calls`` is the count of ``get_page_words`` grounding lookups the
     model performed before finalizing — a rough proxy for how much grounding it
-    leaned on.
+    leaned on. ``model`` is the values model that produced it.
     """
 
     values: dict[str, Any]
     tool_calls: int
     xml_key: str
     mode: str
+    model: str
 
 
 def extract_values(
@@ -726,6 +746,12 @@ def extract_values(
     """
     store = DocSetStore(workspace)
     rnc_schema = store.get_schema(docset_id)  # RNC text; raises SchemaNotFound
+    # The .dgml.xml is written under the (docset, file) pair's prefix, which only the
+    # docset's file list reaches — so an unassigned file would get an orphan artifact.
+    if not store.is_assigned(docset_id, file_id):
+        raise FileNotFound(
+            f"file '{file_id}' is not assigned to docset '{docset_id}'; assign it first"
+        )
     # A stored schema is not re-checked on read; here it is about to be used.
     vocab = check_invariant_paths(parse_rnc(rnc_schema))
     schema = rnc_to_json_schema(rnc_schema)
@@ -959,8 +985,15 @@ def extract_values(
         # tree (full-extraction), or written as a standalone dg:chunk when no
         # tree exists yet (extraction).
         # Read again after phase 3, as before: a file deleted meanwhile
-        # raises here rather than getting an orphan XML written for it.
+        # raises here rather than getting an orphan XML written for it. Same
+        # for the assignment: `unassign` during the LLM phases cleared the
+        # pair's prefix, and writing now would recreate an orphan under it.
         stem = Path(FileStore(workspace).get(file_id).original_filename).stem
+        if not store.is_assigned(docset_id, file_id):
+            # `unassign` also deleted the pair's stats doc; the `finally` must not
+            # put it back.
+            write_stats = False
+            raise FileNotFound(f"file '{file_id}' is no longer assigned to docset '{docset_id}'")
         xml_key = layout.dgml_xml_key(docset_id, file_id, stem)
         existing = (
             workspace.blobs.get_blob(xml_key).decode("utf-8")
@@ -978,7 +1011,11 @@ def extract_values(
         workspace.blobs.put_blob(xml_key, doc.encode("utf-8"))
         outcome = OUTCOME_OK
         return ExtractionResult(
-            values=final_values, tool_calls=tool_calls_total, xml_key=xml_key, mode=mode
+            values=final_values,
+            tool_calls=tool_calls_total,
+            xml_key=xml_key,
+            mode=mode,
+            model=config.values_model,
         )
     except ValuesExtractionFailed as exc:
         error_msg = str(exc)

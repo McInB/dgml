@@ -292,6 +292,40 @@ def test_load_config_section_overrides_tier(workspace: Workspace) -> None:
     assert config.values_model == "openai/gpt-5"  # override wins
 
 
+def test_load_config_call_override_resolves_like_section(workspace: Workspace) -> None:
+    # A per-call override resolves as if written in [grounded]: the section's
+    # own credentials apply to it, and it wins over both the section and the tier.
+    from .conftest import write_config
+
+    write_config(
+        workspace,
+        {
+            "models": {"advanced": "gemini/gemini-2.5-pro", "expert": "anthropic/claude-opus-4-8"},
+            "grounded": {
+                "values_model": "openai/gpt-5",
+                "values_api_key_env": "MY_KEY",
+                "values_api_base": "https://proxy.example",
+            },
+        },
+    )
+    config = load_grounded_config(
+        workspace, values_model="anthropic/claude-sonnet-5", schema_model="openai/gpt-5.4"
+    )
+    assert config.values_model == "anthropic/claude-sonnet-5"
+    assert (config.values_api_key, config.values_api_key_env) == (None, "MY_KEY")
+    assert config.values_api_base == "https://proxy.example"
+    assert config.schema_model == "openai/gpt-5.4"
+    assert (config.schema_api_key, config.schema_api_key_env, config.schema_api_base) == (
+        None,
+        None,
+        None,
+    )
+
+    # An empty override is a config error, not a silent fallback.
+    with pytest.raises(GroundedConfigInvalid):
+        load_grounded_config(workspace, values_model="")
+
+
 def test_load_config_rejects_non_positive_max_iters(workspace: Workspace) -> None:
     _write_grounded_config(
         workspace,
@@ -940,6 +974,34 @@ def test_extract_values_direct_submit(workspace: Workspace) -> None:
     assert "<dg:extraction>" in xml
     vocab = parse_rnc(DocSetStore(workspace).get_schema(ds_id))
     assert dgml_xml_to_values(xml, vocab=vocab) == result.values
+
+
+def test_extract_values_unassigned_during_llm_phase_writes_nothing(workspace: Workspace) -> None:
+    """A `docset remove-file` that lands while the LLM phases run must not be
+    undone by the final writes: neither the XML blob nor the stats doc
+    (`write_stats=True`, as under `--debug`) comes back under the pair."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    response = _tool_call_response("submit_values", {"values": phase1_values})
+
+    def unassign_then_answer(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        DocSetStore(workspace).remove_file(ds_id, fid)
+        return response
+
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=unassign_then_answer):
+        with pytest.raises(FileNotFound, match="no longer assigned"):
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
+
+    assert not workspace.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc"))
+    assert (
+        workspace.docs.get_doc(layout.Collection.EXTRACTION_STATS, layout.pair_id(ds_id, fid))
+        is None
+    )
 
 
 def test_extract_values_full_extraction_embeds_in_existing_tree(workspace: Workspace) -> None:
