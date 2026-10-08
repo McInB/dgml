@@ -1310,7 +1310,16 @@ element into the file's core `<stem>.dgml.xml`. Runs a three-phase pipeline
 a generated document tree the extraction is added alongside it
 (`mode: full-extraction`); otherwise a minimal core file is created
 (`mode: extraction`). `extraction_stats.json` is written only under the global
-`--debug` flag. Errors `SCHEMA_NOT_FOUND` if the DocSet has no schema.
+`--debug` flag. Errors `SCHEMA_NOT_FOUND` if the DocSet has no schema, and
+`FILE_NOT_FOUND` if the file is not assigned to the DocSet — assign it first with
+`docset add-file` (the schema and the assignment can be set in either order; only
+this command needs both in place).
+
+`--values-model` overrides `grounded.values_model` for this call and resolves
+credentials as if the model were set in config: `grounded.values_api_key` /
+`values_api_key_env` / `values_api_base` apply if set, and nothing from the
+`advanced` tier carries over to the new model. `--schema-model` on
+`generate-schema` works the same way.
 
 `--values-effort` overrides `grounded.values_reasoning_effort` for this call:
 `none`, `minimal`, `low`, `medium` (the default), `high`, `xhigh`, or `default`

@@ -2705,12 +2705,10 @@ def _coerce_schema_to_rnc(raw: str, path: Path, workspace_name: str, docset_name
 
 def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     """Dispatch the `extraction` command group."""
-    from dataclasses import replace
-
+    from dgml_core.extraction import extract_file
     from dgml_core.extraction_schema import parse_rnc, rnc_to_json_schema
     from dgml_core.extraction_xml import dgml_xml_to_values
     from dgml_core.grounded import (
-        extract_values,
         generate_schema,
         load_grounded_config,
         parse_values_reasoning_effort,
@@ -2779,21 +2777,15 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         return 0
 
     if sub == "extract":
-        config = load_grounded_config(ws)
-        if args.values_model:
-            config = replace(config, values_model=args.values_model)
         if args.values_effort is not None:
-            config = replace(
-                config,
-                values_reasoning_effort=parse_values_reasoning_effort(
-                    args.values_effort, source="--values-effort"
-                ),
-            )
-        result = extract_values(
+            # Validated here too so the error names the flag, not the library kwarg.
+            parse_values_reasoning_effort(args.values_effort, source="--values-effort")
+        result = extract_file(
             ws,
             args.docset_id,
             args.file_id,
-            config=config,
+            values_model=args.values_model,
+            values_effort=args.values_effort,
             write_stats=args.debug,
             debug=args.debug,
         )
@@ -2801,7 +2793,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             {
                 "docset_id": args.docset_id,
                 "file_id": args.file_id,
-                "model": config.values_model,
+                "model": result.model,
                 "mode": result.mode,
                 "tool_calls": result.tool_calls,
                 "field_count": len(result.values),

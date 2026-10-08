@@ -1007,6 +1007,34 @@ def test_extract_values_direct_submit(workspace: Workspace) -> None:
     assert dgml_xml_to_values(xml, vocab=vocab) == result.values
 
 
+def test_extract_values_unassigned_during_llm_phase_writes_nothing(workspace: Workspace) -> None:
+    """A `docset remove-file` that lands while the LLM phases run must not be
+    undone by the final writes: neither the XML blob nor the stats doc
+    (`write_stats=True`, as under `--debug`) comes back under the pair."""
+    fid = "f1aaaaaaaaaa"
+    _seed_file(workspace, fid)
+    _seed_page_text(workspace, fid, page=1)
+    ds_id, _ = _seed_docset_with_schema(workspace, fid)
+
+    phase1_values = {"title": {"text": "Hello world", "locations": [{"page_number": 1}]}}
+    response = _tool_call_response("submit_values", {"values": phase1_values})
+
+    def unassign_then_answer(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        DocSetStore(workspace).remove_file(ds_id, fid)
+        return response
+
+    config = GroundedConfig(schema_model=DEFAULT_SCHEMA_MODEL, values_model=DEFAULT_VALUES_MODEL)
+    with patch("litellm.completion", side_effect=unassign_then_answer):
+        with pytest.raises(FileNotFound, match="no longer assigned"):
+            extract_values(workspace, ds_id, fid, config=config, write_stats=True)
+
+    assert not workspace.blobs.blob_exists(layout.dgml_xml_key(ds_id, fid, "doc"))
+    assert (
+        workspace.docs.get_doc(layout.Collection.EXTRACTION_STATS, layout.pair_id(ds_id, fid))
+        is None
+    )
+
+
 def test_extract_values_full_extraction_embeds_in_existing_tree(workspace: Workspace) -> None:
     """When the file's core <stem>.dgml.xml already exists (generate ran),
     extraction embeds a dg:extraction sibling and preserves the tree."""
