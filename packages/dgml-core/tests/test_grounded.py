@@ -50,7 +50,6 @@ from dgml_core.grounded import (
     _empty_totals,
     _field_node_schema,
     _pdf_bytes,
-    _pdf_content_block,
     _phase1_attempt_steps,
     _phase1_llm_config,
     _repair_submit_values_args,
@@ -4980,14 +4979,3 @@ def test_pdf_bytes_does_not_read_another_pdf_under_the_file_prefix(workspace: Wo
 
     with pytest.raises(FileNotFound, match=r"file 'f4dddddddddd' has no source PDF$"):
         _pdf_bytes(workspace, fid)
-
-
-def test_pdf_content_block_names_the_file() -> None:
-    """The inline PDF carries a filename. OpenAI's Responses API, which litellm
-    routes gpt-5.4+ tool calls with reasoning_effort through, rejects inline
-    file data without one, and that bridge forwards only the keys present."""
-    block = _pdf_content_block(b"%PDF-1.4 x")
-
-    assert block["type"] == "file"
-    assert block["file"]["filename"].endswith(".pdf")
-    assert block["file"]["file_data"] == "data:application/pdf;base64,JVBERi0xLjQgeA=="

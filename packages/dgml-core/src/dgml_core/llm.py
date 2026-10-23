@@ -467,19 +467,18 @@ class CallResult:
     duration_s: float
 
 
-#: Name sent with an inline PDF. OpenAI's Responses API rejects inline file
-#: data without one (``Missing required parameter: 'input[0].content[1]'``),
-#: and litellm's Chat→Responses bridge forwards only the keys present, unlike
-#: the Chat Completions path, which fills in a default. Anthropic and Gemini
-#: drop it in translation. A constant rather than the file's own name: the
-#: model should take values from the pages, not from a filename.
+#: Name sent with an inline PDF: OpenAI's Responses API rejects inline file
+#: data without one, and litellm's Chat→Responses bridge adds no default.
+#: A constant, not the file's own name: values come from the pages.
 _PDF_FILENAME = "document.pdf"
 
 
 def _pdf_content_block(pdf_bytes: bytes) -> dict[str, Any]:
-    """Unified LiteLLM content block for an inline base64 PDF. litellm
-    normalizes it per provider: Anthropic gets a ``document`` block, Gemini
-    ``inline_data``, OpenAI a ``file`` or Responses ``input_file``."""
+    """Unified LiteLLM content block for an inline base64 PDF.
+
+    litellm normalizes it per provider: Anthropic gets a ``document`` block,
+    Gemini ``inline_data``, OpenAI a ``file`` or Responses ``input_file``.
+    """
     b64 = base64.b64encode(pdf_bytes).decode("ascii")
     return {
         "type": "file",

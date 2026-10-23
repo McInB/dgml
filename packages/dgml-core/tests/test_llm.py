@@ -1326,9 +1326,7 @@ def test_build_user_content_labels_each_image_by_its_own_format() -> None:
 
 
 def test_build_user_content_names_the_inline_pdf() -> None:
-    """The PDF block carries a filename: OpenAI's Responses API, which litellm
-    routes gpt-5.4+ tool calls with reasoning_effort through, rejects inline
-    file data without one, and that bridge forwards only the keys present."""
+    """The inline PDF block carries a filename (see `_PDF_FILENAME`)."""
     content = llm.build_user_content(instruction_text="read", pdf_bytes=b"%PDF-1.4 x")
     assert [block["type"] for block in content] == ["text", "file"]
     assert content[1]["file"] == {
