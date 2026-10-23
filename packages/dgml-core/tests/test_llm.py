@@ -1323,3 +1323,15 @@ def test_build_user_content_labels_each_image_by_its_own_format() -> None:
     urls = [block["image_url"]["url"] for block in content if block["type"] == "image_url"]
     assert urls[0].startswith("data:image/jpeg;base64,")
     assert urls[1].startswith("data:image/png;base64,")
+
+
+def test_build_user_content_names_the_inline_pdf() -> None:
+    """The PDF block carries a filename: OpenAI's Responses API, which litellm
+    routes gpt-5.4+ tool calls with reasoning_effort through, rejects inline
+    file data without one, and that bridge forwards only the keys present."""
+    content = llm.build_user_content(instruction_text="read", pdf_bytes=b"%PDF-1.4 x")
+    assert [block["type"] for block in content] == ["text", "file"]
+    assert content[1]["file"] == {
+        "file_data": "data:application/pdf;base64,JVBERi0xLjQgeA==",
+        "filename": "document.pdf",
+    }
