@@ -238,6 +238,19 @@ def test_load_conversion_config_unknown_family_raises(tmp_path: Path) -> None:
     assert message == "unknown conversion family 'word'; expected one of docx, xlsx, pptx"
 
 
+def test_load_conversion_config_wrong_case_family_raises_with_case_hint(tmp_path: Path) -> None:
+    """A family in the wrong case is told so, rather than being read as a file
+    extension (``DOCX`` normalises to ``.docx``, which maps to the same family)."""
+    ws = Workspace(root=tmp_path)
+    _write_config(ws, {"DOCX": {"provider": _STUB}})
+    with pytest.raises(ConversionConfigInvalid) as excinfo:
+        load_conversion_config(ws)
+    message = str(excinfo.value)
+    assert "unknown conversion family 'DOCX'" in message
+    assert "(family keys are lowercase: conversion.docx)" in message
+    assert "files are configured under" not in message
+
+
 def test_load_conversion_config_unknown_family_checked_before_shape(tmp_path: Path) -> None:
     """The family check comes first: a bad key is reported as such even when
     its table is also malformed."""

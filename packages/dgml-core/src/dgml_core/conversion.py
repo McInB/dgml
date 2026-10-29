@@ -356,7 +356,7 @@ def load_conversion_config(workspace: Workspace) -> dict[FormatFamily, Converter
 
     configs: dict[FormatFamily, ConverterConfig] = {}
     for key, family_section in section.items():
-        family = _require_family(str(key))
+        family = _require_family(key)
         if not isinstance(family_section, dict):
             raise ConversionConfigInvalid(f"'conversion.{family}' must be a table")
         provider = family_section.get("provider")
@@ -379,7 +379,8 @@ def _require_family(key: str) -> FormatFamily:
     (``conversion.doc``, ``conversion.word``) would load and never run — the
     file types it was meant for would be refused as having no converter. The
     message lists the families and, for a key that is a convertible suffix
-    (``doc``, ``xls``), the family that suffix belongs to.
+    (``doc``, ``xls``), the family that suffix belongs to. A family spelled in
+    the wrong case (``DOCX``) is told so, not that it is an extension.
     """
     try:
         return FormatFamily(key)
@@ -387,8 +388,11 @@ def _require_family(key: str) -> FormatFamily:
         pass
     families = ", ".join(FormatFamily)
     message = f"unknown conversion family '{key}'; expected one of {families}"
-    suffix = _normalize_suffix(key)
-    family = family_for_suffix(suffix)
-    if family is not None:
-        message += f" ('{suffix}' files are configured under conversion.{family})"
+    if key.lower() in FormatFamily.__members__.values():
+        message += f" (family keys are lowercase: conversion.{key.lower()})"
+    else:
+        suffix = _normalize_suffix(key)
+        family = family_for_suffix(suffix)
+        if family is not None:
+            message += f" ('{suffix}' files are configured under conversion.{family})"
     raise ConversionConfigInvalid(message)

@@ -1147,6 +1147,7 @@ Errors (run-level, error envelope + exit 1):
 | `EMPTY_DOCSET` | DocSet exists but has no files assigned. |
 | `GENERATION_CONFIG_MISSING` | A generation model can't be resolved — neither the per-task field (`generation.model` / `generation.label_model`) nor its `[models]` tier (`standard` / `advanced`) is set in the merged config. |
 | `GENERATION_CONFIG_INVALID` | The `generation` section is malformed (bad model string, both `api_key` and `api_key_env` set, etc.). A **pre-flight check** (before any transcription spend) also raises this for a model string with no resolvable provider. |
+| `CONVERSION_CONFIG_INVALID` | The `conversion` section is malformed or has a key that is not a format family (`conversion.doc` instead of `conversion.docx`). The section is loaded up front, so this fails the run even when every file in the DocSet is a PDF. |
 | `AUTH_ERROR` | Pre-flight check: the API key for `model` or `label_model`'s provider is absent (and no `api_key` / `api_key_env` set). Skipped when `generation.api_base` is set, since a custom endpoint may authenticate differently. |
 
 > stdout is a single JSON object. The transcription / labeling / render
