@@ -69,9 +69,11 @@ def auto_extract(
     be built.
 
     ``model`` is what produced the values, or what ran before the failure:
-    see :func:`failed_run_model`. With a custom extractor configured the block
-    also carries ``extractor``, as the CLI's extract payload does: the provider
-    whose values were written, ``None`` on a failure or after a fallback.
+    see :func:`failed_run_model`. When the docset is bound to a custom
+    extractor the block also carries ``extractor``, as the CLI's extract payload
+    does: the extractor's name when its values were written, ``None`` on a
+    failure or after a fallback. A docset bound to a name the config does not
+    define is an ``EXTRACTOR_NOT_CONFIGURED`` error in the block.
     """
     from .grounded import extract_values, load_grounded_config
 
@@ -83,7 +85,7 @@ def auto_extract(
         "error": None,
     }
     try:
-        config = load_grounded_config(ws)
+        config = load_grounded_config(ws).for_docset(ws, docset_id)
     except DgmlError as exc:
         block["error"] = f"{exc.code}: {exc}"
         _log_auto_extract_failed(file_id, docset_id, block["error"])
@@ -126,9 +128,11 @@ def auto_extract(
 
 
 def extractor_key(config: GroundedConfig, extractor: str | None) -> dict[str, Any]:
-    """The ``extractor`` key of an auto-extract block: present only when a
-    custom extractor is configured, holding the provider whose values were
-    written (``ExtractionResult.extractor``) or ``None``."""
+    """The ``extractor`` key of an extraction block or payload: present only
+    when *config* is narrowed to a docset bound to a custom extractor
+    (:meth:`~dgml_core.grounded.GroundedConfig.for_docset`), holding the name
+    of the extractor whose values were written (``ExtractionResult.extractor``)
+    or ``None``."""
     if config.extractor is None:
         return {}
     return {"extractor": extractor}
@@ -234,9 +238,11 @@ def extract_file(
     model's whole credential group, so neither the section's ``values_*`` keys nor
     a tier's carry over to the new model
     (see :func:`~dgml_core.grounded.load_grounded_config`).
-    ``extractor_fallback`` overrides ``extractor.fallback`` for this call (a
-    custom extractor, :mod:`dgml_core.extractor`); it is
-    :class:`~dgml_core.errors.InvalidArgument` when no extractor is configured.
+    ``extractor_fallback`` overrides the ``fallback`` of the docset's custom
+    extractor (:mod:`dgml_core.extractor`) for this call; it is
+    :class:`~dgml_core.errors.InvalidArgument` when the docset is bound to none.
+    A docset bound to an extractor the config does not define raises
+    :class:`~dgml_core.errors.ExtractorNotConfigured`.
     ``write_stats`` and ``record_usage`` (both off by default) are forwarded
     to :func:`~dgml_core.grounded.extract_values`; the result's ``usage`` and
     ``stats`` carry the same numbers either way.
@@ -245,6 +251,7 @@ def extract_file(
 
     config = extraction_config(
         ws,
+        docset_id=docset_id,
         values_model=values_model,
         values_effort=values_effort,
         locations_effort=locations_effort,
@@ -276,6 +283,7 @@ def extract_file(
 def extraction_config(
     ws: Workspace,
     *,
+    docset_id: str | None = None,
     values_model: str | None = None,
     values_effort: str | None = None,
     locations_effort: str | None = None,
@@ -285,17 +293,30 @@ def extraction_config(
     overrides applied — the config every ``dgml extraction extract`` form
     (one file, several, ``--batch``) extracts with. See :func:`extract_file`
     for what each override means and how ``values_model`` resolves its
-    credentials."""
+    credentials.
+
+    With *docset_id* the config is narrowed to that docset
+    (:meth:`~dgml_core.grounded.GroundedConfig.for_docset`), and
+    ``extractor_fallback`` is :class:`InvalidArgument` when the docset is bound
+    to no extractor; without it, when the config defines none. The override
+    applies to every extractor the config defines."""
     from .grounded import load_grounded_config, parse_reasoning_effort
 
     config = load_grounded_config(ws, values_model=values_model)
+    if docset_id is not None:
+        config = config.for_docset(ws, docset_id)
     if extractor_fallback is not None:
-        if config.extractor is None:
+        if docset_id is not None and config.extractor is None:
             raise InvalidArgument(
-                "no custom extractor is configured ([extractor] in config.toml), "
+                f"docset '{docset_id}' is bound to no custom extractor, "
                 "so there is no extractor fallback to set"
             )
-        config = replace(config, extractor=replace(config.extractor, fallback=extractor_fallback))
+        if not config.extractors:
+            raise InvalidArgument(
+                "no custom extractor is configured ([extractors.<name>] in config.toml), "
+                "so there is no extractor fallback to set"
+            )
+        config = config.with_extractor_fallback(extractor_fallback)
     if values_effort is not None:
         config = replace(
             config,

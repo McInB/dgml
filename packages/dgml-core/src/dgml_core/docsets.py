@@ -21,6 +21,7 @@ from .errors import (
     ConflictError,
     ConflictErrorKind,
     CorruptMetadata,
+    DgmlError,
     DocSetNotFound,
     FileNotFound,
     GuidanceNotFound,
@@ -29,6 +30,7 @@ from .errors import (
     SchemaNotFound,
     now_iso,
 )
+from .extractor import check_extractor_name
 from .ids import new_id, require_record_id
 from .models import DocSet, DocSetAssignment
 from .storage import Workspace
@@ -80,8 +82,12 @@ class DocSetStore:
         *,
         key_questions: list[str] | None = None,
         docset_id: str | None = None,
+        extractor: str | None = None,
     ) -> DocSet:
         """Create a DocSet and return it.
+
+        ``extractor`` binds it to a custom extractor by name (an
+        ``[extractors.<name>]`` table); see :meth:`update`.
 
         ``docset_id`` sets the DocSet's id instead of generating one. It shares
         the File-id grammar (:data:`~dgml_core.ids.RECORD_ID_SHAPE`): lowercase
@@ -91,6 +97,8 @@ class DocSetStore:
         """
         if not name.strip():
             raise InvalidArgument("docset name must not be empty")
+        if extractor is not None:
+            check_extractor_name(extractor)
         if docset_id is None:
             docset_id = new_id()
         else:
@@ -113,10 +121,13 @@ class DocSetStore:
             name=name,
             description=description,
             key_questions=list(key_questions or []),
+            extractor=extractor,
         )
         # No directory is created up front — the store owns container creation
         # (put_doc writes the manifest). A fresh new_id never collides; a
         # supplied id was checked above.
+        if extractor is not None:
+            self._warn_if_undefined(extractor)
         self.ws.docs.put_doc(layout.Collection.DOCSETS, docset_id, ds.to_json())
         return ds
 
@@ -127,7 +138,20 @@ class DocSetStore:
         name: str | None = None,
         description: str | None = None,
         key_questions: list[str] | None = None,
+        extractor: str | None = None,
     ) -> DocSet:
+        """Change the fields given; ``None`` leaves a field as it is.
+
+        ``extractor`` binds the DocSet to a custom extractor by name, which must
+        pass :func:`~dgml_core.extractor.check_extractor_name`
+        (:class:`InvalidArgument` otherwise). It is not checked against the
+        config, since machines sharing a docstore can configure different
+        extractors; a name this workspace's config does not define is logged
+        as a WARNING, and extraction from the DocSet fails with
+        ``EXTRACTOR_NOT_CONFIGURED`` until it does. :meth:`clear_extractor`
+        removes the binding."""
+        if extractor is not None:
+            check_extractor_name(extractor)
         ds = self.get(docset_id)
         if name is not None:
             if not name.strip():
@@ -137,8 +161,38 @@ class DocSetStore:
             ds.description = description
         if key_questions is not None:
             ds.key_questions = list(key_questions)
+        if extractor is not None:
+            ds.extractor = extractor
+            self._warn_if_undefined(extractor)
         self.ws.docs.put_doc(layout.Collection.DOCSETS, docset_id, ds.to_json())
         return ds
+
+    def clear_extractor(self, docset_id: str) -> DocSet:
+        """Unbind the DocSet from its custom extractor, so its files are
+        extracted with dgml's own pipeline again."""
+        ds = self.get(docset_id)
+        ds.extractor = None
+        self.ws.docs.put_doc(layout.Collection.DOCSETS, docset_id, ds.to_json())
+        return ds
+
+    def _warn_if_undefined(self, extractor: str) -> None:
+        """Warn about a name this config does not define. Called just before
+        the write, once every other argument has passed, so a call that fails
+        logs nothing about a binding it never made."""
+        from .config import load_merged_config
+        from .models_config import ConfigSection
+
+        try:
+            defined = load_merged_config(self.ws).get(ConfigSection.EXTRACTORS)
+        except DgmlError:
+            return  # an unreadable config is its loaders' to report
+        if not isinstance(defined, dict) or extractor not in defined:
+            logger.warning(
+                "extractor %r is not defined in this workspace's config ([extractors.%s]); "
+                "extracting from this docset fails with EXTRACTOR_NOT_CONFIGURED until it is",
+                extractor,
+                extractor,
+            )
 
     def delete(self, docset_id: str) -> None:
         """Delete the docset and every assignment to it. The underlying files

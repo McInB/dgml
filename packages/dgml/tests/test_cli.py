@@ -5894,14 +5894,14 @@ def test_extraction_generate_schema_happy_path(
     """generate-schema renders the LLM's typed field tree straight to RNC and
     stores it — datatypes preserved, no JSON Schema hop. The sample PDF is placed
     directly (no ghostscript needed for schema-gen). It never reads
-    `[extractor]`, so a broken one does not fail it."""
+    `[extractors]`, so a broken table there does not fail it."""
     ws = tmp_path / "ws"
     _init_ws(ws)
     capsys.readouterr()
     _write_grounded_config(ws)
     if broken_extractor:
         with Workspace(root=ws).config_path.open("a", encoding="utf-8") as fh:
-            fh.write('\n[extractor]\nprovider = "no.such.module:Nope"\n')
+            fh.write('\n[extractors.broken]\nprovider = "no.such.module:Nope"\n')
     ds_id = _new_docset(ws, capsys)
 
     # Seed a file record and its source PDF where generation expects it
@@ -6224,8 +6224,9 @@ def _install_cli_extractor(
     fallback: bool | None = None,
     values_model: str = "gemini/gemini-3.1-pro-preview",
 ) -> str:
-    """Write a `[grounded]` plus `[extractor]` config naming the fake extractor
-    above (resolved by its dotted path), and return that path."""
+    """Write a `[grounded]` plus `[extractors.<CLI_EXTRACTOR>]` config naming
+    the fake extractor above (resolved by its dotted path), and return that
+    path. Bind a docset to it with :func:`_bind_cli_extractor`."""
     monkeypatch.setattr(CliFakeExtractor, "failing", set())
     provider = f"{__name__}:CliFakeExtractor"
     extractor: dict[str, Any] = {"provider": provider}
@@ -6238,12 +6239,22 @@ def _install_cli_extractor(
                     "schema_model": "anthropic/claude-opus-4-7",
                     "values_model": values_model,
                 },
-                "extractor": extractor,
+                "extractors": {CLI_EXTRACTOR: extractor},
             }
         ),
         encoding="utf-8",
     )
     return provider
+
+
+#: The name the CLI tests define their fake extractor under.
+CLI_EXTRACTOR = "cli_fake"
+
+
+def _bind_cli_extractor(ws: Path, ds_id: str, capsys: pytest.CaptureFixture[str]) -> None:
+    """Bind *ds_id* to :data:`CLI_EXTRACTOR` through `docset update --extractor`."""
+    assert main(_ws_args(ws) + ["docset", "update", ds_id, "--extractor", CLI_EXTRACTOR]) == 0
+    assert _read_stdout(capsys)["extractor"] == CLI_EXTRACTOR
 
 
 def test_extraction_extract_reports_the_custom_extractor(
@@ -6256,8 +6267,9 @@ def test_extraction_extract_reports_the_custom_extractor(
     ws = tmp_path / "ws"
     _init_ws(ws)
     capsys.readouterr()
-    provider = _install_cli_extractor(ws, monkeypatch)
+    _install_cli_extractor(ws, monkeypatch)
     ds_id = _new_docset(ws, capsys)
+    _bind_cli_extractor(ws, ds_id, capsys)
     schema_file = tmp_path / "schema.rnc"
     schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
     main(_ws_args(ws) + ["extraction", "set-schema", ds_id, "--schema-file", str(schema_file)])
@@ -6272,10 +6284,10 @@ def test_extraction_extract_reports_the_custom_extractor(
     with patch("litellm.completion", side_effect=AssertionError("no model call")):
         assert main(_ws_args(ws) + ["extraction", "extract", ds_id, "fileextr0001"]) == 0
     one = _read_stdout(capsys)
-    assert one["extractor"] == provider
+    assert one["extractor"] == CLI_EXTRACTOR
     assert one["model"] == "fake-model" and one["field_count"] == 1
     xml = Workspace(root=ws).blobs.get_blob(one["xml_key"]).decode("utf-8")
-    assert f'dg:extractor="{provider}"' in xml
+    assert "dg:extractor" not in xml  # the payload names the extractor, the XML does not
 
     # Several files: the second falls back to dgml's own pipeline.
     CliFakeExtractor.failing.add("fileextr0002")
@@ -6288,7 +6300,7 @@ def test_extraction_extract_reports_the_custom_extractor(
     many = _read_stdout(capsys)
     assert many["model"] == "gemini/gemini-3.1-pro-preview"  # the run's values model
     results = {r["file_id"]: r for r in many["results"]}
-    assert results["fileextr0001"]["extractor"] == provider
+    assert results["fileextr0001"]["extractor"] == CLI_EXTRACTOR
     assert results["fileextr0001"]["model"] == "fake-model"
     assert results["fileextr0002"]["extractor"] is None  # fell back to dgml's own pipeline
     assert results["fileextr0002"]["model"] == "gemini/gemini-3.1-pro-preview"
@@ -6356,6 +6368,7 @@ def test_extraction_extract_batch_skips_the_values_model_check_when_it_never_run
         ws, monkeypatch, values_model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0"
     )
     ds_id = _new_docset(ws, capsys)
+    _bind_cli_extractor(ws, ds_id, capsys)
     schema_file = tmp_path / "schema.rnc"
     schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
     main(_ws_args(ws) + ["extraction", "set-schema", ds_id, "--schema-file", str(schema_file)])
@@ -6388,7 +6401,7 @@ def test_extraction_extract_reports_a_broken_extractor_config(
         dump_toml(
             {
                 "grounded": {"schema_model": "a/b", "values_model": "c/d"},
-                "extractor": {"provider": "no.such.module:Nope"},
+                "extractors": {"broken": {"provider": "no.such.module:Nope"}},
             }
         ),
         encoding="utf-8",
@@ -6397,6 +6410,66 @@ def test_extraction_extract_reports_a_broken_extractor_config(
     rc = main(_ws_args(ws) + ["extraction", "extract", ds_id, "somefile"])
     assert rc == 1
     assert _read_stderr(capsys)["error"]["code"] == "EXTRACTOR_CONFIG_INVALID"
+
+
+def test_docset_binds_and_unbinds_a_custom_extractor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`docset create/update --extractor NAME` binds, `--clear-extractor`
+    unbinds, `show`/`list` carry the field, and a malformed name is refused
+    with nothing written. A name the config does not define is accepted with
+    a warning, and extracting from the docset is then EXTRACTOR_NOT_CONFIGURED."""
+    ws = tmp_path / "ws"
+    _init_ws(ws)
+    capsys.readouterr()
+    _install_cli_extractor(ws, monkeypatch)
+
+    assert main(_ws_args(ws) + ["docset", "create", "--name", "Plain"]) == 0
+    plain = _read_stdout(capsys)
+    assert plain["extractor"] is None
+    assert (
+        main(_ws_args(ws) + ["docset", "create", "--name", "Inv", "--extractor", CLI_EXTRACTOR])
+        == 0
+    )
+    bound = _read_stdout(capsys)
+    assert bound["extractor"] == CLI_EXTRACTOR
+    assert main(_ws_args(ws) + ["docset", "show", bound["id"]]) == 0
+    assert _read_stdout(capsys)["extractor"] == CLI_EXTRACTOR
+    assert main(_ws_args(ws) + ["docset", "list"]) == 0
+    listed = {d["id"]: d["extractor"] for d in _read_stdout(capsys)["docsets"]}
+    assert listed == {plain["id"]: None, bound["id"]: CLI_EXTRACTOR}
+
+    assert main(_ws_args(ws) + ["docset", "create", "--name", "Bad", "--extractor", "a.b"]) == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "INVALID_ARGUMENT" and "try 'a_b'" in err["message"]
+    assert main(_ws_args(ws) + ["docset", "list"]) == 0
+    assert len(_read_stdout(capsys)["docsets"]) == 2
+
+    assert main(_ws_args(ws) + ["docset", "update", bound["id"], "--clear-extractor"]) == 0
+    assert _read_stdout(capsys)["extractor"] is None
+    with pytest.raises(SystemExit):  # argparse: the two flags are exclusive
+        main(
+            _ws_args(ws)
+            + ["docset", "update", bound["id"], "--extractor", "x", "--clear-extractor"]
+        )
+    capsys.readouterr()
+
+    # Undefined here: bound with a warning, then refused before the file is read.
+    assert main(_ws_args(ws) + ["docset", "update", plain["id"], "--extractor", "elsewhere"]) == 0
+    assert _read_stdout(capsys)["extractor"] == "elsewhere"
+    schema_file = tmp_path / "schema.rnc"
+    schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
+    main(
+        _ws_args(ws) + ["extraction", "set-schema", plain["id"], "--schema-file", str(schema_file)]
+    )
+    capsys.readouterr()
+    _seed_file_dir(ws, "fileextr0001", pages=1)
+    DocSetStore(Workspace(root=ws)).add_file(plain["id"], "fileextr0001")
+    with patch("litellm.completion", side_effect=AssertionError("no model call")):
+        rc = main(_ws_args(ws) + ["extraction", "extract", plain["id"], "fileextr0001"])
+    assert rc == 1
+    err = _read_stderr(capsys)["error"]
+    assert err["code"] == "EXTRACTOR_NOT_CONFIGURED" and "[extractors.elsewhere]" in err["message"]
 
 
 def test_docset_add_file_auto_extracts_when_schema_set(
@@ -6458,8 +6531,9 @@ def test_docset_add_file_reports_the_custom_extractor(
     ws = tmp_path / "ws"
     _init_ws(ws)
     capsys.readouterr()
-    provider = _install_cli_extractor(ws, monkeypatch, fallback=False)
+    _install_cli_extractor(ws, monkeypatch, fallback=False)
     ds_id = _new_docset(ws, capsys)
+    _bind_cli_extractor(ws, ds_id, capsys)
     schema_file = tmp_path / "schema.rnc"
     schema_file.write_text(_RNC_SCHEMA, encoding="utf-8")
     main(_ws_args(ws) + ["extraction", "set-schema", ds_id, "--schema-file", str(schema_file)])
@@ -6472,7 +6546,7 @@ def test_docset_add_file_reports_the_custom_extractor(
         assert main(_ws_args(ws) + ["docset", "add-file", "fileauto0005", "--docset", ds_id]) == 0
     extraction = _read_stdout(capsys)["extraction"]
     assert extraction["error"] is None
-    assert extraction["model"] == "fake-model" and extraction["extractor"] == provider
+    assert extraction["model"] == "fake-model" and extraction["extractor"] == CLI_EXTRACTOR
 
     # The extractor fails and fallback = false: no model ran at all.
     failing = {"fileauto0006", "fileauto0007", "fileauto0008"}

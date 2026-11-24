@@ -130,8 +130,28 @@ def make_engine(url: str) -> Engine:
 
 
 def create_schema(engine: Engine) -> None:
-    """Create every table that does not exist yet."""
+    """Create every table that does not exist yet, and add the columns a table
+    created by an earlier version lacks."""
     # Imported for its side effect: declares the dgml_* tables on ``metadata``.
-    from . import docstore  # noqa: F401
+    from . import docstore
 
     metadata.create_all(engine)
+    # ``create_all`` never alters a table that exists: a database created before
+    # docsets had an extractor binding has ``dgml_docsets`` without the column.
+    _add_missing_column(engine, docstore.dgml_docsets, docstore.dgml_docsets.c.extractor)
+
+
+def _add_missing_column(engine: Engine, table: sa.Table, column: sa.Column[Any]) -> None:
+    """Add nullable *column* to *table* when the database's copy lacks it."""
+    existing = {c["name"] for c in sa.inspect(engine).get_columns(table.name)}
+    if column.name in existing:
+        return
+    preparer = engine.dialect.identifier_preparer
+    column_type = column.type.compile(dialect=engine.dialect)
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                f"ALTER TABLE {preparer.format_table(table)} "
+                f"ADD COLUMN {preparer.format_column(column)} {column_type}"
+            )
+        )

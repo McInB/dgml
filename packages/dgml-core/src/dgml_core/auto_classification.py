@@ -291,8 +291,8 @@ def prepare_bulk_classify(
     DocSets that exist now decide whether auto-extraction can run at all.
     Every model that will run is checked for a batch backend up front — the
     classification model always, the values model when a DocSet that files
-    can be assigned to already has an extraction schema and no extractor that
-    may not fall back is configured — and a model with none is a hard
+    can be assigned to already has an extraction schema and is not bound to an
+    extractor that may not fall back — and a model with none is a hard
     :class:`~dgml_core.errors.BatchUnavailable`.
 
     Credentials are resolved here too, by building each executor. A failure
@@ -310,16 +310,23 @@ def prepare_bulk_classify(
     state = BulkClassifyBatch()
     models: dict[str, StageRequest] = {"classification": config.model}
     doc_store = DocSetStore(ws)
-    if any(doc_store.has_schema(ds.id) for ds in docsets):
+    schema_docsets = [ds.id for ds in docsets if doc_store.has_schema(ds.id)]
+    needs_values = False
+    if schema_docsets:
         from dgml_core.grounded import extraction_batch_stages, load_grounded_config
 
         try:
             state.grounded = load_grounded_config(ws)
-            models.update(extraction_batch_stages(state.grounded))
         except DgmlError as exc:
             # Soft, exactly like the synchronous auto-extract: every extraction
             # block will carry this error; classification still runs.
             state.grounded_error = f"{exc.code}: {exc}"
+        else:
+            needs_values = any(
+                _values_model_may_run(ws, state.grounded, ds_id) for ds_id in schema_docsets
+            )
+            if needs_values:
+                models.update(extraction_batch_stages(state.grounded))
     assert_batchable(models)  # BATCH_UNAVAILABLE, before anything is added
 
     knobs: dict[str, Any] = {"poll_interval_s": poll_interval_s, "log": log}
@@ -329,11 +336,10 @@ def prepare_bulk_classify(
         raise
     except DgmlError as exc:
         state.classifier_error = exc
-    from dgml_core.grounded import values_model_runs
-
-    # An extractor that may not fall back never calls the values model, so
-    # the extraction run needs no executor (``extractor`` stays ``None``).
-    if state.grounded is not None and values_model_runs(state.grounded):
+    # An extractor that may not fall back never calls the values model, so a
+    # run whose every DocSet with a schema is bound to one needs no executor
+    # (``extractor`` stays ``None``).
+    if state.grounded is not None and needs_values:
         from dgml_core.grounded import values_batch_executor
 
         try:
@@ -343,6 +349,18 @@ def prepare_bulk_classify(
         except DgmlError as exc:
             state.extractor_error = exc
     return state
+
+
+def _values_model_may_run(ws: Workspace, grounded: GroundedConfig, docset_id: str) -> bool:
+    """Whether extracting into *docset_id* may call the values model. A DocSet
+    bound to an extractor the config does not define calls nothing: each of its
+    files fails on that at setup."""
+    from dgml_core.grounded import values_model_runs
+
+    try:
+        return values_model_runs(grounded.for_docset(ws, docset_id))
+    except DgmlError:
+        return False
 
 
 #: Job state key: file id → the DocSet a ``new`` decision created for it, so a
@@ -583,7 +601,13 @@ def _extract_assigned_batch(
     one phase-1 wave and one phase-3 wave however many DocSets they span —
     writing each file's ``extraction`` block exactly as the synchronous
     auto-extract would. Returns the run's stats, or ``None`` when no batch ran
-    (the grounded config or its credentials failed; each block says why)."""
+    (the grounded config or its credentials failed, and each block says why; or
+    every file was extracted synchronously).
+
+    The DocSets' bindings are read again here. A DocSet that may call the
+    values model when the run has no values executor and no error for one (its
+    binding changed after :func:`prepare_bulk_classify`) is extracted
+    synchronously."""
     from dgml_core.errors import AuthError
     from dgml_core.extraction import auto_extract, extractor_key, failed_run_model
     from dgml_core.grounded import extract_values_batch_pairs, no_batch_block, values_model_runs
@@ -598,12 +622,35 @@ def _extract_assigned_batch(
                 "error": batch.grounded_error,
             }
         return None
-    grounded = batch.grounded
-    if batch.extractor is None and values_model_runs(grounded):
-        for (docset_id, fid), block in items.items():
-            if isinstance(batch.extractor_error, AuthError):
-                # Every file fails on this at setup, before any request, so the
-                # synchronous auto-extract is exact and makes no LLM call.
+    workspace_config = batch.grounded
+    # Each pair reports against its own DocSet's extractor.
+    narrowed: dict[str, GroundedConfig | DgmlError] = {}
+    for docset_id, _ in items:
+        if docset_id not in narrowed:
+            try:
+                narrowed[docset_id] = workspace_config.for_docset(ws, docset_id)
+            except DgmlError as exc:
+                narrowed[docset_id] = exc
+    pairs: list[tuple[str, str]] = []
+    for (docset_id, fid), block in items.items():
+        grounded = narrowed[docset_id]
+        if isinstance(grounded, DgmlError):
+            # As the synchronous auto-extract reports it (EXTRACTOR_NOT_CONFIGURED).
+            block["extraction"] = {
+                "performed": True,
+                "model": None,
+                "tool_calls": None,
+                "usage": None,
+                "error": soft_error(grounded),
+            }
+        elif batch.extractor is None and values_model_runs(grounded):
+            if batch.extractor_error is None or isinstance(batch.extractor_error, AuthError):
+                # No executor and no error: no DocSet needed the values model
+                # when the run was prepared, and this one's binding changed
+                # since, so its file is extracted synchronously, as it is bound
+                # now. An AuthError fails every file at setup, before any
+                # request, so there the synchronous auto-extract is exact and
+                # makes no LLM call.
                 block["extraction"] = auto_extract(
                     ws, docset_id, fid, write_stats=write_stats, record_usage=record_usage
                 )
@@ -616,17 +663,19 @@ def _extract_assigned_batch(
                     "error": soft_error(batch.extractor_error),
                     **extractor_key(grounded, None),
                 }
+        else:
+            pairs.append((docset_id, fid))
+    if not pairs:
         return None
 
     executor = batch.extractor
-    pairs = list(items)
     results: dict[tuple[str, str], Any]
     try:
         results = dict(
             extract_values_batch_pairs(
                 ws,
                 pairs,
-                config=grounded,
+                config=workspace_config,
                 executor=executor,
                 write_stats=write_stats,
                 record_usage=record_usage,
@@ -634,7 +683,10 @@ def _extract_assigned_batch(
         )
     except Exception as exc:
         results = dict.fromkeys(pairs, exc)
-    for pair, block in items.items():
+    for pair in pairs:
+        block = items[pair]
+        grounded = narrowed[pair[0]]
+        assert not isinstance(grounded, DgmlError)
         extraction: dict[str, Any] = {
             "performed": True,
             "model": grounded.values_model,

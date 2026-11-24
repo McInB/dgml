@@ -689,10 +689,10 @@ Errors:
 ## DocSet commands
 
 ```
-dgml docset create --name NAME [--id DOCSET_ID] [--description DESC] [--key-question Q ...]
+dgml docset create --name NAME [--id DOCSET_ID] [--description DESC] [--key-question Q ...] [--extractor NAME]
 dgml docset list
 dgml docset show <docset_id>
-dgml docset update <docset_id> [--name NAME] [--description DESC]
+dgml docset update <docset_id> [--name NAME] [--description DESC] [--extractor NAME | --clear-extractor]
 dgml docset delete <docset_id>
 dgml docset add-file <file_id> --docset <docset_id>   # auto-extracts when the
                                                      # DocSet has an extraction schema
@@ -707,6 +707,26 @@ the same grammar as `file add --id`: **3 to 40 characters using only lowercase l
 digits, hyphens and underscores, and starting with a letter or digit**. Omit it for a
 generated 12-character id. Fails with `CONFLICT` if a DocSet already holds the id (the
 existing DocSet is left untouched) and with `INVALID_ARGUMENT` if the id is malformed.
+
+`--extractor NAME` (on `create` and `update`) binds the DocSet to the
+[custom extractor](custom-extractors.md) defined as `[extractors.NAME]` in the
+config: its files are extracted with that extractor instead of dgml's own
+pipeline. `update --clear-extractor` removes the binding. NAME is 1-40
+lowercase letters, digits and single underscores, starting with a letter or
+digit;
+another name is `INVALID_ARGUMENT`, with nothing written, and the message
+suggests a fixed name where one exists. The name is not checked against the
+config, since machines that share a docstore can configure different
+extractors: a name this workspace's config does not define is bound with a
+warning on stderr, and extracting from the DocSet fails with
+`EXTRACTOR_NOT_CONFIGURED` until it is defined.
+
+Every DocSet payload (`create`, `show`, `update`, each entry of `list`)
+carries `extractor`, the bound name or `null`:
+
+```json
+{"id": "o8vr8rs488vg", "name": "Invoices", "description": "", "key_questions": [], "extractor": "invoice"}
+```
 
 `docset delete` removes the DocSet and its file-assignment markers, but
 **does not delete the underlying Files**. Files remain in
@@ -732,14 +752,14 @@ lands in `extraction.error`, the assignment stands, exit stays 0). No schema
 them.
 
 `extraction.model` is what produced the values, or what ran before the
-failure: the values model, or with a [custom extractor](custom-extractors.md)
-configured the extractor's reported model (or its provider path) when its
-values were written. After an extractor failure it is the values model when the
-fallback ran, whether or not that succeeded, and `null` when no fallback ran
-(`extractor.fallback = false`), since no model ran at all. With an extractor
-configured the block also carries `extractor`, as `extraction extract` does:
-the provider whose values were written, `null` on a failure or after a
-fallback.
+failure: the values model, or for a DocSet bound to a
+[custom extractor](custom-extractors.md) the extractor's reported model (or
+its provider path) when its values were written. After an extractor failure it
+is the values model when the fallback ran, whether or not that succeeded, and
+`null` when no fallback ran (`fallback = false`), since no model ran at all.
+For a DocSet bound to an extractor the block also carries `extractor`, as
+`extraction extract` does: the name of the extractor whose values were
+written, `null` on a failure or after a fallback.
 
 ```json
 {
@@ -1427,8 +1447,9 @@ generate step after the schema step has already paid. A bad `--values-effort`
 or `--locations-effort` is refused up front too (`GROUNDED_CONFIG_INVALID`), and
 so is a missing `grounded` config when the extract step will run
 (`GROUNDED_CONFIG_MISSING`), with or without `--batch`. So is
-`--no-extractor-fallback` when no `[extractor]` is configured and the extract
-step will run (`INVALID_ARGUMENT`).
+`--no-extractor-fallback` when the DocSet is bound to no custom extractor and
+the extract step will run (`INVALID_ARGUMENT`), and a binding the config does
+not define (`EXTRACTOR_NOT_CONFIGURED`).
 
 ```json
 {"error": {"code": "INVALID_ARGUMENT",
@@ -1617,12 +1638,14 @@ flag. Errors `SCHEMA_NOT_FOUND` if the DocSet has no schema, and
 `docset add-file` (the schema and the assignment can be set in either order; only
 this command needs both in place).
 
-With an `[extractor]` section in the config (a custom extractor, see
+When the DocSet is bound to a custom extractor (`docset update --extractor
+NAME`, defined as `[extractors.NAME]` in the config; see
 [custom-extractors.md](custom-extractors.md)), that class replaces the three
-phases and the payload gains an `extractor` key: the extractor whose values
-were written, or `null` when the extractor failed and the file was extracted
-by the pipeline above instead (the default, `extractor.fallback = true`), the
-same as the `dg:extractor` attribute on the written element. `model` is
+phases and the payload gains an `extractor` key: the name of the extractor
+whose values were written, or `null` when the extractor failed and the file
+was extracted by the pipeline above instead (the default, `fallback = true`).
+The written `dg:extraction` element is the same either way: it does not name
+the extractor. `model` is
 likewise what produced the values: the extractor's reported model, or the
 values model after a fallback. The same rule gives the `model` of the
 `extraction_stats.json` file and of the `usage.jsonl` row, which a failed run
@@ -1630,8 +1653,10 @@ also writes: the values model when the fallback ran, whatever its outcome,
 and `null` when the extractor failed and no fallback ran, since no model ran.
 `--no-extractor-fallback` fails such a file instead, with the
 extractor's error (`EXTRACTOR_FAILED` or `EXTRACTOR_OUTPUT_INVALID`); it is
-`INVALID_ARGUMENT` when no extractor is configured. A broken section is
-`EXTRACTOR_CONFIG_INVALID` before any file is read.
+`INVALID_ARGUMENT` when the DocSet is bound to no extractor. A broken
+`[extractors.<name>]` table, used by this DocSet or not, is
+`EXTRACTOR_CONFIG_INVALID`, and a binding the config does not define is
+`EXTRACTOR_NOT_CONFIGURED`, both before any file is read.
 
 `--values-model` overrides `grounded.values_model` for this call. A model's
 credentials move with it, so the override takes none of
@@ -1668,11 +1693,11 @@ needs grounding.
 }
 ```
 
-With a custom extractor configured, the same payload (and each per-file
-entry below) also carries:
+For a DocSet bound to a custom extractor, the same payload (and each per-file
+entry below) also carries the extractor's name:
 
 ```json
-  "extractor": "my_pkg.extractors:InvoiceExtractor"
+  "extractor": "invoice"
 ```
 
 or `"extractor": null` for a file the extractor failed and dgml's own pipeline
@@ -1693,7 +1718,7 @@ fails is reported in its entry (`status: failed` with an `{code, message}`
 error) and the others still run. The top-level `model` is the run's values
 model; each entry's `model` is what produced that file's values, or what ran
 before its failure, as the single-file `model` above (so with a custom
-extractor it is the extractor's model, the values model after a fallback, and
+extractor bound it is the extractor's model, the values model after a fallback, and
 `null` for a file whose extractor failed with no fallback). The command exits `0` once the run completes
 — unless **every** file failed, when it exits `2` with the same payload on
 stdout, so a script can detect a total failure from the exit code alone. A
@@ -1737,10 +1762,13 @@ block.
 }
 ```
 
-`batch` totals cover both phases of the run. With a custom extractor
-configured, `--batch` calls its `extract_many` once with every file and
+`batch` totals cover both phases of the run. For a DocSet bound to a custom
+extractor, `--batch` calls its `extract_many` once with every file and
 batches only the phases of the files that fell back, so a run the extractor
-handled entirely reports zero `requests`. With `fallback = false` or
+handled entirely reports zero `requests`. A resumed batch job extracts with the
+extractor the DocSet is bound to at the resume; outputs recorded under another
+extractor's name are not replayed.
+With `fallback = false` or
 `--no-extractor-fallback` the values model never runs, so it is not checked
 for a batch backend (no `BATCH_UNAVAILABLE`) or a key, and `batch` is all zeros
 with `"provider": null`.
@@ -3518,8 +3546,9 @@ envelope). **Hard** = emitted as the stderr `error` envelope with exit `1`;
 | `GROUNDED_CONFIG_INVALID` | hard | The `grounded` config section has a missing/invalid field. |
 | `SCHEMA_GENERATION_FAILED` | hard | The schema-generation LLM call failed or returned a non-object. |
 | `VALUES_EXTRACTION_FAILED` | hard | The value-extraction pipeline failed. |
-| `EXTRACTOR_CONFIG_INVALID` | hard | The `extractor` config section is malformed, or names a class that cannot be resolved, is not a `ValueExtractor`, or rejects its options. Raised before any file is read; never falls back. |
-| `EXTRACTOR_FAILED` | hard / soft | The custom extractor raised and `extractor.fallback` is off (or `--no-extractor-fallback` was passed); with fallback on, the file is extracted by dgml's own pipeline and the payload's `extractor` is `null`. Soft in `extraction.error` on auto-extraction. |
+| `EXTRACTOR_NOT_CONFIGURED` | hard / soft | The DocSet is bound to a custom extractor name that no `[extractors.<name>]` table in the config defines. Raised before the file is read; never falls back. Soft (in `extraction.error`) on the auto-extract paths. |
+| `EXTRACTOR_CONFIG_INVALID` | hard | An `[extractors.<name>]` table is malformed or has a bad name, or names a class that cannot be resolved, is not a `ValueExtractor`, or rejects its options. Every table is checked, used or not. Raised before any file is read; never falls back. |
+| `EXTRACTOR_FAILED` | hard / soft | The custom extractor raised and its `fallback` is off (or `--no-extractor-fallback` was passed); with fallback on, the file is extracted by dgml's own pipeline and the payload's `extractor` is `null`. Soft in `extraction.error` on auto-extraction. |
 | `EXTRACTOR_OUTPUT_INVALID` | hard / soft | The custom extractor returned a tree that fails validation (the message lists the problems with their paths); same fallback rule as `EXTRACTOR_FAILED`. |
 | `CHAIN_CONFIG` | hard | A chain config is missing/invalid, or `dgml chain add/remove` hit a bad/built-in chain. |
 | `CHAIN_RPC` | hard | A JSON-RPC call to the chain failed (network, bad RPC URL, node error). |

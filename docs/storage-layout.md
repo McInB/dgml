@@ -83,7 +83,7 @@ at all — see [storage services](#storage-services-storage).
 │       └── inputs/<name>             #   inputs a resumed run restores
 ├── docsets/
 │   └── <docset_id>/                  # generated, or set by `docset create --id`
-│       ├── docset.json               # { id, name, description, key_questions }
+│       ├── docset.json               # { id, name, description, key_questions, extractor }
 │       ├── extraction-schema.rnc      # grounded extraction schema, RELAX NG Compact (optional)
 │       ├── extraction-guidance.md     # docset-level extraction guidance shown to the LLM (optional)
 │       ├── authored-schema.json     # the tag schema a user SUPPLIED via --schema-path (optional)
@@ -725,19 +725,25 @@ Field rules:
 Every other field is passed to the named provider, which declares the keys it
 accepts and rejects the rest — so a custom provider's options go here too.
 
-### `extractor` (optional)
+### `extractors` (optional)
 
-A custom extractor for `dgml extraction extract` (and the auto-extraction on
-assignment): a class that replaces the three LLM phases. Absent, dgml's own
-pipeline runs. See [custom-extractors.md](custom-extractors.md).
+Custom extractors for `dgml extraction extract` (and the auto-extraction on
+assignment), one table per extractor, keyed by its name: a class that replaces
+the three LLM phases for the DocSets bound to that name (`docset.json`
+`extractor`). A DocSet bound to none runs dgml's own pipeline. See
+[custom-extractors.md](custom-extractors.md).
 
 ```toml
-[extractor]
-provider = "my_pkg.extractors:InvoiceExtractor"
+[extractors.invoice]
+provider = "acme.extractors:InvoiceExtractor"
 fallback = true
 max_concurrency = 5
 model = "my-model"
 ```
+
+The name is 1-40 lowercase letters, digits and single underscores, starting
+with a letter or digit. Every table is checked when the config is loaded, whether a
+DocSet uses it or not.
 
 Field rules:
 
@@ -1005,7 +1011,8 @@ Field rules:
     "What is the effective date?",
     "Who are the contracting parties?",
     "What is the contract term?"
-  ]
+  ],
+  "extractor": "invoice"
 }
 ```
 
@@ -1015,6 +1022,11 @@ Field rules:
   a new file is assigned here only if it would answer the same
   questions. Optional; older `docset.json` files written without this
   field read back as an empty list.
+- `extractor` — the name of the custom extractor (an `[extractors.<name>]`
+  table in the config) this DocSet's files are extracted with, or `null` for
+  dgml's own pipeline. A name only, never the class or its options: those stay
+  in the config. Optional; a `docset.json` written without it reads back as
+  `null`. See [custom-extractors.md](custom-extractors.md).
 
 ## `docsets/<id>/extraction-schema.rnc` (optional)
 
@@ -1296,8 +1308,9 @@ itself, so a workspace whose batch runs all finished has no `batches/`.
   `concept_roster.json`). Inputs recorded only by presence (a document's
   `_blocks.json`) have no file here; their flag is in `job.json` `inputs`.
   `inputs/extractor/<docset_id>/<file_id>.json` is a custom extractor's
-  validated output for one file of an `extraction extract --batch` job, so a
-  resumed run reads it back instead of calling the extractor again.
+  validated output for one file of an `extraction extract --batch` job, with
+  the extractor's name, so a resumed run reads it back instead of calling the
+  extractor again. A record is read back only for the extractor it names.
 
 ## `docsets/<id>/files/<file_id>/<stem>.dgml.xml` (optional)
 

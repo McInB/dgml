@@ -558,17 +558,25 @@ class ValuesExtractionFailed(DgmlError):
 
 
 class ExtractorConfigInvalid(DgmlError):
-    """The ``[extractor]`` config section is malformed, or names a class that
-    cannot be imported, is not a :class:`~dgml_core.extractor.ValueExtractor`, or
-    rejects its options. Raised at config load; never falls back."""
+    """An ``[extractors.<name>]`` config table is malformed, has a bad name, or
+    names a class that cannot be imported, is not a
+    :class:`~dgml_core.extractor.ValueExtractor`, or rejects its options. Raised
+    at config load; never falls back."""
 
     code = "EXTRACTOR_CONFIG_INVALID"
+
+
+class ExtractorNotConfigured(DgmlError):
+    """A docset names a custom extractor that no ``[extractors.<name>]`` table
+    defines. Raised before the file is read; never falls back."""
+
+    code = "EXTRACTOR_NOT_CONFIGURED"
 
 
 class ExtractorFailed(ValuesExtractionFailed):
     """A custom extractor raised (or its construction did). A subclass of
     :class:`ValuesExtractionFailed`, so every caller that handles that class
-    handles this one; with ``[extractor] fallback = true`` dgml's own pipeline
+    handles this one; with ``fallback = true`` (the default) dgml's own pipeline
     runs instead and this is only logged."""
 
     code = "EXTRACTOR_FAILED"

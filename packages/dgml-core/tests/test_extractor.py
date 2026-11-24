@@ -44,9 +44,12 @@ from dgml_core.errors import (
     AuthError,
     BatchPending,
     BatchUnavailable,
+    ConflictError,
     CorruptMetadata,
+    DocSetNotFound,
     ExtractorConfigInvalid,
     ExtractorFailed,
+    ExtractorNotConfigured,
     ExtractorOutputInvalid,
     InvalidArgument,
     ModelsConfigInvalid,
@@ -60,7 +63,8 @@ from dgml_core.extractor import (
     ExtractorConfig,
     ExtractorOutput,
     ValueExtractor,
-    load_extractor_config,
+    check_extractor_name,
+    load_extractor_configs,
     make_extractor,
     output_from_json,
     output_to_json,
@@ -76,6 +80,7 @@ from dgml_core.grounded import (
     load_grounded_config,
     no_batch_block,
 )
+from dgml_core.models import DocSet
 from dgml_core.models_config import ConfigSection
 from dgml_core.storage import Workspace
 from dgml_core.usage import read_events
@@ -239,19 +244,33 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> str:
     return install(monkeypatch, FakeExtractor)
 
 
+#: The extractor name the seeded docset is bound to.
+NAME = "test_ext"
+
+
 def _config(provider: str, **extractor: Any) -> GroundedConfig:
+    """A workspace-wide config defining one extractor, :data:`NAME`."""
     return GroundedConfig(
         schema_model=DEFAULT_SCHEMA_MODEL,
         values_model=DEFAULT_VALUES_MODEL,
-        extractor=ExtractorConfig(provider=provider, **extractor),
+        extractors={NAME: ExtractorConfig(provider=provider, name=NAME, **extractor)},
     )
 
 
-def _seed(workspace: Workspace, fid: str = "f1aaaaaaaaaa") -> str:
+def _bind(workspace: Workspace, ds_id: str, name: str | None = NAME) -> None:
+    """Bind *ds_id* to *name* without the store's not-in-config warning."""
+    ds = DocSetStore(workspace).get(ds_id)
+    ds.extractor = name
+    workspace.docs.put_doc(layout.Collection.DOCSETS, ds_id, ds.to_json())
+
+
+def _seed(workspace: Workspace, fid: str = "f1aaaaaaaaaa", *, bind: str | None = NAME) -> str:
+    """A file assigned to a docset with a schema, the docset bound to *bind*."""
     _seed_file(workspace, fid)
     _seed_page_text(workspace, fid, page=1)
     workspace.blobs.put_blob(layout.file_page_image_key(fid, 1), _png_header(1000, 1000))
     ds_id, _ = _seed_docset_with_schema(workspace, fid)
+    _bind(workspace, ds_id, bind)
     return ds_id
 
 
@@ -267,14 +286,14 @@ _PHASE1_VALUES = {"title": {"text": "Hello world", "locations": [{"page_number":
 # ---------------------------------------------------------------------------
 
 
-def test_no_section_means_no_extractor(workspace: Workspace) -> None:
+def test_no_section_means_no_extractors(workspace: Workspace) -> None:
     write_config(workspace, {"grounded": {"values_model": "m", "schema_model": "s"}})
-    assert load_extractor_config(workspace) is None
-    assert load_grounded_config(workspace).extractor is None
+    assert load_extractor_configs(workspace) == {}
+    assert load_grounded_config(workspace).extractors == {}
     write_config(
-        workspace, {"grounded": {"values_model": "m", "schema_model": "s"}, "extractor": {}}
+        workspace, {"grounded": {"values_model": "m", "schema_model": "s"}, "extractors": {}}
     )
-    assert load_extractor_config(workspace) is None
+    assert load_extractor_configs(workspace) == {}
 
 
 def test_load_config_resolves_and_validates_eagerly(workspace: Workspace, fake: str) -> None:
@@ -282,22 +301,30 @@ def test_load_config_resolves_and_validates_eagerly(workspace: Workspace, fake: 
         workspace,
         {
             "grounded": {"values_model": "m", "schema_model": "s"},
-            "extractor": {"provider": fake, "fallback": False, "max_concurrency": 2, "mode": "ok"},
+            "extractors": {
+                NAME: {"provider": fake, "fallback": False, "max_concurrency": 2, "mode": "ok"},
+                "other": {"provider": fake},
+            },
         },
     )
-    config = load_extractor_config(workspace)
-    assert config == ExtractorConfig(
-        provider=fake, fallback=False, max_concurrency=2, options={"mode": "ok"}
-    )
-    assert load_grounded_config(workspace).extractor == config
-    assert "mode" in repr(config)
+    configs = load_extractor_configs(workspace)
+    assert configs == {
+        NAME: ExtractorConfig(
+            provider=fake, name=NAME, fallback=False, max_concurrency=2, options={"mode": "ok"}
+        ),
+        "other": ExtractorConfig(provider=fake, name="other"),
+    }
+    grounded = load_grounded_config(workspace)
+    # Workspace-wide: every definition, and no docset's extractor yet.
+    assert grounded.extractors == configs and grounded.extractor is None
+    assert "mode" in repr(configs[NAME]) and f"name={NAME!r}" in repr(configs[NAME])
 
 
 @pytest.mark.parametrize(
     ("section", "match"),
     [
-        ({"provider": ""}, "extractor.provider"),
-        ({"provider": 3}, "extractor.provider"),
+        ({"provider": ""}, f"extractors.{NAME}.provider"),
+        ({"provider": 3}, f"extractors.{NAME}.provider"),
         ({"provider": "nodots"}, "dotted path"),
         ({"provider": "no.such.module:Thing"}, "could not import"),
         ({"provider": f"{__name__}:NoSuchClass"}, "has no attribute"),
@@ -306,47 +333,159 @@ def test_load_config_resolves_and_validates_eagerly(workspace: Workspace, fake: 
         ({"provider": f"{__name__}:ForgetfulExtractor"}, "must return an ExtractorConfig"),
         ({"provider": f"{__name__}:FakeExtractor", "typo": 1}, "unknown fields"),
         ({"provider": f"{__name__}:FakeExtractor", "mode": "weird"}, "'mode' must be"),
-        ({"provider": f"{__name__}:FakeExtractor", "fallback": "yes"}, "extractor.fallback"),
+        ({"provider": f"{__name__}:FakeExtractor", "fallback": "yes"}, f"{NAME}.fallback"),
         ({"provider": f"{__name__}:FakeExtractor", "max_concurrency": 0}, "max_concurrency"),
         ({"provider": f"{__name__}:FakeExtractor", "max_concurrency": True}, "max_concurrency"),
+        ("not a table", "must be a table"),
     ],
 )
 def test_load_config_rejects(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch, section: dict[str, Any], match: str
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch, section: Any, match: str
 ) -> None:
     for cls in (NotAnExtractor, HalfExtractor, ForgetfulExtractor, FakeExtractor):
         install(monkeypatch, cls)
     write_config(
-        workspace, {"grounded": {"values_model": "m", "schema_model": "s"}, "extractor": section}
+        workspace,
+        {"grounded": {"values_model": "m", "schema_model": "s"}, "extractors": {NAME: section}},
     )
-    with pytest.raises(ExtractorConfigInvalid, match=match):
-        load_extractor_config(workspace)
+    with pytest.raises(ExtractorConfigInvalid, match=match) as exc:
+        load_extractor_configs(workspace)
+    assert f"extractors.{NAME}" in str(exc.value)  # every message names the table
     # A config error reaches every extraction caller through the grounded loader.
     with pytest.raises(ExtractorConfigInvalid):
         load_grounded_config(workspace)
 
 
+def test_a_flat_extractors_table_never_echoes_an_option_value(workspace: Workspace) -> None:
+    """Keys written straight under ``[extractors]`` are read as extractor names;
+    the error names the key and the fix, not the value, which may be a secret."""
+    write_config(
+        workspace,
+        {
+            "grounded": {"values_model": "m", "schema_model": "s"},
+            "extractors": {"api_key": "sk-live-secret", "provider": "pkg:Cls"},
+        },
+    )
+    with pytest.raises(ExtractorConfigInvalid, match=r"\[extractors\.<name>\]") as exc:
+        load_extractor_configs(workspace)
+    assert "extractors.api_key" in str(exc.value) and "got a str" in str(exc.value)
+    assert "sk-live-secret" not in str(exc.value)
+
+
+def test_an_unused_broken_definition_still_fails_every_extraction(
+    workspace: Workspace, fake: str
+) -> None:
+    """Every definition is checked at load, used or not, so a broken one
+    fails extraction from a docset that uses dgml's own pipeline too."""
+    write_config(
+        workspace,
+        {
+            "grounded": {"values_model": "m", "schema_model": "s"},
+            "extractors": {NAME: {"provider": fake}, "broken": {"provider": "no.such:Nope"}},
+        },
+    )
+    fid = "f1aaaaaaaaaa"
+    ds_id = _seed(workspace, fid, bind=None)
+    with pytest.raises(ExtractorConfigInvalid, match=r"extractors\.broken"):
+        extract_file(workspace, ds_id, fid)
+    block = auto_extract(workspace, ds_id, fid)
+    assert block["error"].startswith("EXTRACTOR_CONFIG_INVALID")
+
+
+@pytest.mark.parametrize(
+    ("name", "suggestion"),
+    [
+        ("Invoice", "'invoice'"),
+        ("acme.invoice", "'acme_invoice'"),
+        ("acme-invoice", "'acme_invoice'"),
+        ("a__b", "'a_b'"),
+        ("", None),
+        ("_x", "'x'"),
+        ("x_", "'x'"),
+        ("2024-invoice", "'2024_invoice'"),
+        ("1.5", "'1_5'"),
+        ("x" * 41, None),
+    ],
+)
+def test_extractor_names_are_checked_with_a_suggested_fix(
+    name: str, suggestion: str | None
+) -> None:
+    with pytest.raises(InvalidArgument) as exc:
+        check_extractor_name(name)
+    assert "lowercase letters, digits and single underscores" in str(exc.value)
+    if suggestion is None:
+        assert "try" not in str(exc.value)
+    else:
+        assert f"(try {suggestion})" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "invoice",
+        "acme_invoice",
+        "invoice_v2",
+        "a",
+        "x" * 40,
+        "2invoice",
+        "2024_invoice",
+        "123",
+        "1",
+    ],
+)
+def test_valid_extractor_names(name: str) -> None:
+    """A leading digit and an all-digit name are fine, as for a File or DocSet id."""
+    assert check_extractor_name(name) == name
+
+
+def test_a_bad_name_in_config_is_a_config_error(workspace: Workspace, fake: str) -> None:
+    write_config(
+        workspace,
+        {
+            "grounded": {"values_model": "m", "schema_model": "s"},
+            "extractors": {"Acme-Invoice": {"provider": fake}},
+        },
+    )
+    with pytest.raises(ExtractorConfigInvalid, match="try 'acme_invoice'"):
+        load_extractor_configs(workspace)
+
+
+def test_env_var_overrides_one_key_of_a_named_extractor(
+    workspace: Workspace, fake: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_config(
+        workspace,
+        {
+            "grounded": {"values_model": "m", "schema_model": "s"},
+            "extractors": {NAME: {"provider": fake, "mode": "ok"}},
+        },
+    )
+    monkeypatch.setenv(f"DGML_EXTRACTORS__{NAME.upper()}__MAX_CONCURRENCY", "7")
+    config = load_extractor_configs(workspace)[NAME]
+    assert config.max_concurrency == 7 and config.options == {"mode": "ok"}
+
+
 def test_callers_that_never_extract_skip_a_broken_section(workspace: Workspace) -> None:
-    """``extractor=False`` (schema generation, a batch job's key lookup) does
-    not read ``[extractor]``, so a broken one cannot fail it."""
+    """``extractors=False`` (schema generation, a batch job's key lookup) does
+    not read ``[extractors]``, so a broken table cannot fail it."""
     write_config(
         workspace,
         {
             "grounded": {"values_model": "m", "schema_model": "s", "schema_api_key": "sk-schema"},
-            "extractor": {"provider": "no.such.module:Nope"},
+            "extractors": {NAME: {"provider": "no.such.module:Nope"}},
         },
     )
     with pytest.raises(ExtractorConfigInvalid):
         load_grounded_config(workspace)
-    assert load_grounded_config(workspace, extractor=False).extractor is None
+    assert load_grounded_config(workspace, extractors=False).extractors == {}
     ref = credential_ref("grounded", "schema", None)
     assert resolve_credential(workspace, ref) == "sk-schema"
 
 
-def test_section_must_be_a_table(workspace: Workspace) -> None:
-    workspace.config_path.write_text('extractor = "x"\n', encoding="utf-8")
+def test_section_must_hold_tables(workspace: Workspace) -> None:
+    workspace.config_path.write_text('extractors = "x"\n', encoding="utf-8")
     with pytest.raises((ExtractorConfigInvalid, CorruptMetadata)):
-        load_extractor_config(workspace)
+        load_extractor_configs(workspace)
 
 
 def test_make_extractor_constructs_once_per_call(fake: str) -> None:
@@ -359,42 +498,46 @@ def test_configuration_build_round_trip(fake: str, tmp_path: Path) -> None:
         identity=Identity(workspace_id="tenant-1", name="n", organization="o"),
         storage=Storage.combined(ProviderSpec("dgml_core.storage_local:LocalStore")),
         models=Models(advanced=Model("adv"), expert=Model("exp")),
-        extractor=ExtractorSection(provider=fake, fallback=False, options={"mode": "ok"}),
+        extractors={
+            NAME: ExtractorSection(provider=fake, fallback=False, options={"mode": "ok"}),
+            "other": ExtractorSection(provider=fake),
+        },
     )
-    assert cfg.sections[ConfigSection.EXTRACTOR] == {
-        "provider": fake,
-        "fallback": False,
-        "mode": "ok",
+    # Unset keys are left out, as in every other section.
+    assert cfg.sections[ConfigSection.EXTRACTORS] == {
+        NAME: {"provider": fake, "fallback": False, "mode": "ok"},
+        "other": {"provider": fake},
     }
     ws = Workspace.open(configuration=cfg, root=tmp_path)
-    assert load_extractor_config(ws) == ExtractorConfig(
-        provider=fake, fallback=False, options={"mode": "ok"}
-    )
-    assert load_grounded_config(ws).extractor is not None
+    assert load_extractor_configs(ws) == {
+        NAME: ExtractorConfig(provider=fake, name=NAME, fallback=False, options={"mode": "ok"}),
+        "other": ExtractorConfig(provider=fake, name="other"),
+    }
 
 
 def test_library_caller_configures_the_extractor_in_memory(fake: str, tmp_path: Path) -> None:
     """A workspace opened from a Configuration (no config.toml) runs the
-    extractor through the public entry point, with the section's fallback
-    setting, and the per-call override still applies."""
+    docset's extractor through the public entry point, with the table's
+    fallback setting, and the per-call override still applies."""
     cfg = Configuration.build(
         identity=Identity(workspace_id="tenant-1", name="n", organization="o"),
         storage=Storage.combined(ProviderSpec("dgml_core.storage_local:LocalStore")),
         models=Models(advanced=Model(DEFAULT_VALUES_MODEL), expert=Model(DEFAULT_SCHEMA_MODEL)),
-        extractor=ExtractorSection(provider=fake, fallback=False),
+        extractors={NAME: ExtractorSection(provider=fake, fallback=False)},
     )
     ws = Workspace.open(configuration=cfg, root=tmp_path)
     assert ws.config_path.exists() is False
     fid = "f1aaaaaaaaaa"
-    ds_id = _seed(ws, fid)
+    ds_id = _seed(ws, fid, bind=None)
+    DocSetStore(ws).update(ds_id, extractor=NAME)
 
     with patch("litellm.completion", side_effect=AssertionError("no model call expected")):
         result = extract_file(ws, ds_id, fid)
-    assert result.extractor == fake and FakeExtractor.calls == [fid]
+    assert result.extractor == NAME and FakeExtractor.calls == [fid]
 
-    # fallback = false from the section: the extractor's error is raised ...
+    # fallback = false from the table: the extractor's error is raised ...
     FakeExtractor.outputs[fid] = RuntimeError("boom")
-    with pytest.raises(ExtractorFailed, match="boom"):
+    with pytest.raises(ExtractorFailed, match=f"extractor {NAME} failed: .*boom"):
         extract_file(ws, ds_id, fid)
     # ... and the per-call override turns the fallback back on.
     with patch("litellm.completion", return_value=_phase1(_PHASE1_VALUES)):
@@ -402,17 +545,151 @@ def test_library_caller_configures_the_extractor_in_memory(fake: str, tmp_path: 
     assert fell_back.extractor is None
 
 
+def test_each_docset_extracts_with_its_own_extractor(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two names over the same class with different options, and an unbound
+    docset: each docset gets its own, and the unbound one dgml's pipeline."""
+    fake = install(monkeypatch, FakeExtractor)
+    write_config(
+        workspace,
+        {
+            "grounded": {"values_model": DEFAULT_VALUES_MODEL, "schema_model": "s"},
+            "extractors": {
+                "first": {"provider": fake, "mode": "ok"},
+                "second": {"provider": fake, "mode": "bad", "fallback": False},
+            },
+        },
+    )
+    fid = "f1aaaaaaaaaa"
+    ds_id = _seed(workspace, fid, bind="first")
+    store = DocSetStore(workspace)
+    other = store.create("Other", extractor="second")
+    plain = store.create("Plain")
+    for target in (other.id, plain.id):
+        store.add_file(target, fid)
+        store.set_schema(target, store.get_schema(ds_id))
+
+    with patch("litellm.completion", side_effect=AssertionError("no model call expected")):
+        assert extract_file(workspace, ds_id, fid).extractor == "first"
+        assert extract_file(workspace, other.id, fid).extractor == "second"
+    seen = [r.docset_id for r in FakeExtractor.requests]
+    assert seen == [ds_id, other.id]
+    with patch("litellm.completion", return_value=_phase1(_PHASE1_VALUES)):
+        result = extract_file(workspace, plain.id, fid)
+    assert result.extractor is None and len(FakeExtractor.requests) == 2
+
+    # The stats name the extractor and its class.
+    config = load_grounded_config(workspace)
+    with patch("litellm.completion", side_effect=AssertionError("no model call expected")):
+        stats = extract_values(workspace, other.id, fid, config=config).stats
+    assert stats["extractor"]["name"] == "second" and stats["extractor"]["provider"] == fake
+
+
+def test_a_name_the_config_does_not_define_fails_before_the_file_is_read(
+    workspace: Workspace, fake: str
+) -> None:
+    write_config(
+        workspace,
+        {
+            "grounded": {"values_model": DEFAULT_VALUES_MODEL, "schema_model": "s"},
+            "extractors": {NAME: {"provider": fake}},
+        },
+    )
+    fid = "f1aaaaaaaaaa"
+    ds_id = _seed(workspace, fid, bind="missing")
+    with (
+        patch("dgml_core.grounded._pdf_bytes", side_effect=AssertionError("read")),
+        patch("litellm.completion", side_effect=AssertionError("no model call expected")),
+    ):
+        with pytest.raises(ExtractorNotConfigured, match=r"\[extractors.missing\]"):
+            extract_file(workspace, ds_id, fid)
+        block = auto_extract(workspace, ds_id, fid)
+        # A multi-file run is refused whole, before any file.
+        with pytest.raises(ExtractorNotConfigured):
+            extract_values_many(workspace, ds_id, [fid], config=load_grounded_config(workspace))
+    assert block["error"].startswith("EXTRACTOR_NOT_CONFIGURED")
+    assert FakeExtractor.calls == []
+
+
+def test_binding_checks_the_name_and_warns_about_an_undefined_one(
+    workspace: Workspace, fake: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    write_config(
+        workspace,
+        {
+            "grounded": {"values_model": DEFAULT_VALUES_MODEL, "schema_model": "s"},
+            "extractors": {NAME: {"provider": fake}},
+        },
+    )
+    store = DocSetStore(workspace)
+    with pytest.raises(InvalidArgument, match="try 'acme_invoice'"):
+        store.create("Bad", extractor="acme.invoice")
+    assert store.list_all() == []  # nothing written
+    with caplog.at_level(logging.WARNING, logger="dgml_core"):
+        ds = store.create("Invoices", extractor=NAME)
+    assert ds.extractor == NAME and store.get(ds.id).to_json()["extractor"] == NAME
+    assert not caplog.records
+    with caplog.at_level(logging.WARNING, logger="dgml_core"):
+        store.update(ds.id, extractor="elsewhere")
+    assert store.get(ds.id).extractor == "elsewhere"
+    assert any("not defined in this workspace's config" in r.getMessage() for r in caplog.records)
+    with pytest.raises(InvalidArgument):
+        store.update(ds.id, extractor="Bad-Name")
+    store.update(ds.id, name="Renamed")  # None leaves the binding as it is
+    assert store.get(ds.id).extractor == "elsewhere"
+    assert store.clear_extractor(ds.id).extractor is None
+    assert store.get(ds.id).extractor is None
+
+
+def test_a_failed_binding_call_logs_no_undefined_name_warning(
+    workspace: Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The warning says extraction from the docset will fail, so it is logged
+    only for a binding that was made: not when the docset does not exist, and
+    not when a create is refused for its id."""
+    store = DocSetStore(workspace)
+    held = store.create("Held", docset_id="held-id")
+    with caplog.at_level(logging.WARNING, logger="dgml_core"):
+        with pytest.raises(DocSetNotFound):
+            store.update("no-such-id", extractor="elsewhere")
+        with pytest.raises(ConflictError):
+            store.create("Again", docset_id=held.id, extractor="elsewhere")
+    assert not caplog.records
+    # A malformed name is still refused before the docset is looked up.
+    with pytest.raises(InvalidArgument):
+        store.update("no-such-id", extractor="Bad-Name")
+
+
+@pytest.mark.parametrize("raw", [["invoice"], {"name": "invoice"}, 3, True, "", None])
+def test_docset_from_json_reads_a_non_string_extractor_as_none(raw: Any) -> None:
+    """A hand-edited record cannot make the binding an unhashable or non-string
+    value that later fails as an internal error."""
+    ds = DocSet.from_json({"id": "d1", "name": "n", "extractor": raw})
+    assert ds.extractor is None
+    assert DocSet.from_json({"id": "d1", "name": "n", "extractor": "invoice"}).extractor == (
+        "invoice"
+    )
+
+
+def test_extractor_config_fields_after_provider_are_keyword_only(fake: str) -> None:
+    """A field added later cannot shift a positionally built config."""
+    assert ExtractorConfig(fake).provider == fake
+    with pytest.raises(TypeError):
+        ExtractorConfig(fake, False)  # type: ignore[misc, arg-type]
+
+
 def test_auto_extract_block_says_what_ran(fake: str, tmp_path: Path) -> None:
     """The auto-extract block's ``model`` is what produced the values or ran
-    before the failure, and ``extractor`` (present only with one configured)
-    the provider whose values were written."""
+    before the failure, and ``extractor`` (present only when the docset has
+    one) the name of the extractor whose values were written."""
 
     def open_with(extractor: ExtractorSection | None) -> Workspace:
         cfg = Configuration.build(
             identity=Identity(workspace_id="tenant-1", name="n", organization="o"),
             storage=Storage.combined(ProviderSpec("dgml_core.storage_local:LocalStore")),
             models=Models(advanced=Model(DEFAULT_VALUES_MODEL), expert=Model(DEFAULT_SCHEMA_MODEL)),
-            extractor=extractor,
+            extractors=None if extractor is None else {NAME: extractor},
         )
         return Workspace.open(configuration=cfg, root=tmp_path)
 
@@ -423,7 +700,7 @@ def test_auto_extract_block_says_what_ran(fake: str, tmp_path: Path) -> None:
     with patch("litellm.completion", side_effect=AssertionError("no model call expected")):
         block = auto_extract(ws, ds_id, fid)
     # The fake reports no model of its own, so its provider path stands in.
-    assert block["error"] is None and block["model"] == fake and block["extractor"] == fake
+    assert block["error"] is None and block["model"] == fake and block["extractor"] == NAME
 
     # Extractor failed, no fallback: nothing ran.
     FakeExtractor.outputs[fid] = RuntimeError("boom")
@@ -444,8 +721,8 @@ def test_auto_extract_block_says_what_ran(fake: str, tmp_path: Path) -> None:
     assert block["error"] is None
     assert block["model"] == DEFAULT_VALUES_MODEL and block["extractor"] is None
 
-    # No extractor configured: no key, and a failure still names the values model.
-    ws = open_with(None)
+    # The docset bound to none: no key, and a failure still names the values model.
+    _bind(ws, ds_id, None)
     with patch("litellm.completion", return_value=_phase1(bogus)):
         block = auto_extract(ws, ds_id, fid)
     assert block["error"] is not None and block["model"] == DEFAULT_VALUES_MODEL
@@ -646,6 +923,10 @@ def test_output_json_round_trip() -> None:
         values=_invoice(), model="m", usage={"cost_usd": 0.5}, stats={"k": [1]}, tool_calls=2
     )
     assert output_from_json(output_to_json(out)) == out
+    named = output_to_json(out, extractor="first")
+    assert output_from_json(named, extractor="first") == out
+    # Another extractor's record is not this one's output.
+    assert output_from_json(named, extractor="second") is None
 
 
 # ---------------------------------------------------------------------------
@@ -661,14 +942,15 @@ def test_grounded_extractor_replaces_the_phases(workspace: Workspace, fake: str)
         result = extract_values(workspace, ds_id, fid, config=_config(fake))
 
     assert FakeExtractor.calls == [fid]
-    assert result.extractor == fake
+    assert result.extractor == NAME
     assert result.model == "fake-model"
     assert result.tool_calls == 3
     assert result.values["title"]["locations"] == [
         {"page_number": 1, "bounding_box": HELLO_WORLD_BOX}
     ]
     xml = workspace.blobs.get_blob(result.xml_key).decode("utf-8")
-    assert f'dg:extractor="{fake}"' in xml
+    # The XML does not name the extractor; the result and stats do.
+    assert "dg:extractor" not in xml
     vocab = parse_rnc(DocSetStore(workspace).get_schema(ds_id))
     assert dgml_xml_to_values(xml, vocab=vocab) == result.values
     stats = result.stats
@@ -794,7 +1076,7 @@ def test_telemetry_is_merged_and_carried(workspace: Workspace, fake: str) -> Non
     assert result.stats["phases"]["phase1"]["cost_usd"] == 0.25
     (row,) = read_events(workspace)
     assert row["model"] == fake and row["cost_usd"] == 0.25
-    assert row["context"]["extractor"] == fake
+    assert row["context"]["extractor"] == NAME
     stored = workspace.docs.get_doc(layout.Collection.EXTRACTION_STATS, layout.pair_id(ds_id, fid))
     assert stored is not None and stored["extractor"]["details"] == {"retries": 1}
 
@@ -834,7 +1116,7 @@ def test_unset_values_key_only_fails_a_run_that_may_fall_back(
         extract_values(workspace, ds_id, fid, config=config(fallback=True))
     assert FakeExtractor.calls == []
     result = extract_values(workspace, ds_id, fid, config=config(fallback=False))
-    assert result.extractor == fake and FakeExtractor.calls == [fid]
+    assert result.extractor == NAME and FakeExtractor.calls == [fid]
 
 
 def test_extractor_logs_go_through_the_dgml_core_logger(
@@ -897,7 +1179,7 @@ def test_fallback_on_raise_runs_the_phases_and_logs_once(
     ]
     assert [r.levelno for r in fallback_lines] == [logging.WARNING, logging.INFO]
     assert (
-        fake in fallback_lines[0].getMessage()
+        f"extractor {NAME} failed" in fallback_lines[0].getMessage()
         and "RuntimeError: boom" in fallback_lines[0].getMessage()
     )
 
@@ -960,7 +1242,7 @@ def test_no_fallback_raises_with_usage_attached(workspace: Workspace, fake: str)
             extract_values(workspace, ds_id, fid, config=_config(fake, fallback=False))
     assert isinstance(exc.value, ValuesExtractionFailed)
     # A foreign exception is named by type; the message names the extractor.
-    assert str(exc.value) == f"extractor {fake} failed: RuntimeError: boom"
+    assert str(exc.value) == f"extractor {NAME} failed: RuntimeError: boom"
     assert exc.value.usage is not None and "duration_s" in exc.value.usage
     assert exc.value.stats is not None and exc.value.stats["extractor"]["outcome"] == "failed"
     # No model ran: the stats say so, and so does the usage row.
@@ -977,14 +1259,14 @@ def test_no_fallback_raises_with_usage_attached(workspace: Workspace, fake: str)
     FakeExtractor.outputs[fid] = ExtractorOutput(values={"nope": {"text": "x"}})
     with pytest.raises(ExtractorOutputInvalid, match="nope") as invalid:
         extract_values(workspace, ds_id, fid, config=_config(fake, fallback=False))
-    assert str(invalid.value).startswith(f"extractor {fake} failed: extractor output is invalid")
+    assert str(invalid.value).startswith(f"extractor {NAME} failed: extractor output is invalid")
 
     # An ExtractorFailed the extractor raised itself keeps its message, prefixed
     # the same way and without a type name.
     FakeExtractor.outputs[fid] = ExtractorFailed("no recording for this file")
     with pytest.raises(ExtractorFailed) as own:
         extract_values(workspace, ds_id, fid, config=_config(fake, fallback=False))
-    assert str(own.value) == f"extractor {fake} failed: no recording for this file"
+    assert str(own.value) == f"extractor {NAME} failed: no recording for this file"
     assert own.value.code == "EXTRACTOR_FAILED"
 
 
@@ -1019,7 +1301,7 @@ def test_extract_file_fallback_override(workspace: Workspace, fake: str) -> None
                 "values_model": DEFAULT_VALUES_MODEL,
                 "schema_model": DEFAULT_SCHEMA_MODEL,
             },
-            "extractor": {"provider": fake},
+            "extractors": {NAME: {"provider": fake}},
         },
     )
     fid = "f1aaaaaaaaaa"
@@ -1027,13 +1309,20 @@ def test_extract_file_fallback_override(workspace: Workspace, fake: str) -> None
     FakeExtractor.outputs[fid] = RuntimeError("boom")
     with pytest.raises(ExtractorFailed):
         extract_file(workspace, ds_id, fid, extractor_fallback=False)
-    assert extraction_config(workspace).extractor is not None
-    assert extraction_config(workspace, extractor_fallback=False).extractor.fallback is False  # type: ignore[union-attr]
+    # Workspace-wide, the override reaches every definition; narrowed, the docset's.
+    assert extraction_config(workspace).extractor is None
+    assert extraction_config(workspace, extractor_fallback=False).extractors[NAME].fallback is False
+    narrowed = extraction_config(workspace, docset_id=ds_id, extractor_fallback=False)
+    assert narrowed.extractor is not None and narrowed.extractor.fallback is False
+    # The docset bound to none: nothing to override for it.
+    _bind(workspace, ds_id, None)
+    with pytest.raises(InvalidArgument, match="bound to no custom extractor"):
+        extract_file(workspace, ds_id, fid, extractor_fallback=False)
     write_config(
         workspace,
         {"grounded": {"values_model": DEFAULT_VALUES_MODEL, "schema_model": DEFAULT_SCHEMA_MODEL}},
     )
-    with pytest.raises(InvalidArgument, match="no custom extractor"):
+    with pytest.raises(InvalidArgument, match="no custom extractor is configured"):
         extraction_config(workspace, extractor_fallback=False)
 
 
@@ -1121,7 +1410,7 @@ def test_batch_with_an_extractor_makes_no_model_request(workspace: Workspace, fa
     assert many.batch is not None and many.batch["requests"] == 0
     assert list(many.outcomes) == fids
     for outcome in many.outcomes.values():
-        assert not isinstance(outcome, Exception) and outcome.extractor == fake
+        assert not isinstance(outcome, Exception) and outcome.extractor == NAME
     # One extract_many call over every pair, in input order; one construction.
     assert FakeExtractor.many_calls == [fids] and FakeExtractor.constructed == 1
 
@@ -1140,7 +1429,7 @@ def test_batch_fallback_pairs_get_a_phase1_unit(workspace: Workspace, fake: str)
     assert len(backend.submitted) == 1  # phase 1 for the fallback pair only
     assert many.batch is not None and many.batch["requests"] == 1
     outcomes = many.outcomes
-    assert [getattr(o, "extractor", "ERR") for o in outcomes.values()] == [fake, None, fake]
+    assert [getattr(o, "extractor", "ERR") for o in outcomes.values()] == [NAME, None, NAME]
 
 
 def test_batch_outcomes_apply_in_pair_order_when_the_pool_returns_out_of_order(
@@ -1198,11 +1487,7 @@ def test_batch_honors_an_extract_many_override(
     )
     assert Bulk.calls == []  # extract never called
     assert Bulk.many_calls == [fids]
-    assert [getattr(o, "extractor", "ERR") for o in many.outcomes.values()] == [
-        provider,
-        None,
-        provider,
-    ]
+    assert [getattr(o, "extractor", "ERR") for o in many.outcomes.values()] == [NAME, None, NAME]
 
 
 def test_batch_extract_many_raising_fails_every_pair_or_falls_back(
@@ -1273,7 +1558,7 @@ def test_batch_with_an_unset_values_key_extracts_when_the_extractor_may_not_fall
     # The key is never read, so the run stays a batch run: one extract_many.
     assert many.batch == no_batch_block()
     for outcome in many.outcomes.values():
-        assert not isinstance(outcome, Exception) and outcome.extractor == fake
+        assert not isinstance(outcome, Exception) and outcome.extractor == NAME
     assert FakeExtractor.many_calls == [fids]
 
 
@@ -1294,7 +1579,7 @@ def test_batch_with_an_unbatchable_values_model_extracts_when_the_extractor_may_
     block = many.batch
     assert block is not None and block["provider"] is None and block["requests"] == 0
     for outcome in many.outcomes.values():
-        assert not isinstance(outcome, Exception) and outcome.extractor == fake
+        assert not isinstance(outcome, Exception) and outcome.extractor == NAME
     assert FakeExtractor.many_calls == [fids]
 
 
@@ -1321,7 +1606,7 @@ def test_batch_job_with_no_executor_records_and_replays_outputs(
     )
     many = extract_values_many(workspace, ds_id, fids, config=config, batch=True, poll_interval_s=0)
     resumed.close(None)
-    assert all(getattr(o, "extractor", None) == fake for o in many.outcomes.values())
+    assert all(getattr(o, "extractor", None) == NAME for o in many.outcomes.values())
     assert FakeExtractor.many_calls == [fids]  # only the first run asked
 
 
@@ -1344,7 +1629,7 @@ def test_bulk_classify_batch_checks_the_values_model_only_when_it_may_run(
                 "values_model": "nobatchprovider/some-model",
                 "schema_model": DEFAULT_SCHEMA_MODEL,
             },
-            "extractor": {"provider": fake, "fallback": fallback},
+            "extractors": {NAME: {"provider": fake, "fallback": fallback}},
         },
     )
     docsets = DocSetStore(workspace).list_all()
@@ -1365,8 +1650,108 @@ def test_bulk_classify_batch_checks_the_values_model_only_when_it_may_run(
     assert stats["docset_ids"] == [ds_id]
     for block in items.values():
         assert block["extraction"]["error"] is None
-        assert block["extraction"]["extractor"] == fake
+        assert block["extraction"]["extractor"] == NAME
     assert FakeExtractor.many_calls == [fids]
+
+
+def test_bulk_classify_batch_decides_per_docset(workspace: Workspace, fake: str) -> None:
+    """The values model is checked when any docset with a schema may call it:
+    here an unbound one does, so the unbatchable model is refused. Once that
+    docset is bound too, the run needs no executor; a docset bound to a name
+    the config does not define gets EXTRACTOR_NOT_CONFIGURED in its block,
+    and the rest are extracted by their own extractor."""
+    from dgml_core.auto_classification import _extract_assigned_batch, prepare_bulk_classify
+    from dgml_core.classification import ClassificationConfig
+
+    fid = "f1aaaaaaaaaa"
+    first = _seed(workspace, fid)
+    store = DocSetStore(workspace)
+    other = store.create("Other")
+    store.add_file(other.id, fid)
+    store.set_schema(other.id, store.get_schema(first))
+    _bind(workspace, other.id, None)
+    _backend()
+    write_config(
+        workspace,
+        {
+            "grounded": {
+                "values_model": "nobatchprovider/some-model",
+                "schema_model": DEFAULT_SCHEMA_MODEL,
+            },
+            "extractors": {NAME: {"provider": fake, "fallback": False}},
+        },
+    )
+    config = ClassificationConfig(model=DEFAULT_VALUES_MODEL)
+    with pytest.raises(BatchUnavailable, match="nobatchprovider"):
+        prepare_bulk_classify(workspace, config=config, docsets=store.list_all(), poll_interval_s=0)
+
+    _bind(workspace, other.id, "undefined")
+    state = prepare_bulk_classify(
+        workspace, config=config, docsets=store.list_all(), poll_interval_s=0
+    )
+    assert state.extractor is None and state.extractor_error is None
+    items: dict[tuple[str, str], dict[str, Any]] = {(first, fid): {}, (other.id, fid): {}}
+    stats = _extract_assigned_batch(
+        workspace, items, batch=state, write_stats=False, record_usage=False
+    )
+    assert stats is not None and stats["docset_ids"] == [first]
+    assert items[(first, fid)]["extraction"]["extractor"] == NAME
+    assert items[(other.id, fid)]["extraction"]["error"].startswith("EXTRACTOR_NOT_CONFIGURED")
+
+
+@pytest.mark.parametrize("rebound_to", [None, "loose"])
+def test_bulk_classify_batch_extracts_a_docset_rebound_after_prepare(
+    workspace: Workspace, fake: str, rebound_to: str | None
+) -> None:
+    """The run was prepared when no docset could call the values model, so it
+    has no values executor. A docset whose binding changed since (unbound, or
+    bound to an extractor that may fall back) is extracted synchronously, as
+    it is bound now, and its block carries no error."""
+    from dgml_core.auto_classification import _extract_assigned_batch, prepare_bulk_classify
+    from dgml_core.classification import ClassificationConfig
+
+    ds_id, fids = _seed_many(workspace, 2)
+    _backend()
+    write_config(
+        workspace,
+        {
+            "grounded": {
+                "values_model": DEFAULT_VALUES_MODEL,
+                "schema_model": DEFAULT_SCHEMA_MODEL,
+            },
+            "extractors": {
+                NAME: {"provider": fake, "fallback": False},
+                "loose": {"provider": fake, "fallback": True},
+            },
+        },
+    )
+    state = prepare_bulk_classify(
+        workspace,
+        config=ClassificationConfig(model=DEFAULT_VALUES_MODEL),
+        docsets=DocSetStore(workspace).list_all(),
+        poll_interval_s=0,
+    )
+    assert state.extractor is None and state.extractor_error is None
+
+    _bind(workspace, ds_id, rebound_to)
+    items: dict[tuple[str, str], dict[str, Any]] = {(ds_id, fid): {} for fid in fids}
+    with patch("litellm.completion", return_value=_phase1(_PHASE1_VALUES)) as completion:
+        stats = _extract_assigned_batch(
+            workspace, items, batch=state, write_stats=False, record_usage=False
+        )
+    assert stats is None  # nothing went through a batch
+    for block in items.values():
+        assert block["extraction"]["error"] is None
+        assert block["extraction"].get("extractor") == rebound_to
+    if rebound_to is None:
+        # dgml's own pipeline ran, one synchronous call per file.
+        assert completion.call_count == len(fids) and FakeExtractor.calls == []
+    else:
+        assert completion.call_count == 0 and FakeExtractor.calls == fids
+    from dgml_core.extraction import get_extracted_values
+
+    for fid in fids:
+        assert get_extracted_values(workspace, ds_id, fid)  # the values were written
 
 
 def test_batch_pairs_need_an_executor_when_the_values_model_may_run(
@@ -1429,7 +1814,113 @@ def test_job_mode_calls_the_extractor_once_across_a_pause_and_resume(
     # The resume asked only for the unrecorded file; nothing was resubmitted.
     assert FakeExtractor.many_calls == [fids, [fids[2]]]
     assert len(backend.submitted) == 1
-    assert [getattr(o, "extractor", "ERR") for o in many.outcomes.values()] == [fake, fake, None]
+    assert [getattr(o, "extractor", "ERR") for o in many.outcomes.values()] == [NAME, NAME, None]
+
+
+def test_a_resume_extracts_with_the_docsets_current_extractor(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resume reads the docset's binding again, as it reads the config again:
+    after a rebind mid-job it extracts with the new extractor, and the first
+    extractor's records are not replayed under the new name. With the binding
+    unchanged the records are replayed. Nothing about the binding is kept in
+    the job's state."""
+    fake = install(monkeypatch, FakeExtractor)
+    ds_id, fids = _seed_many(workspace, 2)
+    _backend()
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model=DEFAULT_VALUES_MODEL,
+        extractors={
+            name: ExtractorConfig(provider=fake, name=name, fallback=False)
+            for name in (NAME, "other")
+        },
+    )
+    argv = ["extraction", "extract", ds_id, "--all", "--batch"]
+
+    def run(job_id: str | None) -> tuple[str, list[str]]:
+        session = start_session(
+            workspace, command="extraction extract", argv=argv, job_id=job_id, wait=True
+        )
+        many = extract_values_many(
+            workspace, ds_id, fids, config=config, batch=True, poll_interval_s=0
+        )
+        assert "extractors" not in session.state
+        session.close(BatchPending(session.job_id, submitted_batches=0, requests_in_flight=0))
+        return session.job_id, [getattr(o, "extractor", "ERR") for o in many.outcomes.values()]
+
+    job_id, names = run(None)
+    assert names == [NAME, NAME] and FakeExtractor.many_calls == [fids]
+
+    _, names = run(job_id)  # same binding: replayed, not asked again
+    assert names == [NAME, NAME] and FakeExtractor.many_calls == [fids]
+
+    _bind(workspace, ds_id, "other")
+    _, names = run(job_id)  # rebound: the new extractor is asked for every file
+    assert names == ["other", "other"] and FakeExtractor.many_calls == [fids, fids]
+
+    _, names = run(job_id)  # and its records are the ones replayed from then on
+    assert names == ["other", "other"] and FakeExtractor.many_calls == [fids, fids]
+
+    # Unbound: under the job too, the docset has no extractor.
+    _bind(workspace, ds_id, None)
+    session = start_session(
+        workspace, command="extraction extract", argv=argv, job_id=job_id, wait=True
+    )
+    try:
+        assert config.for_docset(workspace, ds_id).extractor is None
+    finally:
+        session.close(BatchPending(job_id, submitted_batches=0, requests_in_flight=0))
+
+
+def test_a_record_of_another_extractor_is_not_replayed(workspace: Workspace, fake: str) -> None:
+    """A record whose name is not the run's extractor's is extracted again."""
+    fid = "f1aaaaaaaaaa"
+    ds_id = _seed(workspace, fid)
+    session = start_session(workspace, command="x", argv=["x"], job_id=None, wait=True)
+    session.record_input(
+        f"extractor/{ds_id}/{fid}.json", output_to_json(good_output(model="old"), extractor="old")
+    )
+    result = extract_values(workspace, ds_id, fid, config=_config(fake, fallback=False))
+    session.close(None)
+    assert FakeExtractor.calls == [fid] and result.model == fake
+
+
+def test_one_batch_run_calls_each_extractor_once_over_its_docsets(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pairs across docsets bound to different extractors (and one bound to
+    none): one extract_many per extractor, each with its own pairs."""
+    fake = install(monkeypatch, FakeExtractor)
+    fid = "f1aaaaaaaaaa"
+    first = _seed(workspace, fid, bind="first")
+    store = DocSetStore(workspace)
+    schema = store.get_schema(first)
+    docsets = [first]
+    for name in ("second", None):
+        ds = store.create(f"ds {name}")
+        store.add_file(ds.id, fid)
+        store.set_schema(ds.id, schema)
+        _bind(workspace, ds.id, name)
+        docsets.append(ds.id)
+    config = GroundedConfig(
+        schema_model=DEFAULT_SCHEMA_MODEL,
+        values_model=DEFAULT_VALUES_MODEL,
+        extractors={
+            name: ExtractorConfig(provider=fake, name=name) for name in ("first", "second")
+        },
+    )
+    backend = _backend(lambda kwargs: _phase1(_PHASE1_VALUES))
+    from dgml_core.grounded import values_batch_executor
+
+    executor = values_batch_executor(config, poll_interval_s=0)
+    results = extract_values_batch_pairs(
+        workspace, [(ds, fid) for ds in docsets], config=config, executor=executor
+    )
+    assert [getattr(r, "extractor", "ERR") for r in results.values()] == ["first", "second", None]
+    assert FakeExtractor.many_calls == [[fid], [fid]]
+    assert [r.docset_id for r in FakeExtractor.requests] == docsets[:2]
+    assert len(backend.submitted) == 1  # the unbound docset's phase 1
 
 
 def test_job_mode_records_an_output_whose_telemetry_does_not_encode(
@@ -1456,7 +1947,8 @@ def test_job_mode_records_an_output_whose_telemetry_does_not_encode(
     assert not any(isinstance(o, Exception) for o in many.outcomes.values())
     record = session.recorded_input(f"extractor/{ds_id}/{fids[0]}.json")
     assert record is not None
-    replayed = output_from_json(record)
+    replayed = output_from_json(record, extractor=NAME)
+    assert replayed is not None
     assert replayed.stats is None and replayed.usage == {"cost_usd": 0.5}
 
     resumed = start_session(
@@ -1501,7 +1993,7 @@ def test_sync_resume_replays_the_record_when_the_extractor_cannot_be_constructed
     resumed = start_session(workspace, command="x", argv=["x"], job_id=session.job_id, wait=True)
     result = extract_values(workspace, ds_id, fid, config=config)
     resumed.close(None)
-    assert result.extractor == fake and result.stats["extractor"]["outcome"] == "ok"
+    assert result.extractor == NAME and result.stats["extractor"]["outcome"] == "ok"
     assert FakeExtractor.calls == [fid]
 
 
@@ -1527,7 +2019,7 @@ def test_batch_resume_replays_records_when_the_extractor_cannot_be_constructed(
     )
     many = extract_values_many(workspace, ds_id, fids, config=config, batch=True, poll_interval_s=0)
     resumed.close(None)
-    assert [getattr(o, "extractor", None) for o in many.outcomes.values()] == [fake, fake, None]
+    assert [getattr(o, "extractor", None) for o in many.outcomes.values()] == [NAME, NAME, None]
     assert "credential gone" in str(many.outcomes[fids[2]])
     assert FakeExtractor.many_calls == [fids]  # only the first run asked
 
@@ -1561,8 +2053,9 @@ def test_sync_run_under_a_job_records_an_output_whose_telemetry_does_not_encode(
     result = extract_values(workspace, ds_id, fid, config=_config(fake, fallback=False))
     record = session.recorded_input(f"extractor/{ds_id}/{fid}.json")
     session.close(BatchPending(session.job_id, submitted_batches=0, requests_in_flight=0))
-    assert result.extractor == fake and result.stats["extractor"]["details"] is None
-    assert record is not None and output_from_json(record).stats is None
+    assert result.extractor == NAME and result.stats["extractor"]["details"] is None
+    replayed = None if record is None else output_from_json(record, extractor=NAME)
+    assert replayed is not None and replayed.stats is None
 
     resumed = start_session(workspace, command="x", argv=["x"], job_id=session.job_id, wait=True)
     extract_values(workspace, ds_id, fid, config=_config(fake, fallback=False))
@@ -1603,7 +2096,7 @@ def _write_keyed_config(workspace: Workspace, provider: str, **models: Any) -> N
         {
             "models": models,
             "grounded": {"values_model": DEFAULT_VALUES_MODEL, "schema_model": "s"},
-            "extractor": {"provider": provider},
+            "extractors": {NAME: {"provider": provider}},
         },
     )
 
@@ -1684,10 +2177,10 @@ def test_malformed_key_of_a_provider_the_extractor_never_uses_is_not_read(
         openai_api_key_env="OPENAI_KEY",
     )
     config = load_grounded_config(workspace)
-    assert dict(config.provider_credentials) == {Provider.ANTHROPIC: (_ANTHROPIC_KEY, None)}
+    assert dict(config.provider_credentials) == {NAME: {Provider.ANTHROPIC: (_ANTHROPIC_KEY, None)}}
     fid = "f1aaaaaaaaaa"
     ds_id = _seed(workspace, fid)
-    assert extract_values(workspace, ds_id, fid, config=config).extractor == keyed
+    assert extract_values(workspace, ds_id, fid, config=config).extractor == NAME
 
 
 def test_malformed_key_of_a_provider_the_extractor_uses_fails_at_load(
@@ -1705,7 +2198,7 @@ def test_no_configured_key_is_none_not_an_error(workspace: Workspace, keyed: str
     fid = "f1aaaaaaaaaa"
     ds_id = _seed(workspace, fid)
     result = extract_values(workspace, ds_id, fid, config=load_grounded_config(workspace))
-    assert result.extractor == keyed
+    assert result.extractor == NAME
     (built,) = KeyedExtractor.configs
     assert built.api_keys == {} and built.api_key(Provider.ANTHROPIC) is None
 
@@ -1735,7 +2228,7 @@ def test_in_memory_configuration_passes_the_key(keyed: str, tmp_path: Path) -> N
             expert=Model(DEFAULT_SCHEMA_MODEL),
             anthropic_api_key=_ANTHROPIC_KEY,
         ),
-        extractor=ExtractorSection(provider=keyed),
+        extractors={NAME: ExtractorSection(provider=keyed)},
     )
     ws = Workspace.open(configuration=cfg, root=tmp_path)
     fid = "f1aaaaaaaaaa"
@@ -1790,4 +2283,4 @@ def test_bad_api_key_providers_fail_at_config_load(
     provider = install(monkeypatch, BadKeys)
     _write_keyed_config(workspace, provider)
     with pytest.raises(ExtractorConfigInvalid, match=match):
-        load_extractor_config(workspace)
+        load_extractor_configs(workspace)

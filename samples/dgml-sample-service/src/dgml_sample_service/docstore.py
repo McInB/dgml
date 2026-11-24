@@ -82,6 +82,8 @@ dgml_docsets = sa.Table(
     sa.Column("name", sa.Text(), nullable=False),
     sa.Column("description", sa.Text(), nullable=False, server_default=""),
     sa.Column("key_questions", _TEXT_ARRAY, nullable=False),
+    # The custom extractor the docset is bound to, by name; NULL for dgml's own pipeline.
+    sa.Column("extractor", sa.Text()),
 )
 
 dgml_files = sa.Table(
@@ -187,7 +189,7 @@ class _Mapper:
         missing = [f.name for f in self.fields if f.required and f.name not in doc]
         if missing:
             raise InvalidArgument(f"{self.table.name}: missing field(s) {missing}")
-        row = self.key(doc_id)
+        row: dict[str, Any] = dict(self.key(doc_id))
         for f in self.fields:
             if f.name in row:
                 # A key column also carried in the body must agree with the doc id.
@@ -199,6 +201,10 @@ class _Mapper:
                 continue
             if f.name in doc:
                 row[f.name] = f.to_db(doc[f.name])
+            else:
+                # A put replaces the record: an optional field it leaves out is
+                # cleared, not kept from the row it overwrites.
+                row[f.name] = None
         return row
 
     def doc(self, row: sa.RowMapping) -> dict[str, Any]:
@@ -221,6 +227,8 @@ _MAPPERS: dict[str, _Mapper] = {
             _Field("name"),
             _Field("description"),
             _Field("key_questions", to_db=_str_list, from_db=lambda v: list(v or [])),
+            # Not required: a docset written before dgml-core added the field has none.
+            _Field("extractor", required=False),
         ),
     ),
     Collection.FILES: _Mapper(

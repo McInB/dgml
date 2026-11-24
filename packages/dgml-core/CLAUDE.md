@@ -134,23 +134,35 @@ To write a new provider: see the "Writing your own provider" section in the
 ## Custom extractors
 
 `dgml extraction extract` dispatches to an optional `ValueExtractor` ABC defined in
-[src/dgml_core/extractor.py](src/dgml_core/extractor.py), named by the
-`[extractor] provider` dotted path exactly as an OCR provider is (same
-importer, same `parse_config` / `config_fields` contract, no registry). It
-replaces the three LLM phases of `_FileExtraction` in `grounded.py`; dgml
-validates its tree (`validate_extractor_output`) and runs the shared tail
-(`verify_boxes`, `drop_unboxed_values`, the XML write, telemetry) on it. There
-is no bundled extractor: the built-in pipeline is not one, it is what runs
-when none is configured and what a run falls back to (`fallback = true`).
-`load_grounded_config` carries the section as `GroundedConfig.extractor`, so
-every extraction caller gets it, along with the `[models]` key pairs of the
-providers the class lists in `api_key_providers`
-(`GroundedConfig.provider_credentials`; other providers' pairs are not read). `make_extractor` resolves the pairs
-for the providers the class lists in `api_key_providers` into
-`config.api_keys` after `parse_config` and before `__init__`, so
-`parse_config` never sees a key. Under `--batch` the extractor's `extract_many`
-is one call before the first wave, and its validated outputs are recorded
-under the job (`inputs/extractor/…`) for replay. See
+[src/dgml_core/extractor.py](src/dgml_core/extractor.py). Each extractor is an
+`[extractors.<name>]` table whose `provider` is a dotted path, resolved exactly
+as an OCR provider's is (same importer, same `parse_config` / `config_fields`
+contract, no registry), and a docset names the one it uses (`DocSet.extractor`,
+a name only, never code or options: anyone who can write a docset must not be
+able to choose what runs). It replaces the three LLM phases of
+`_FileExtraction` in `grounded.py`; dgml validates its tree
+(`validate_extractor_output`) and runs the shared tail (`verify_boxes`,
+`drop_unboxed_values`, the XML write, telemetry) on it. There is no bundled
+extractor: the built-in pipeline is not one, it is what runs for a docset bound
+to none and what a run falls back to (`fallback = true`).
+
+`load_grounded_config` loads every table (`load_extractor_configs`: name rule,
+class import, `parse_config`, used or not) into `GroundedConfig.extractors`,
+with each one's `[models]` key pairs for the providers its class lists in
+`api_key_providers` (`GroundedConfig.provider_credentials`, by name; pairs no
+class lists are not read). That config is workspace-wide: `for_docset(ws,
+docset_id)` narrows it, setting `GroundedConfig.extractor` to the docset's
+definition (or raising `ExtractorNotConfigured`), and every per-file run
+(`_FileExtraction`) narrows itself, so the code downstream reads one
+`config.extractor` as before. `make_extractor` resolves the key pairs into
+`config.api_keys` after `parse_config` and before `__init__`, so `parse_config`
+never sees a key. Under `--batch` each extractor's `extract_many` is one call
+over its docsets' pairs before the first wave, and its validated outputs are
+recorded under the job (`inputs/extractor/…`, with the name) for replay. A
+resume reads the docset's binding again, as it reads the config again, and a
+record under another extractor's name is not replayed. The DGML does
+not name the extractor (no `dg:` attribute the spec lacks); payloads, stats and
+usage rows hold the name, and the stats block the provider too. See
 [docs/custom-extractors.md](../../docs/custom-extractors.md).
 
 ## PDF engines

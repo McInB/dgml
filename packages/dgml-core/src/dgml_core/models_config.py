@@ -82,7 +82,7 @@ class ConfigSection(StrEnum):
     error messages. The tier-backed sections (``classification``, ``style``,
     ``text_extraction``, ``generation``, ``grounded``) are the ones passed to
     :func:`resolve_tiered_model`; the rest (``models``, ``ocr``, ``pdf``,
-    ``extractor``, ``conversion``, ``clustering``) configure non-LLM or
+    ``extractors``, ``conversion``, ``clustering``) configure non-LLM or
     tier-source settings."""
 
     MODELS = "models"
@@ -90,7 +90,7 @@ class ConfigSection(StrEnum):
     GROUNDED = "grounded"
     CLASSIFICATION = "classification"
     OCR = "ocr"
-    EXTRACTOR = "extractor"
+    EXTRACTORS = "extractors"
     PDF = "pdf"
     STYLE = "style"
     TEXT_EXTRACTION = "text_extraction"

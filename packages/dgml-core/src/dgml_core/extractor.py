@@ -22,12 +22,16 @@ provenance normalization, :func:`~dgml_core.matching.verify_boxes`,
 :func:`~dgml_core.extraction_xml.drop_unboxed_values`, the XML write and the
 telemetry. The extractor never writes to the workspace.
 
-Like ``[ocr]`` and ``[conversion]``, the ``[extractor]`` table names a class
-by dotted ``"module.path:ClassName"`` resolved at use time through
+Like ``[ocr]`` and ``[conversion]``, each ``[extractors.<name>]`` table names a
+class by dotted ``"module.path:ClassName"`` resolved through
 :func:`dgml_core.provider.import_provider_class`. There is no registry of
 privileged classes, and dgml's own pipeline is not an extractor: it is what
-runs when none is configured, and what a run falls back to when the configured
-one fails (``fallback = true``, the default).
+runs for a docset bound to no extractor, and what a run falls back to when the
+docset's extractor fails (``fallback = true``, the default).
+
+A docset is bound to an extractor by name (``DocSet.extractor``); the name is
+the table's key, a label the user picks (:func:`check_extractor_name`), not
+the provider's package or class.
 
 Writing your own extractor
 --------------------------
@@ -37,11 +41,14 @@ Writing your own extractor
    :meth:`~ValueExtractor.parse_config`, ``__init__`` and :meth:`~ValueExtractor.extract`.
    Override :meth:`~ValueExtractor.extract_many` to batch across files.
 3. Make the class importable by the interpreter running dgml.
-4. Point ``extractor.provider`` at it::
+4. Define it under a name, and bind docsets to that name::
 
-       [extractor]
+       [extractors.invoice]
        provider = "your_pkg.mod:YourExtractor"
        your_option = "…"
+
+   ``dgml docset update <docset> --extractor invoice``, or
+   ``DocSetStore(ws).update(docset_id, extractor="invoice")``.
 
 An extractor that calls a model provider lists it in ``api_key_providers``;
 :func:`make_extractor` hands it that provider's ``[models] <provider>_api_key``
@@ -57,16 +64,23 @@ import json
 import logging
 import math
 import os
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from .concurrency import map_concurrent
 from .config import load_merged_config
 from .default_config import Provider
 from .dg_refs import METHODS
-from .errors import DgmlError, ExtractorConfigInvalid, ExtractorOutputInvalid, FileNotFound
+from .errors import (
+    DgmlError,
+    ExtractorConfigInvalid,
+    ExtractorOutputInvalid,
+    FileNotFound,
+    InvalidArgument,
+)
 from .models_config import ConfigSection, Credentials
 from .provider import ProviderConfigFields, import_provider_class
 from .usage import _USAGE_FIELDS
@@ -80,13 +94,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# (extractor, provider, env var) already warned about as unset: a sync run builds
-# the extractor once per file, so the warning would otherwise repeat per file.
+# (extractor name, provider, env var) already warned about as unset: a sync run
+# builds the extractor once per file, so the warning would otherwise repeat per file.
 _WARNED_UNSET_KEY_ENV: set[tuple[str, Provider, str]] = set()
 
 #: Files extracted concurrently by the default :meth:`ValueExtractor.extract_many`
-#: under ``--batch``; ``[extractor] max_concurrency`` overrides it.
+#: under ``--batch``; an extractor's ``max_concurrency`` overrides it.
 DEFAULT_EXTRACTOR_CONCURRENCY = 5
+
+#: An extractor name: lowercase letters, digits and single underscores, starting
+#: with a letter or digit, as a File or DocSet id may. No ``.`` (TOML would read
+#: it as nesting), no ``-`` (not valid in an env var name), no ``__`` (the
+#: env-var nesting delimiter).
+EXTRACTOR_NAME_PATTERN = re.compile(r"[a-z0-9]+(?:_[a-z0-9]+)*")
+EXTRACTOR_NAME_MAX = 40
 
 #: Section keys dgml parses itself; they never reach ``parse_config``.
 UNIVERSAL_EXTRACTOR_FIELDS = frozenset({"provider", "fallback", "max_concurrency"})
@@ -100,13 +121,16 @@ _LEAF_KEYS = frozenset({"text", "value", "locations", "inputs", "evidence", "met
 
 @dataclass(frozen=True)
 class ExtractorConfig:
-    """Parsed ``[extractor]`` section.
+    """One parsed ``[extractors.<name>]`` table.
 
-    ``provider`` is the dotted path as written. ``options`` holds the class's
+    ``provider`` is the dotted path as written. ``name`` is the table's key, the
+    name docsets are bound to; ``None`` for a config built by hand and passed to
+    :func:`make_extractor` directly. ``options`` holds the class's
     own fields, validated by its :meth:`ValueExtractor.parse_config`. ``fallback``
     is whether dgml's own pipeline runs when the extractor fails or returns an
     invalid tree; ``max_concurrency`` bounds the default
-    :meth:`ValueExtractor.extract_many` under ``--batch``.
+    :meth:`ValueExtractor.extract_many` under ``--batch``. Every field but
+    ``provider`` is keyword-only.
 
     ``api_keys`` holds the provider keys :func:`make_extractor` resolved for the
     providers the class lists in :attr:`ValueExtractor.api_key_providers`. It is
@@ -115,10 +139,19 @@ class ExtractorConfig:
     """
 
     provider: str
+    # Keyword-only from here on, so a field added later cannot shift the
+    # arguments of a ``parse_config`` that builds its own config.
+    _: KW_ONLY
+    name: str | None = None
     fallback: bool = True
     max_concurrency: int = DEFAULT_EXTRACTOR_CONCURRENCY
     options: Mapping[str, Any] = field(default_factory=dict)
     api_keys: Mapping[Provider, str] = field(default_factory=dict)
+
+    @property
+    def label(self) -> str:
+        """How messages and logs name this extractor: its name, else its provider."""
+        return self.name or self.provider
 
     def api_key(self, provider: Provider) -> str | None:
         """*provider*'s key, or ``None`` when none is configured: the provider's
@@ -131,7 +164,8 @@ class ExtractorConfig:
         from .redaction import redacted
 
         return (
-            f"ExtractorConfig(provider={self.provider!r}, fallback={self.fallback!r}, "
+            f"ExtractorConfig(provider={self.provider!r}, name={self.name!r}, "
+            f"fallback={self.fallback!r}, "
             f"max_concurrency={self.max_concurrency!r}, options={redacted(self.options)!r}, "
             f"api_keys={sorted(str(p) for p in self.api_keys)!r})"
         )
@@ -214,8 +248,9 @@ class ValueExtractor(ProviderConfigFields, ABC):
     """Base class of a custom extractor.
 
     ``name`` is a short identifier for messages and the logger.
-    ``config_fields`` lists the option keys the class accepts under
-    ``[extractor]``; anything else is rejected before ``parse_config`` runs.
+    ``config_fields`` lists the option keys the class accepts in its
+    ``[extractors.<name>]`` table; anything else is rejected before
+    ``parse_config`` runs.
     ``verifies_boxes`` says the extractor checked its own boxes against the
     page: dgml then runs :func:`~dgml_core.matching.verify_boxes` on a copy,
     keeps only its counts, and writes the boxes as returned.
@@ -229,7 +264,7 @@ class ValueExtractor(ProviderConfigFields, ABC):
     """
 
     config_fields: ClassVar[frozenset[str]] = frozenset()
-    config_section: ClassVar[str] = "extractor"
+    config_section: ClassVar[str] = "extractors"
     config_error: ClassVar[type[DgmlError]] = ExtractorConfigInvalid
     verifies_boxes: ClassVar[bool] = False
     api_key_providers: ClassVar[frozenset[Provider]] = frozenset()
@@ -318,47 +353,110 @@ def _check_api_key_providers(cls: type[ValueExtractor]) -> None:
         )
 
 
-def load_extractor_config(workspace: Workspace) -> ExtractorConfig | None:
-    """Read and validate the ``[extractor]`` section; ``None`` when there is
-    none (or it is empty), so the default pipeline runs.
+def check_extractor_name(name: Any, *, error: type[DgmlError] = InvalidArgument) -> str:
+    """Return *name* if it is a valid extractor name, else raise *error*.
 
-    Resolves the class and runs its ``parse_config`` eagerly, so a broken
-    table fails before any file is read. Raises :class:`ExtractorConfigInvalid`.
+    The rule: 1 to :data:`EXTRACTOR_NAME_MAX` characters of lowercase letters,
+    digits and single underscores, starting with a letter or digit
+    (:data:`EXTRACTOR_NAME_PATTERN`). The message suggests a fixed name when
+    lowercasing and turning each run of ``.``, ``-`` and ``_`` into one ``_``
+    gives a valid one."""
+    if (
+        isinstance(name, str)
+        and len(name) <= EXTRACTOR_NAME_MAX
+        and EXTRACTOR_NAME_PATTERN.fullmatch(name)
+    ):
+        return name
+    rule = (
+        f"must be 1-{EXTRACTOR_NAME_MAX} lowercase letters, digits and single underscores, "
+        "starting with a letter or digit"
+    )
+    suggestion = ""
+    if isinstance(name, str):
+        fixed = re.sub(r"[-._]+", "_", name.strip().lower()).strip("_")
+        if (
+            fixed != name
+            and len(fixed) <= EXTRACTOR_NAME_MAX
+            and EXTRACTOR_NAME_PATTERN.fullmatch(fixed)
+        ):
+            suggestion = f" (try {fixed!r})"
+    raise error(f"extractor name {name!r} {rule}{suggestion}")
+
+
+def load_extractor_configs(
+    workspace: Workspace, *, merged: Mapping[ConfigSection, Any] | None = None
+) -> dict[str, ExtractorConfig]:
+    """Read and validate every ``[extractors.<name>]`` table, by name; empty
+    when there are none. *merged* is the workspace's merged config when the
+    caller already read it.
+
+    Every definition is checked now, used or not: the name, dgml's own keys,
+    the class import and its ``parse_config``. So a broken table fails before
+    any file is read, for every docset. Raises :class:`ExtractorConfigInvalid`,
+    each message starting with the table it is about.
     """
-    section = load_merged_config(workspace).get(ConfigSection.EXTRACTOR)
+    if merged is None:
+        merged = load_merged_config(workspace)
+    section = merged.get(ConfigSection.EXTRACTORS)
     if not section:
-        return None
+        return {}
     if not isinstance(section, dict):
-        raise ExtractorConfigInvalid("'extractor' must be a table")
-    provider = section.get("provider")
+        raise ExtractorConfigInvalid(
+            "'extractors' must hold one table per extractor, [extractors.<name>]"
+        )
+    return {
+        name: _load_one_extractor(check_extractor_name(name, error=ExtractorConfigInvalid), table)
+        for name, table in sorted(section.items())
+    }
+
+
+def _load_one_extractor(name: str, table: Any) -> ExtractorConfig:
+    """One ``[extractors.<name>]`` table, checked and passed through its class's
+    ``parse_config``."""
+    where = f"extractors.{name}"
+    if not isinstance(table, dict):
+        # The type, never the value: an option written straight under
+        # ``[extractors]`` lands here, and it may be a credential.
+        raise ExtractorConfigInvalid(
+            f"'{where}' must be a table with at least 'provider' "
+            f"(got a {type(table).__name__}); an extractor's keys go under "
+            "[extractors.<name>], not straight under [extractors]"
+        )
+    provider = table.get("provider")
     if not isinstance(provider, str) or not provider.strip():
         raise ExtractorConfigInvalid(
-            f"'extractor.provider' must be a dotted path 'module.path:ClassName' (got {provider!r})"
+            f"'{where}.provider' must be a dotted path 'module.path:ClassName' (got {provider!r})"
         )
-    fallback = section.get("fallback", True)
+    fallback = table.get("fallback", True)
     if not isinstance(fallback, bool):
-        raise ExtractorConfigInvalid(
-            f"'extractor.fallback' must be true or false (got {fallback!r})"
-        )
-    raw_concurrency = section.get("max_concurrency", DEFAULT_EXTRACTOR_CONCURRENCY)
+        raise ExtractorConfigInvalid(f"'{where}.fallback' must be true or false (got {fallback!r})")
+    raw_concurrency = table.get("max_concurrency", DEFAULT_EXTRACTOR_CONCURRENCY)
     if (
         not isinstance(raw_concurrency, int)
         or isinstance(raw_concurrency, bool)
         or raw_concurrency < 1
     ):
         raise ExtractorConfigInvalid(
-            f"'extractor.max_concurrency' must be a positive integer (got {raw_concurrency!r})"
+            f"'{where}.max_concurrency' must be a positive integer (got {raw_concurrency!r})"
         )
-    options = {k: v for k, v in section.items() if k not in UNIVERSAL_EXTRACTOR_FIELDS}
+    options = {k: v for k, v in table.items() if k not in UNIVERSAL_EXTRACTOR_FIELDS}
     config = ExtractorConfig(
-        provider=provider, fallback=fallback, max_concurrency=raw_concurrency, options=options
+        provider=provider,
+        name=name,
+        fallback=fallback,
+        max_concurrency=raw_concurrency,
+        options=options,
     )
-    return _run_parse_config(resolve_extractor_class(provider), config)
+    try:
+        return _run_parse_config(resolve_extractor_class(provider), config)
+    except ExtractorConfigInvalid as exc:
+        raise ExtractorConfigInvalid(f"'{where}': {exc}") from exc
 
 
 def _run_parse_config(cls: type[ValueExtractor], config: ExtractorConfig) -> ExtractorConfig:
     """Reject unknown option keys, run ``cls.parse_config`` and check what it
-    returned (a ``parse_config`` that forgets ``return config`` yields ``None``)."""
+    returned (a ``parse_config`` that forgets ``return config`` yields ``None``).
+    The name is dgml's, so a ``parse_config`` that builds a fresh config keeps it."""
     cls._check_no_extra_fields(config.options)
     parsed = cls.parse_config(config)
     if not isinstance(parsed, ExtractorConfig):
@@ -366,6 +464,8 @@ def _run_parse_config(cls: type[ValueExtractor], config: ExtractorConfig) -> Ext
             f"{cls._describe()!r}.parse_config must return an ExtractorConfig, got "
             f"{type(parsed).__name__}"
         )
+    if parsed.name != config.name:
+        parsed = replace(parsed, name=config.name)
     return parsed
 
 
@@ -386,23 +486,24 @@ def make_extractor(
     cls = resolve_extractor_class(config.provider)
     parsed = _run_parse_config(cls, config)
     if credentials is not None:
-        parsed = replace(parsed, api_keys=_resolve_api_keys(cls, credentials))
+        parsed = replace(parsed, api_keys=_resolve_api_keys(cls, parsed.label, credentials))
     return cls(parsed)
 
 
 def _resolve_api_keys(
-    cls: type[ValueExtractor], credentials: Mapping[Provider, Credentials]
+    cls: type[ValueExtractor], label: str, credentials: Mapping[Provider, Credentials]
 ) -> dict[Provider, str]:
     """The keys of the providers *cls* asks for that have one configured. A
     ``<provider>_api_key_env`` naming an unset variable is left out with a
     WARNING, since the provider's SDK would otherwise read its own env var,
-    which may hold a different key."""
+    which may hold a different key. *label* names the extractor in that
+    warning, and keys its dedup."""
     keys: dict[Provider, str] = {}
     for provider in sorted(Provider(p) for p in cls.api_key_providers):
         api_key, api_key_env = credentials.get(provider, (None, None))
         if api_key_env is not None:
             api_key = os.environ.get(api_key_env) or None
-            warned = (cls._describe(), provider, api_key_env)
+            warned = (label, provider, api_key_env)
             if api_key is None and warned not in _WARNED_UNSET_KEY_ENV:
                 _WARNED_UNSET_KEY_ENV.add(warned)
                 logger.warning(
@@ -690,10 +791,12 @@ def clean_stats(stats: Any, *, file_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def output_to_json(output: ExtractorOutput) -> bytes:
+def output_to_json(output: ExtractorOutput, *, extractor: str | None = None) -> bytes:
     """A validated output as the bytes a batch job records under
-    ``inputs/extractor/<docset>/<file>.json``."""
+    ``inputs/extractor/<docset>/<file>.json``. *extractor* is the name of the
+    extractor that produced it, which :func:`output_from_json` checks."""
     doc = {
+        "extractor": extractor,
         "values": output.values,
         "model": output.model,
         "usage": dict(output.usage) if isinstance(output.usage, Mapping) else None,
@@ -704,9 +807,12 @@ def output_to_json(output: ExtractorOutput) -> bytes:
     return json.dumps(doc).encode("utf-8")
 
 
-def output_from_json(data: bytes) -> ExtractorOutput:
-    """The inverse of :func:`output_to_json`."""
+def output_from_json(data: bytes, *, extractor: str | None = None) -> ExtractorOutput | None:
+    """The inverse of :func:`output_to_json`; ``None`` when the record names an
+    extractor other than *extractor*, so it is not replayed as that one's."""
     doc = json.loads(data.decode("utf-8"))
+    if doc.get("extractor", extractor) != extractor:
+        return None
     return ExtractorOutput(
         values=doc["values"],
         model=doc.get("model"),

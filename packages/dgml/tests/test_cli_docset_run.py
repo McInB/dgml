@@ -464,7 +464,9 @@ def test_batch_checks_the_values_model_only_when_it_may_run(
     ws, did = _seed(tmp_path, capsys, schema=True)
     wsx = Workspace(root=ws)
     with wsx.config_path.open("a", encoding="utf-8") as fh:
-        fh.write(f'\n[extractor]\nprovider = "{CliFakeExtractor.__module__}:CliFakeExtractor"\n')
+        provider = f"{CliFakeExtractor.__module__}:CliFakeExtractor"
+        fh.write(f'\n[extractors.run_fake]\nprovider = "{provider}"\n')
+    DocSetStore(wsx).update(did, extractor="run_fake")
     seen: list[set[str]] = []
 
     def stop(stages: dict[str, Any]) -> None:

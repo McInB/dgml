@@ -169,14 +169,17 @@ file and page in one wave. A file whose phase 1 takes extra turns (the chunked
 protocol, a truncation retry, the permissive-schema fallback) rides extra
 waves. One file id keeps the single-file payload (plus the `batch` block).
 
-With a custom extractor configured ([custom-extractors.md](custom-extractors.md))
-the extractor's work is not sent to the model's batch API: dgml calls its
-`extract_many` once with every file of the run, before the first wave, and
-batches only the phases of the files that fell back to dgml's own pipeline. A
-run the extractor handled entirely submits nothing and reports zero `requests`.
-With `fallback = false` (or `--no-extractor-fallback`) the values model never
-runs, so it is not checked for a batch backend or a key, and the `batch` block
-is all zeros with `"provider": null`. This applies to `extraction extract`,
+For DocSets bound to a custom extractor ([custom-extractors.md](custom-extractors.md))
+the extractor's work is not sent to the model's batch API: dgml calls each
+extractor's `extract_many` once with every file of the run whose DocSet is
+bound to it, before the first wave, and batches only the phases of the files
+that fell back to dgml's own pipeline (and of DocSets bound to none). A run the
+extractors handled entirely submits nothing and reports zero `requests`. When
+every DocSet of the run is bound to an extractor with `fallback = false` (or
+`--no-extractor-fallback` is passed) the values model never runs, so it is not
+checked for a batch backend or a key, and the `batch` block is all zeros with
+`"provider": null`. A resume reads each DocSet's binding again and
+extracts with the extractor the DocSet is bound to by then. This applies to `extraction extract`,
 `docset run` and the auto-extraction of `file add`. The call blocks (under `--no-wait` the command exits only after it returns),
 and in job mode each validated output is recorded under the job, so a resume
 never calls the extractor for that file again. Memory is lighter than the
@@ -218,6 +221,12 @@ assigned files as one batched extraction across all their docsets.
 
 `--batch` needs `--auto-classify`; without it, a directory add is rejected
 before any file is added. A single-file add rejects `--batch` too.
+
+The values model's batch setup is decided before any file is added, from the
+DocSets' extractor bindings at that time. If none of them may call the values
+model, the run sets up no batch for it. A DocSet whose binding changes during
+the run so that it may call the values model has its files extracted
+synchronously, at standard price.
 
 **Why the hybrid text merge stays synchronous.** `--text-mode hybrid` with a
 `[text_extraction]` model asks that model to merge each page's digital and
@@ -326,6 +335,15 @@ A plain blocking `--batch` run keeps a job too, silently, so a run that
 crashes mid-wave can be resumed instead of paying again. See
 [Batch jobs](cli-reference.md#batch-jobs---no-wait-and-dgml-batch) for every
 `dgml batch` subcommand and payload.
+
+A resume runs the command again against the workspace as it is then: the
+config, the docset's files and its extractor binding are read again. What
+stays fixed is the command line the job was started with, its deadline, and
+the inputs listed under "Inputs are pinned" in
+[Batch jobs](cli-reference.md#batch-jobs---no-wait-and-dgml-batch). Avoid
+changing the workspace while a job is paused. A change that alters a request
+makes the resume send it again and pay for it again, or stop with
+`BATCH_JOB_NONDETERMINISTIC` if a provider batch for it is still open.
 
 ## Batch deadline
 

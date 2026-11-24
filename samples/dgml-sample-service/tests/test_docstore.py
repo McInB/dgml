@@ -72,18 +72,26 @@ def test_put_replaces_not_merges(store: PostgresDocStore) -> None:
     store.put_doc(
         Collection.DOCSETS,
         "ds-1",
-        {"id": "ds-1", "name": "A", "description": "x", "key_questions": ["q"]},
+        {
+            "id": "ds-1",
+            "name": "A",
+            "description": "x",
+            "key_questions": ["q"],
+            "extractor": "invoice",
+        },
     )
     store.put_doc(
         Collection.DOCSETS,
         "ds-1",
         {"id": "ds-1", "name": "B", "description": "", "key_questions": []},
     )
+    # A field the second record leaves out reads back as unset, not as the first's.
     assert store.get_doc(Collection.DOCSETS, "ds-1") == {
         "id": "ds-1",
         "name": "B",
         "description": "",
         "key_questions": [],
+        "extractor": None,
     }
 
 
@@ -245,3 +253,21 @@ def test_workspace_on_postgres_docs_and_s3_blobs(engine: Engine, pdf: Any) -> No
 
     FileStore(ws).delete(result.record.id)
     assert DocSetStore(ws).list_files(ds.id) == []
+
+
+def test_create_schema_adds_the_extractor_column_to_an_older_database(tmp_path: Path) -> None:
+    """``create_all`` leaves an existing table alone, so a database created before
+    docsets had an extractor binding gets the column added at startup."""
+    import sqlalchemy as sa
+    from dgml_sample_service.db import create_schema, make_engine
+
+    eng = make_engine(f"sqlite+pysqlite:///{tmp_path / 'old.db'}")
+    create_schema(eng)
+    with eng.begin() as conn:
+        conn.execute(sa.text("ALTER TABLE dgml_docsets DROP COLUMN extractor"))
+    assert "extractor" not in {c["name"] for c in sa.inspect(eng).get_columns("dgml_docsets")}
+
+    create_schema(eng)
+    create_schema(eng)  # a second start changes nothing
+    assert "extractor" in {c["name"] for c in sa.inspect(eng).get_columns("dgml_docsets")}
+    eng.dispose()

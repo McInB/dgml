@@ -833,11 +833,18 @@ uv run dgml extraction get-guidance "$ds" | jq -r .guidance
 uv run dgml docset add-file "$fid" --docset "$ds" | jq '.extraction | {error, cost: .usage.cost_usd}'
 uv run dgml extraction extract "$ds" "$fid" | jq '{mode, tool_calls, field_count, xml_key}'
 
-#    With an [extractor] section in config.toml (a custom extractor class, see
-#    docs/custom-extractors.md) the payload also has `extractor`: the extractor
-#    whose values were written, or null when it failed and the file went
-#    through dgml's own pipeline (the default). Pass --no-extractor-fallback
-#    to fail such a file instead.
+#    A docset bound to a custom extractor (a class defined as
+#    [extractors.<name>] in config.toml, see docs/custom-extractors.md) is
+#    extracted with that class instead of dgml's own pipeline. Bind it by name
+#    (lowercase letters, digits, single underscores), and unbind with
+#    --clear-extractor:
+uv run dgml docset update "$ds" --extractor invoice | jq .extractor
+#    The extract payload then has `extractor`: the name of the extractor whose
+#    values were written, or null when it failed and the file went through
+#    dgml's own pipeline (the default). Pass --no-extractor-fallback to fail
+#    such a file instead. EXTRACTOR_NOT_CONFIGURED means the docset names an
+#    extractor this workspace's config does not define: add the table or
+#    unbind the docset; do not retry.
 
 #    Many files at once: name several ids or pass --all. Each file gets its own
 #    `results` entry and a failed file never aborts the others — check

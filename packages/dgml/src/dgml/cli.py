@@ -243,6 +243,13 @@ _DEBUG_HELP = (
     "kept and no usage rows are written. Does not change log output (that is "
     "--verbose / DGML_DEBUG=1)."
 )
+_EXTRACTOR_FLAG_HELP = (
+    "Bind the DocSet to the custom extractor defined as [extractors.NAME] in config.toml: "
+    "its files are extracted with that extractor instead of dgml's own pipeline. NAME is "
+    "1-40 lowercase letters, digits and single underscores, starting with a letter or digit "
+    "(INVALID_ARGUMENT otherwise). A name the config does not define is accepted with a "
+    "warning; extracting fails with EXTRACTOR_NOT_CONFIGURED until it is defined."
+)
 
 
 def _add_global_flags(parser: argparse.ArgumentParser, *, suppress: bool) -> None:
@@ -635,15 +642,27 @@ def _build_parser() -> argparse.ArgumentParser:
             "generic ones."
         ),
     )
+    ds_create.add_argument("--extractor", default=None, metavar="NAME", help=_EXTRACTOR_FLAG_HELP)
     docset.add_parser("list", parents=[common], help="List DocSets.")
     ds_show = docset.add_parser("show", parents=[common], help="Show one DocSet.")
     ds_show.add_argument("docset_id")
     ds_update = docset.add_parser(
-        "update", parents=[common], help="Update name and/or description."
+        "update",
+        parents=[common],
+        help="Update the name, description or custom extractor of a DocSet.",
     )
     ds_update.add_argument("docset_id")
     ds_update.add_argument("--name")
     ds_update.add_argument("--description")
+    ds_update_extractor = ds_update.add_mutually_exclusive_group()
+    ds_update_extractor.add_argument(
+        "--extractor", default=None, metavar="NAME", help=_EXTRACTOR_FLAG_HELP
+    )
+    ds_update_extractor.add_argument(
+        "--clear-extractor",
+        action="store_true",
+        help="Unbind the DocSet from its custom extractor: dgml's own pipeline extracts it.",
+    )
     ds_delete = docset.add_parser(
         "delete", parents=[common], help="Delete a DocSet (does NOT delete its underlying Files)."
     )
@@ -3530,9 +3549,10 @@ def _add_extraction_subparsers(
         "--no-extractor-fallback",
         action="store_true",
         help=(
-            "With a custom [extractor] configured: fail a file the extractor fails "
-            "instead of extracting it with dgml's own pipeline (overrides "
-            "extractor.fallback for this call). INVALID_ARGUMENT without an extractor."
+            "When the docset is bound to a custom extractor: fail a file the extractor fails "
+            "instead of extracting it with dgml's own pipeline (overrides the "
+            "extractor's fallback setting for this call). INVALID_ARGUMENT when the docset "
+            "is bound to no extractor."
         ),
     )
     _add_batch_arguments(ex_extract, what="extraction")
@@ -3722,7 +3742,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
 
     if sub == "generate-schema":
         ds = store.get(args.docset_id)  # raises DocSetNotFound
-        config = load_grounded_config(ws, schema_model=args.schema_model or None, extractor=False)
+        config = load_grounded_config(ws, schema_model=args.schema_model or None, extractors=False)
         if args.batch:
             # Before any PDF is read: an unsupported provider is BATCH_UNAVAILABLE,
             # never a silent full-price call.
@@ -3824,6 +3844,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             # The original single-file form: output and errors unchanged.
             config = extraction_config(
                 ws,
+                docset_id=args.docset_id,
                 values_model=args.values_model,
                 values_effort=args.values_effort,
                 locations_effort=args.locations_effort,
@@ -3860,6 +3881,7 @@ def _extraction_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             fmt,
             config=extraction_config(
                 ws,
+                docset_id=args.docset_id,
                 values_model=args.values_model,
                 values_effort=args.values_effort,
                 locations_effort=args.locations_effort,
@@ -4467,12 +4489,14 @@ def _docset_run_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     # The flag models go in as the loader's overrides, as the steps pass them:
     # they satisfy resolution and carry their own credentials.
     extracting = want_extract and (has_schema or bool(args.schema_from))
+    # Narrowed to the docset, so a binding the config does not define
+    # (EXTRACTOR_NOT_CONFIGURED) fails here too.
     grounded = (
         load_grounded_config(
             ws,
             schema_model=args.schema_model or None,
             values_model=args.values_model or None,
-        )
+        ).for_docset(ws, args.docset_id)
         if extracting
         else None
     )
@@ -4480,7 +4504,7 @@ def _docset_run_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
         # The extract step refuses this (INVALID_ARGUMENT); refused now, before
         # the earlier steps pay.
         raise InvalidArgument(
-            "no custom extractor is configured ([extractor] in config.toml), "
+            f"docset '{args.docset_id}' is bound to no custom extractor, "
             "so there is no extractor fallback to set"
         )
 
@@ -4524,9 +4548,9 @@ def _docset_run_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
                 if args.batch_label is not None
                 else load_generation_batch_label(ws)
             )
-        if grounded is not None and args.no_extractor_fallback and grounded.extractor:
+        if grounded is not None and args.no_extractor_fallback:
             # As the extract step applies the flag: its values model never runs.
-            grounded = replace(grounded, extractor=replace(grounded.extractor, fallback=False))
+            grounded = grounded.with_extractor_fallback(False)
         if grounded is not None and (has_schema or args.schema_from):
             stages.update(extraction_batch_stages(grounded, stage="extract"))
         _batch_preflight(stages)
@@ -4671,6 +4695,7 @@ def _docset_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
             description=args.description,
             key_questions=args.key_questions,
             docset_id=args.id,
+            extractor=args.extractor,
         )
         _emit(ds.to_json(), fmt)
     elif sub == "list":
@@ -4678,7 +4703,11 @@ def _docset_cmd(args: argparse.Namespace, ws: Workspace, fmt: str) -> int:
     elif sub == "show":
         _emit(store.get(args.docset_id).to_json(), fmt)
     elif sub == "update":
-        ds = store.update(args.docset_id, name=args.name, description=args.description)
+        ds = store.update(
+            args.docset_id, name=args.name, description=args.description, extractor=args.extractor
+        )
+        if args.clear_extractor:
+            ds = store.clear_extractor(args.docset_id)
         _emit(ds.to_json(), fmt)
     elif sub == "delete":
         store.delete(args.docset_id)

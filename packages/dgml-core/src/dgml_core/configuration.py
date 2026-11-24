@@ -256,12 +256,14 @@ class Ocr:
 
 @dataclass(frozen=True)
 class Extractor:
-    """``[extractor]``: a custom extractor for ``dgml extraction extract``.
-    ``provider`` is the dotted path of a ``dgml_core.ValueExtractor`` subclass;
-    ``options`` are that class's own fields, validated by its ``parse_config``;
-    ``fallback`` (default true) runs dgml's own pipeline when the extractor
-    fails; ``max_concurrency`` (default 5) bounds the default ``extract_many``
-    under ``--batch``. Reads ``dgml_core.extractor.load_extractor_config``."""
+    """One ``[extractors.<name>]`` table: a custom extractor that docsets bound to
+    ``<name>`` extract with. Passed to :meth:`Configuration.build` as
+    ``extractors={name: Extractor(...)}``. ``provider`` is the dotted path of a
+    ``dgml_core.ValueExtractor`` subclass; ``options`` are that class's own
+    fields, validated by its ``parse_config``; ``fallback`` (default true) runs
+    dgml's own pipeline when the extractor fails; ``max_concurrency`` (default 5)
+    bounds the default ``extract_many`` under ``--batch``. Reads
+    ``dgml_core.extractor.load_extractor_configs``."""
 
     provider: str
     fallback: bool | None = None
@@ -405,15 +407,25 @@ class Configuration:
         conversion: Conversion | None = None,
         generation: Generation | None = None,
         clustering: Clustering | None = None,
-        extractor: Extractor | None = None,
+        extractors: Mapping[str, Extractor] | None = None,
     ) -> Configuration:
         """Build from typed sections. A section left ``None`` is absent — the loaders
         already treat ``{}`` and absent alike. ``models.family`` is expanded into
-        tiers here, exactly as it is for a TOML layer."""
+        tiers here, exactly as it is for a TOML layer. ``extractors`` maps each
+        extractor's name (what a docset is bound to) to its table, rendered as
+        ``[extractors.<name>]``."""
         # Imported here: config.py imports storage.py, which names this module.
         from .config import _drop_none_values, _normalize_layer
 
         identity.require_complete()
+        layer: dict[str, Any] = {}
+        if extractors is not None:
+            # Nested one level deeper than the other sections, so its ``None``s
+            # are dropped here: ``_drop_none_values`` only reaches a section's keys.
+            layer[ConfigSection.EXTRACTORS.value] = {
+                name: {k: v for k, v in ext.table().items() if v is not None}
+                for name, ext in extractors.items()
+            }
         typed: dict[ConfigSection, Any] = {
             ConfigSection.MODELS: models,
             ConfigSection.GROUNDED: grounded,
@@ -425,9 +437,8 @@ class Configuration:
             ConfigSection.CONVERSION: conversion,
             ConfigSection.GENERATION: generation,
             ConfigSection.CLUSTERING: clustering,
-            ConfigSection.EXTRACTOR: extractor,
         }
-        layer = {s.value: t.table() for s, t in typed.items() if t is not None}
+        layer.update({s.value: t.table() for s, t in typed.items() if t is not None})
         # A single layer: normalized for the same provider-key and family rules as a
         # TOML layer, then its explicit ``None``s dropped — there is no lower layer to
         # override.

@@ -23,7 +23,9 @@ cfg = Configuration.build(
         expert=Model("anthropic/claude-opus-5", api_key=secrets["opus"]),  # this tier only
     ),
     ocr=Ocr(provider="azure", options={"endpoint": tenant.di_endpoint, "api_key": secrets["azure_di"]}),
-    extractor=Extractor(provider="my_pkg.extractors:InvoiceExtractor", fallback=False),  # optional
+    extractors={  # optional; docsets bind to "invoice" with DocSetStore.update(..., extractor=…)
+        "invoice": Extractor(provider="my_pkg.extractors:InvoiceExtractor", fallback=False),
+    },
 )
 
 ws = Workspace.open(configuration=cfg)   # no file, no store row; meta written on first use
@@ -102,7 +104,7 @@ or litellm sends the provider's env-var key to that host; `ollama/` needs none. 
 | `Grounded(schema_model, values_model, max_tool_iters, values_reasoning_effort, locations_reasoning_effort)` | `[grounded]` | Extraction (`values_model`, advanced tier) and schema generation (`schema_model`, expert tier). |
 | `Classification(model, max_pages, naming_attempts)` | `[classification]` | Light tier. |
 | `Ocr(provider, max_concurrency, options)` | `[ocr]` | `options` are the provider's own fields, validated by its `parse_config`. |
-| `Extractor(provider, fallback, max_concurrency, options)` | `[extractor]` | A custom extractor for value extraction (see [custom-extractors.md](custom-extractors.md)); `options` as for `Ocr`. |
+| `extractors={name: Extractor(provider, fallback, max_concurrency, options)}` | `[extractors.<name>]` | Custom extractors for value extraction, by the name docsets are bound to (see [custom-extractors.md](custom-extractors.md)); `options` as for `Ocr`. |
 | `Pdf(provider)` | `[pdf]` | `ghostscript` (default) or `pypdfium2`. |
 | `Style(model, max_tokens, enabled=True)` | `[style]` | Building one enables the feature. |
 | `TextExtraction(model, temperature, max_tokens, enabled=True)` | `[text_extraction]` | Same. |

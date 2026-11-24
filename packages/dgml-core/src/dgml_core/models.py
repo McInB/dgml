@@ -29,6 +29,9 @@ class DocSet:
     # with this DocSet to belong to it (vs. only being topically
     # similar). Optional — pre-existing docsets read back as empty.
     key_questions: list[str] = field(default_factory=list)
+    # The name of the custom extractor (an ``[extractors.<name>]`` table) this
+    # DocSet's files are extracted with; ``None`` for dgml's own pipeline.
+    extractor: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -36,17 +39,22 @@ class DocSet:
             "name": self.name,
             "description": self.description,
             "key_questions": list(self.key_questions),
+            "extractor": self.extractor,
         }
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> DocSet:
         raw_questions = data.get("key_questions") or []
         questions = [str(q) for q in raw_questions if isinstance(q, str) and q.strip()]
+        # Only a string is a binding: anything else in a hand-edited record is
+        # read as none, as a non-string key question is dropped.
+        extractor = data.get("extractor")
         return cls(
             id=data["id"],
             name=data["name"],
             description=data.get("description", ""),
             key_questions=questions,
+            extractor=extractor if isinstance(extractor, str) and extractor else None,
         )
 
 
