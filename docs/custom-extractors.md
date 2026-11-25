@@ -18,14 +18,14 @@ bound to none, and what a run falls back to when the docset's extractor fails.
 Each extractor is a table under `[extractors]`, keyed by a name you choose:
 
 ```toml
-[extractors.invoice]
-provider = "acme.extractors:InvoiceExtractor"     # module.path:ClassName
+[extractors.contract]
+provider = "acme.extractors:ContractExtractor"     # module.path:ClassName
 fallback = true                                   # default; false fails the file instead
 max_concurrency = 5                               # default; files in flight under --batch
 model = "my-model"                                # the class's own options follow
 
-[extractors.invoice_eu]
-provider = "acme.extractors:InvoiceExtractor"     # the same class, other options
+[extractors.contract_eu]
+provider = "acme.extractors:ContractExtractor"     # the same class, other options
 model = "my-eu-model"
 ```
 
@@ -34,7 +34,7 @@ reaches the class's `parse_config` as `config.options`; the class lists the
 keys it accepts in `config_fields`, and any other is refused with
 `EXTRACTOR_CONFIG_INVALID`. The config layers merge each table key by key, so
 a workspace can override one key of an extractor defined in the user config,
-and `DGML_EXTRACTORS__INVOICE__MODEL` overrides `model` of `invoice` from the
+and `DGML_EXTRACTORS__CONTRACT__MODEL` overrides `model` of `contract` from the
 environment.
 
 In a library, the same tables come from `Configuration.build`:
@@ -45,8 +45,8 @@ from dgml_core.configuration import Configuration, Extractor
 cfg = Configuration.build(
     identity=..., storage=..., models=...,
     extractors={
-        "invoice": Extractor(
-            provider="acme.extractors:InvoiceExtractor",
+        "contract": Extractor(
+            provider="acme.extractors:ContractExtractor",
             fallback=False,
             options={"model": "my-model"},
         ),
@@ -62,12 +62,12 @@ touching any docset, and one class can run under several names with different
 options.
 
 A name is 1-40 lowercase letters, digits and single underscores, starting
-with a letter or digit (`invoice`, `acme_invoice`, `invoice_v2`, `2024_invoice`). A `.` would make TOML
+with a letter or digit (`contract`, `acme_contract`, `contract_v2`, `2024_contract`). A `.` would make TOML
 read the name as nesting, and `-`, `.` and `__` cannot appear in the
 `DGML_EXTRACTORS__<NAME>__<KEY>` environment variable. A name that breaks the
 rule is refused with `EXTRACTOR_CONFIG_INVALID` in the config and
 `INVALID_ARGUMENT` when a docset is bound to it; the message suggests a fixed
-name where one exists (`try 'acme_invoice'`).
+name where one exists (`try 'acme_contract'`).
 
 ### Binding a docset
 
@@ -75,15 +75,15 @@ A docset's `extractor` field holds the name of the extractor its files are
 extracted with, or `null` for dgml's own pipeline:
 
 ```bash
-dgml docset create --name Invoices --extractor invoice
-dgml docset update <docset_id> --extractor invoice_eu
+dgml docset create --name Contracts --extractor contract
+dgml docset update <docset_id> --extractor contract_eu
 dgml docset update <docset_id> --clear-extractor
 ```
 
 ```python
 store = DocSetStore(ws)
-ds = store.create("Invoices", extractor="invoice")
-store.update(ds.id, extractor="invoice_eu")
+ds = store.create("Contracts", extractor="contract")
+store.update(ds.id, extractor="contract_eu")
 store.clear_extractor(ds.id)
 ```
 
@@ -126,8 +126,8 @@ the fallback alone. An extractor's model is its own option in the table.
    from dgml_core.errors import ExtractorConfigInvalid, ExtractorFailed
 
 
-   class InvoiceExtractor(ValueExtractor):
-       name: ClassVar[str] = "invoice"
+   class ContractExtractor(ValueExtractor):
+       name: ClassVar[str] = "contract"
        config_fields: ClassVar[frozenset[str]] = frozenset({"model"})
 
        @classmethod
@@ -147,7 +147,7 @@ the fallback alone. An extractor's model is its own option in the table.
    ```
 
 3. Make the class importable by the interpreter running `dgml`.
-4. Define it under a name (`[extractors.invoice] provider = "…"`) and bind the
+4. Define it under a name (`[extractors.contract] provider = "…"`) and bind the
    docsets that use it to that name.
 
 A dotted `provider` path runs code from your config, as you, the same trust
@@ -163,7 +163,7 @@ for dgml's own models instead of taking its own. List the providers in
 from dgml_core import Provider
 
 
-class InvoiceExtractor(ValueExtractor):
+class ContractExtractor(ValueExtractor):
     api_key_providers: ClassVar[frozenset[Provider]] = frozenset({Provider.ANTHROPIC})
 
     def __init__(self, config: ExtractorConfig) -> None:
@@ -317,7 +317,7 @@ the files the earlier extractor already handled.
   a class that is not a `ValueExtractor` or is abstract, `parse_config` raising
   or returning `None`, an unknown option key. Raised at config load, for any
   table, used or not. Never falls back. The message starts with the table
-  (`'extractors.invoice': …`).
+  (`'extractors.contract': …`).
 - A docset bound to a name the config does not define
   (`EXTRACTOR_NOT_CONFIGURED`). Raised before the file is read. Never falls
   back.

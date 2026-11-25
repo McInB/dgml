@@ -395,14 +395,14 @@ def test_an_unused_broken_definition_still_fails_every_extraction(
 @pytest.mark.parametrize(
     ("name", "suggestion"),
     [
-        ("Invoice", "'invoice'"),
-        ("acme.invoice", "'acme_invoice'"),
-        ("acme-invoice", "'acme_invoice'"),
+        ("Contract", "'contract'"),
+        ("acme.contract", "'acme_contract'"),
+        ("acme-contract", "'acme_contract'"),
         ("a__b", "'a_b'"),
         ("", None),
         ("_x", "'x'"),
         ("x_", "'x'"),
-        ("2024-invoice", "'2024_invoice'"),
+        ("2024-contract", "'2024_contract'"),
         ("1.5", "'1_5'"),
         ("x" * 41, None),
     ],
@@ -422,13 +422,13 @@ def test_extractor_names_are_checked_with_a_suggested_fix(
 @pytest.mark.parametrize(
     "name",
     [
-        "invoice",
-        "acme_invoice",
-        "invoice_v2",
+        "contract",
+        "acme_contract",
+        "contract_v2",
         "a",
         "x" * 40,
-        "2invoice",
-        "2024_invoice",
+        "2contract",
+        "2024_contract",
         "123",
         "1",
     ],
@@ -443,10 +443,10 @@ def test_a_bad_name_in_config_is_a_config_error(workspace: Workspace, fake: str)
         workspace,
         {
             "grounded": {"values_model": "m", "schema_model": "s"},
-            "extractors": {"Acme-Invoice": {"provider": fake}},
+            "extractors": {"Acme-Contract": {"provider": fake}},
         },
     )
-    with pytest.raises(ExtractorConfigInvalid, match="try 'acme_invoice'"):
+    with pytest.raises(ExtractorConfigInvalid, match="try 'acme_contract'"):
         load_extractor_configs(workspace)
 
 
@@ -623,11 +623,11 @@ def test_binding_checks_the_name_and_warns_about_an_undefined_one(
         },
     )
     store = DocSetStore(workspace)
-    with pytest.raises(InvalidArgument, match="try 'acme_invoice'"):
-        store.create("Bad", extractor="acme.invoice")
+    with pytest.raises(InvalidArgument, match="try 'acme_contract'"):
+        store.create("Bad", extractor="acme.contract")
     assert store.list_all() == []  # nothing written
     with caplog.at_level(logging.WARNING, logger="dgml_core"):
-        ds = store.create("Invoices", extractor=NAME)
+        ds = store.create("Contracts", extractor=NAME)
     assert ds.extractor == NAME and store.get(ds.id).to_json()["extractor"] == NAME
     assert not caplog.records
     with caplog.at_level(logging.WARNING, logger="dgml_core"):
@@ -661,14 +661,14 @@ def test_a_failed_binding_call_logs_no_undefined_name_warning(
         store.update("no-such-id", extractor="Bad-Name")
 
 
-@pytest.mark.parametrize("raw", [["invoice"], {"name": "invoice"}, 3, True, "", None])
+@pytest.mark.parametrize("raw", [["contract"], {"name": "contract"}, 3, True, "", None])
 def test_docset_from_json_reads_a_non_string_extractor_as_none(raw: Any) -> None:
     """A hand-edited record cannot make the binding an unhashable or non-string
     value that later fails as an internal error."""
     ds = DocSet.from_json({"id": "d1", "name": "n", "extractor": raw})
     assert ds.extractor is None
-    assert DocSet.from_json({"id": "d1", "name": "n", "extractor": "invoice"}).extractor == (
-        "invoice"
+    assert DocSet.from_json({"id": "d1", "name": "n", "extractor": "contract"}).extractor == (
+        "contract"
     )
 
 
@@ -737,11 +737,11 @@ def test_logger_is_under_dgml_core(fake: str) -> None:
 # Validation
 # ---------------------------------------------------------------------------
 
-_INVOICE_RNC = """\
-namespace docset = "http://www.dgml.io/acme/invoices#"
+_CONTRACT_RNC = """\
+namespace docset = "http://www.dgml.io/acme/contracts#"
 
-Invoice =
-  element docset:Invoice {
+Contract =
+  element docset:Contract {
     (text | VendorName | LineItems | Kind)*
   }
 
@@ -781,9 +781,9 @@ def _loc(page: int = 1, box: list[int] | None = None) -> dict[str, Any]:
     return {"page_number": page, "bounding_box": box if box is not None else [10, 10, 50, 20]}
 
 
-def _invoice() -> dict[str, Any]:
+def _contract() -> dict[str, Any]:
     return {
-        "Invoice": {
+        "Contract": {
             "VendorName": {"text": "Acme", "locations": [_loc()]},
             "LineItems": [
                 {
@@ -805,19 +805,19 @@ def _validate(output: Any, values: dict[str, Any] | None = None, **kw: Any) -> N
         output = ExtractorOutput(values=values)
     validate_extractor_output(
         output,
-        vocab=parse_rnc(_INVOICE_RNC),
+        vocab=parse_rnc(_CONTRACT_RNC),
         page_count=kw.pop("page_count", 2),
         page_size=kw.pop("page_size", lambda _p: (100, 100)),
     )
 
 
 def test_validate_accepts_a_good_tree_and_nothing_found() -> None:
-    _validate(None, _invoice())
+    _validate(None, _contract())
     _validate(None, {})
-    _validate(None, {"Invoice": None})
+    _validate(None, {"Contract": None})
     # Unprinted values with provenance, and evidence with boxes, pass.
-    tree = _invoice()
-    tree["Invoice"]["VendorName"] = {
+    tree = _contract()
+    tree["Contract"]["VendorName"] = {
         "text": "Acme",
         "method": "inferred",
         "inputs": ["LineItems[0].Quantity=2"],
@@ -830,48 +830,51 @@ def test_validate_accepts_a_good_tree_and_nothing_found() -> None:
     ("mutate", "path"),
     [
         (lambda t: t.__setitem__("Extra", {"text": "x"}), "Extra: unknown key"),
-        (lambda t: t["Invoice"].__setitem__("Nope", {"text": "x"}), "Invoice.Nope: unknown key"),
-        (lambda t: t["Invoice"].__setitem__("VendorName", "Acme"), "Invoice.VendorName: a field"),
-        (lambda t: t["Invoice"].__setitem__("LineItems", {}), "Invoice.LineItems: a collection"),
-        (lambda t: t["Invoice"]["LineItems"].append("x"), "Invoice.LineItems[1]: an entry"),
-        (lambda t: t["Invoice"]["VendorName"].__setitem__("text", 3), "Invoice.VendorName.text"),
-        (lambda t: t["Invoice"]["VendorName"].__setitem__("value", 3), "Invoice.VendorName.value"),
-        (lambda t: t["Invoice"]["VendorName"].__setitem__("bogus", 3), "VendorName.bogus"),
-        (lambda t: t["Invoice"]["VendorName"].__setitem__("method", "guessed"), ".method"),
-        (lambda t: t["Invoice"]["VendorName"].__setitem__("inputs", []), ".inputs"),
-        (lambda t: t["Invoice"]["VendorName"].__setitem__("locations", "x"), ".locations: must"),
+        (lambda t: t["Contract"].__setitem__("Nope", {"text": "x"}), "Contract.Nope: unknown key"),
+        (lambda t: t["Contract"].__setitem__("VendorName", "Acme"), "Contract.VendorName: a field"),
+        (lambda t: t["Contract"].__setitem__("LineItems", {}), "Contract.LineItems: a collection"),
+        (lambda t: t["Contract"]["LineItems"].append("x"), "Contract.LineItems[1]: an entry"),
+        (lambda t: t["Contract"]["VendorName"].__setitem__("text", 3), "Contract.VendorName.text"),
         (
-            lambda t: t["Invoice"]["VendorName"]["locations"].append(3),
+            lambda t: t["Contract"]["VendorName"].__setitem__("value", 3),
+            "Contract.VendorName.value",
+        ),
+        (lambda t: t["Contract"]["VendorName"].__setitem__("bogus", 3), "VendorName.bogus"),
+        (lambda t: t["Contract"]["VendorName"].__setitem__("method", "guessed"), ".method"),
+        (lambda t: t["Contract"]["VendorName"].__setitem__("inputs", []), ".inputs"),
+        (lambda t: t["Contract"]["VendorName"].__setitem__("locations", "x"), ".locations: must"),
+        (
+            lambda t: t["Contract"]["VendorName"]["locations"].append(3),
             "locations[1]: must be a dict",
         ),
         (
-            lambda t: t["Invoice"]["VendorName"]["locations"].append({"page_number": 3}),
+            lambda t: t["Contract"]["VendorName"]["locations"].append({"page_number": 3}),
             "locations[1].page_number: must be an int in 1..2",
         ),
         (
-            lambda t: t["Invoice"]["VendorName"]["locations"].append({"page_number": 1}),
+            lambda t: t["Contract"]["VendorName"]["locations"].append({"page_number": 1}),
             "locations[1].bounding_box: must be four ints",
         ),
         (
-            lambda t: t["Invoice"]["VendorName"]["locations"].append(_loc(box=[10, 10, 5, 20])),
+            lambda t: t["Contract"]["VendorName"]["locations"].append(_loc(box=[10, 10, 5, 20])),
             "bounding_box: needs left < right",
         ),
         (
-            lambda t: t["Invoice"]["VendorName"]["locations"].append(_loc(box=[10, 10, 50, 120])),
+            lambda t: t["Contract"]["VendorName"]["locations"].append(_loc(box=[10, 10, 50, 120])),
             "bounding_box: outside the page",
         ),
         (
-            lambda t: t["Invoice"]["VendorName"].__setitem__("evidence", [{"text": "x"}]),
+            lambda t: t["Contract"]["VendorName"].__setitem__("evidence", [{"text": "x"}]),
             "VendorName.evidence[0]: must be {text, locations}",
         ),
         (
-            lambda t: t["Invoice"]["LineItems"][0]["Quantity"]["locations"].append(_loc(page=0)),
-            "Invoice.LineItems[0].Quantity.locations[1].page_number",
+            lambda t: t["Contract"]["LineItems"][0]["Quantity"]["locations"].append(_loc(page=0)),
+            "Contract.LineItems[0].Quantity.locations[1].page_number",
         ),
     ],
 )
 def test_validate_rejects_each_rule_with_its_path(mutate: Any, path: str) -> None:
-    tree = _invoice()
+    tree = _contract()
     mutate(tree)
     with pytest.raises(ExtractorOutputInvalid) as exc:
         _validate(None, tree)
@@ -885,12 +888,12 @@ def test_validate_rejects_non_output_and_non_dict_and_non_json() -> None:
         _validate(ExtractorOutput(values=[]))  # type: ignore[arg-type]
     with pytest.raises(ExtractorOutputInvalid, match="JSON-serializable"):
         _validate(
-            None, {"Invoice": {"VendorName": {"text": "x", "locations": [_loc()], "value": {1}}}}
+            None, {"Contract": {"VendorName": {"text": "x", "locations": [_loc()], "value": {1}}}}
         )
 
 
 def test_validate_lists_at_most_ten_problems() -> None:
-    tree = {"Invoice": {f"Bad{i}": {"text": "x"} for i in range(13)}}
+    tree = {"Contract": {f"Bad{i}": {"text": "x"} for i in range(13)}}
     with pytest.raises(ExtractorOutputInvalid) as exc:
         _validate(None, tree)
     message = str(exc.value)
@@ -899,28 +902,30 @@ def test_validate_lists_at_most_ten_problems() -> None:
 
 
 def test_validate_skips_the_box_bounds_when_the_page_size_is_unknown() -> None:
-    tree = _invoice()
-    tree["Invoice"]["VendorName"]["locations"] = [_loc(box=[10, 10, 500, 500])]
+    tree = _contract()
+    tree["Contract"]["VendorName"]["locations"] = [_loc(box=[10, 10, 500, 500])]
     _validate(None, tree, page_size=lambda _p: None)
 
 
 def test_vocabulary_problems_reports_instead_of_pruning() -> None:
-    vocab = parse_rnc(_INVOICE_RNC)
-    assert vocabulary_problems(_invoice(), vocab) == []
-    assert vocabulary_problems({"Invoice": {"Other": {}}}, vocab) == ["Invoice.Other: unknown key"]
+    vocab = parse_rnc(_CONTRACT_RNC)
+    assert vocabulary_problems(_contract(), vocab) == []
+    assert vocabulary_problems({"Contract": {"Other": {}}}, vocab) == [
+        "Contract.Other: unknown key"
+    ]
 
 
 def test_phase1_shaped_tree_fails_as_grounded_output() -> None:
     """The seam: a phase-1 tree (pages, no boxes) is not a GROUNDED output."""
     with pytest.raises(ExtractorOutputInvalid, match="bounding_box"):
         _validate(
-            None, {"Invoice": {"VendorName": {"text": "Acme", "locations": [{"page_number": 1}]}}}
+            None, {"Contract": {"VendorName": {"text": "Acme", "locations": [{"page_number": 1}]}}}
         )
 
 
 def test_output_json_round_trip() -> None:
     out = ExtractorOutput(
-        values=_invoice(), model="m", usage={"cost_usd": 0.5}, stats={"k": [1]}, tool_calls=2
+        values=_contract(), model="m", usage={"cost_usd": 0.5}, stats={"k": [1]}, tool_calls=2
     )
     assert output_from_json(output_to_json(out)) == out
     named = output_to_json(out, extractor="first")

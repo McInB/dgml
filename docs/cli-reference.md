@@ -725,7 +725,7 @@ Every DocSet payload (`create`, `show`, `update`, each entry of `list`)
 carries `extractor`, the bound name or `null`:
 
 ```json
-{"id": "o8vr8rs488vg", "name": "Invoices", "description": "", "key_questions": [], "extractor": "invoice"}
+{"id": "o8vr8rs488vg", "name": "Contracts", "description": "", "key_questions": [], "extractor": "contract"}
 ```
 
 `docset delete` removes the DocSet and its file-assignment markers, but
@@ -1697,7 +1697,7 @@ For a DocSet bound to a custom extractor, the same payload (and each per-file
 entry below) also carries the extractor's name:
 
 ```json
-  "extractor": "invoice"
+  "extractor": "contract"
 ```
 
 or `"extractor": null` for a file the extractor failed and dgml's own pipeline

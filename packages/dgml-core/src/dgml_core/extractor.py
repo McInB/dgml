@@ -43,12 +43,12 @@ Writing your own extractor
 3. Make the class importable by the interpreter running dgml.
 4. Define it under a name, and bind docsets to that name::
 
-       [extractors.invoice]
+       [extractors.contract]
        provider = "your_pkg.mod:YourExtractor"
        your_option = "…"
 
-   ``dgml docset update <docset> --extractor invoice``, or
-   ``DocSetStore(ws).update(docset_id, extractor="invoice")``.
+   ``dgml docset update <docset> --extractor contract``, or
+   ``DocSetStore(ws).update(docset_id, extractor="contract")``.
 
 An extractor that calls a model provider lists it in ``api_key_providers``;
 :func:`make_extractor` hands it that provider's ``[models] <provider>_api_key``

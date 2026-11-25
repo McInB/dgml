@@ -77,7 +77,7 @@ def test_put_replaces_not_merges(store: PostgresDocStore) -> None:
             "name": "A",
             "description": "x",
             "key_questions": ["q"],
-            "extractor": "invoice",
+            "extractor": "contract",
         },
     )
     store.put_doc(

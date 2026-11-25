@@ -734,8 +734,8 @@ the three LLM phases for the DocSets bound to that name (`docset.json`
 [custom-extractors.md](custom-extractors.md).
 
 ```toml
-[extractors.invoice]
-provider = "acme.extractors:InvoiceExtractor"
+[extractors.contract]
+provider = "acme.extractors:ContractExtractor"
 fallback = true
 max_concurrency = 5
 model = "my-model"
@@ -1012,7 +1012,7 @@ Field rules:
     "Who are the contracting parties?",
     "What is the contract term?"
   ],
-  "extractor": "invoice"
+  "extractor": "contract"
 }
 ```
 

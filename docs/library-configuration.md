@@ -23,8 +23,8 @@ cfg = Configuration.build(
         expert=Model("anthropic/claude-opus-5", api_key=secrets["opus"]),  # this tier only
     ),
     ocr=Ocr(provider="azure", options={"endpoint": tenant.di_endpoint, "api_key": secrets["azure_di"]}),
-    extractors={  # optional; docsets bind to "invoice" with DocSetStore.update(..., extractor=…)
-        "invoice": Extractor(provider="my_pkg.extractors:InvoiceExtractor", fallback=False),
+    extractors={  # optional; docsets bind to "contract" with DocSetStore.update(..., extractor=…)
+        "contract": Extractor(provider="my_pkg.extractors:ContractExtractor", fallback=False),
     },
 )
 

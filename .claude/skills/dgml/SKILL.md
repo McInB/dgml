@@ -838,7 +838,7 @@ uv run dgml extraction extract "$ds" "$fid" | jq '{mode, tool_calls, field_count
 #    extracted with that class instead of dgml's own pipeline. Bind it by name
 #    (lowercase letters, digits, single underscores), and unbind with
 #    --clear-extractor:
-uv run dgml docset update "$ds" --extractor invoice | jq .extractor
+uv run dgml docset update "$ds" --extractor contract | jq .extractor
 #    The extract payload then has `extractor`: the name of the extractor whose
 #    values were written, or null when it failed and the file went through
 #    dgml's own pipeline (the default). Pass --no-extractor-fallback to fail
